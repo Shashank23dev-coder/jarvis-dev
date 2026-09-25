@@ -163,3 +163,21 @@ Next: a candidate review UI with visible diff, test evidence, reviewer findings 
 explicit keep/discard controls. Any later apply-to-main milestone should introduce
 a separate human-approved integration operation with fresh baseline validation;
 it must not be inferred from a passing candidate.
+
+### Inspection path selection
+
+`inspect_paths` requires individual canonical, repository-relative **editable
+files**, not arbitrary readable files or directories. For a documentation task,
+use `inspect_paths: ["docs/persistence.md"]` and `targeted_tests: ["tests"]`.
+The approved `docs/*.md` / `docs/*.txt` scope includes nested documentation,
+subject to all protected-name and link checks. Root `README.md` is outside the
+editing allowlist; bare `tests` is a directory, so neither belongs in
+`inspect_paths`. Read additional context with the normal read-only tools.
+
+The live rejection for candidate `55789151-7c65-4866-8646-44908a790d14`
+was caused by `README.md` following the valid documentation path in
+`inspect_paths`; a subsequent `tests` entry was also invalid for inspection.
+`SelfEditService.start` calls `CandidatePolicy.edit_path` for each inspection
+entry and returns the generic “Protected or invalid candidate path” on the first
+denial, before Git/worktree/model/test operations. This message does not identify
+which entry failed. No policy relaxation is necessary for `docs/persistence.md`.

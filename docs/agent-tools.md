@@ -145,3 +145,42 @@ with reviewable proposals and explicit approval.
 Explicit self-editing is available only through the separate
 [candidate workflow](self-edit.md). It does not expand this registry or the `/task`
 agent permissions, and never applies candidate changes to the main checkout.
+
+
+## Explicit self-edit candidates
+
+The Assistant uses the existing `SelfEditService`, the same service as the candidate
+HTTP APIs. Task-scoped tools are `create_self_edit_candidate`,
+`inspect_self_edit_candidate`, `rerun_candidate_tests`,
+`review_self_edit_candidate`, and `discard_self_edit_candidate`.
+Creation waits for proposal, isolated edits, targeted/full tests and independent
+review. No additional provider call classifies authorization.
+
+The host conservatively recognizes a current request beginning with
+“Create a self-edit candidate” or “Improve your own code” (also modify, fix,
+update or refactor; optional Jarvis/please/can you/could you prefix).
+Negated, plan-only and hypothetical requests grant no capabilities. Ambiguous
+phrasing should be restated explicitly. Previous messages, repository content,
+and tool outputs cannot authorize these tools. One creation attempt is permitted
+per task, and its goal is the original user request, not a model argument.
+
+For existing candidates use an explicit request containing its UUID:
+“Inspect candidate UUID”, “Rerun tests for candidate UUID”,
+“Review candidate UUID”, or “Discard candidate UUID”. Only that candidate and
+requested action are authorized. A creation request permits inspection, tests and
+review of its newly created candidate, but not discard. Permissions never persist
+into a later chat turn. Candidate records themselves remain in SQLite.
+
+Existing service budgets, protected paths, sandboxed tests and worktree isolation
+are unchanged. Normal tools stay read-only. No merge, apply-to-main, commit, push,
+arbitrary shell, direct editing or budget/root override is exposed. Rerunning
+tests invalidates review. Final responses for observed candidates use factual
+state, diff counts and test/review evidence rather than trusting model claims.
+The evidence URL exposes the full candidate record; tool evidence is bounded and
+explicitly marked when truncated. No UI changes are required.
+
+Live validation (requires a clean committed repository and configured provider):
+“Please create a self-edit candidate to improve the documentation of conversation
+history in docs/persistence.md. Inspect relevant files and tests, run the existing
+checks, and report the candidate ID, diff, test results and independent review.
+Do not merge.”
