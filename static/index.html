@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>Jarvis</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family:
+        Inter,
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+      background:
+        radial-gradient(circle at top, #151b2c 0%, #090b10 45%, #050608 100%);
+
+      color: #f5f7fb;
+      min-height: 100vh;
+    }
+
+    .layout {
+      display: flex;
+      min-height: 100vh;
+    }
+
+    /* SIDEBAR */
+
+    .sidebar {
+      width: 240px;
+      border-right: 1px solid rgba(255,255,255,0.08);
+      background: rgba(8,10,15,0.72);
+      backdrop-filter: blur(18px);
+      padding: 24px 18px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 34px;
+    }
+
+    .logo {
+      height: 38px;
+      width: 38px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+
+      background:
+        radial-gradient(circle, #75a7ff 0%, #3d63d8 40%, #172449 100%);
+
+      box-shadow:
+        0 0 24px rgba(93,137,255,0.35);
+
+      font-weight: 700;
+    }
+
+    .brand-name {
+      font-size: 19px;
+      font-weight: 650;
+    }
+
+    .nav-label {
+      color: #707889;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.3px;
+      margin: 20px 8px 10px;
+    }
+
+    .nav-item {
+      padding: 11px 12px;
+      border-radius: 9px;
+      color: #aab1bf;
+      margin-bottom: 4px;
+      cursor: pointer;
+      transition: 0.15s ease;
+    }
+
+    .nav-item:hover {
+      background: rgba(255,255,255,0.05);
+      color: white;
+    }
+
+    .nav-item.active {
+      background: rgba(87,123,255,0.12);
+      color: #dce6ff;
+    }
+
+    .sidebar-bottom {
+      margin-top: auto;
+    }
+
+    .system-box {
+      padding: 13px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.035);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: #8d95a5;
+      font-size: 12px;
+    }
+
+    .online-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #4ade80;
+      margin-right: 7px;
+      box-shadow: 0 0 8px #4ade80;
+    }
+
+    /* MAIN */
+
+    .main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .topbar {
+      height: 72px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 32px;
+    }
+
+    .status-title {
+      font-size: 14px;
+      color: #9ba4b4;
+    }
+
+    .status-value {
+      font-size: 13px;
+      color: #d8deea;
+    }
+
+    .workspace {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      max-width: 1000px;
+      width: 100%;
+      margin: auto;
+      padding: 35px 28px 24px;
+    }
+
+    /* EMPTY STATE */
+
+    .welcome {
+      text-align: center;
+      margin-top: 85px;
+      margin-bottom: 42px;
+    }
+
+    .orb {
+      height: 76px;
+      width: 76px;
+      margin: auto;
+      border-radius: 50%;
+
+      background:
+        radial-gradient(circle at 35% 30%, #c9e0ff 0%, #75a8ff 15%, #375ed8 50%, #152149 100%);
+
+      box-shadow:
+        0 0 30px rgba(84,127,255,0.45),
+        0 0 75px rgba(84,127,255,0.13);
+
+      animation: pulse 3s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%, 100% {
+        transform: scale(1);
+        box-shadow:
+          0 0 30px rgba(84,127,255,0.4),
+          0 0 75px rgba(84,127,255,0.12);
+      }
+
+      50% {
+        transform: scale(1.04);
+        box-shadow:
+          0 0 40px rgba(84,127,255,0.58),
+          0 0 95px rgba(84,127,255,0.18);
+      }
+    }
+
+    .welcome h1 {
+      margin: 24px 0 8px;
+      font-size: 32px;
+      font-weight: 550;
+    }
+
+    .welcome p {
+      margin: 0;
+      color: #8e97a7;
+      font-size: 15px;
+    }
+
+    /* CHAT */
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding-bottom: 20px;
+    }
+
+    .message-row {
+      display: flex;
+      margin: 17px 0;
+    }
+
+    .message-row.user-row {
+      justify-content: flex-end;
+    }
+
+    .message {
+      max-width: 76%;
+      padding: 14px 16px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      border-radius: 14px;
+      font-size: 14px;
+    }
+
+    .user-message {
+      background: #3559d7;
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+
+    .jarvis-message {
+      background: rgba(255,255,255,0.045);
+      border: 1px solid rgba(255,255,255,0.07);
+      color: #e2e7ef;
+      border-bottom-left-radius: 4px;
+    }
+
+    /* COMPOSER */
+
+    .composer-wrapper {
+      margin-top: auto;
+      padding-top: 16px;
+    }
+
+    .composer {
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(16,19,27,0.90);
+      border-radius: 18px;
+      padding: 13px;
+      box-shadow:
+        0 16px 45px rgba(0,0,0,0.28);
+
+      transition: 0.2s;
+    }
+
+    .composer:focus-within {
+      border-color: rgba(100,139,255,0.45);
+      box-shadow:
+        0 16px 45px rgba(0,0,0,0.28),
+        0 0 0 3px rgba(80,120,255,0.06);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 65px;
+      max-height: 180px;
+      resize: none;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: white;
+      font-size: 15px;
+      padding: 5px;
+      font-family: inherit;
+    }
+
+    textarea::placeholder {
+      color: #687082;
+    }
+
+    .composer-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 8px;
+    }
+
+    .left-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .small-button {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.08);
+      color: #8992a4;
+      border-radius: 8px;
+      padding: 7px 10px;
+      cursor: pointer;
+    }
+
+    .send-button {
+      background: #5678f5;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      height: 38px;
+      padding: 0 18px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .send-button:hover {
+      background: #6485ff;
+    }
+
+    .send-button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .footer-text {
+      text-align: center;
+      color: #525969;
+      font-size: 11px;
+      margin-top: 11px;
+    }
+
+    /* Workspace views share the existing Jarvis palette and spacing. */
+    [hidden] { display: none !important; }
+    .nav-item { border: 0; background: transparent; font: inherit; text-align: left; width: 100%; }
+    button:focus-visible, select:focus-visible { outline: 2px solid #75a7ff; outline-offset: 3px; }
+    .view-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 28px; }
+    .view-header h1 { margin: 0 0 8px; font-size: 28px; font-weight: 550; }
+    .view-header p, .view-state p, .card-meta { color: #8e97a7; font-size: 14px; line-height: 1.55; }
+    .view-header p { margin: 0; }
+    .view-state, .data-card { background: rgba(255,255,255,0.035); border: 1px solid rgba(255,255,255,0.07); border-radius: 14px; padding: 24px; }
+    .view-state { text-align: center; margin-top: 32px; padding: 48px 24px; }
+    .view-state h2 { font-size: 20px; font-weight: 550; margin: 18px 0 8px; }
+    .view-state p { max-width: 460px; margin: 0 auto; }
+    .view-state .small-button { margin-top: 20px; }
+    .state-symbol { width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center; margin: auto; color: #a9c3ff; background: rgba(87,123,255,0.12); font-size: 22px; }
+    .data-list { display: grid; gap: 14px; }
+    .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .data-card h2 { font-size: 16px; font-weight: 550; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .card-meta { margin: 12px 0 0; overflow-wrap: anywhere; }
+    .badge { display: inline-block; border-radius: 6px; background: rgba(87,123,255,0.12); color: #b7caff; padding: 4px 8px; font-size: 12px; white-space: nowrap; }
+    .badge.error, .badge.failed { color: #fca5a5; background: rgba(248,113,113,0.10); }
+    .data-card details { margin-top: 18px; font-size: 14px; color: #aab1bf; }
+    .data-card summary { cursor: pointer; }
+    .data-card ol { padding-left: 22px; line-height: 1.7; overflow-wrap: anywhere; }
+    .mobile-nav { display: none; background: #10131b; border: 1px solid rgba(255,255,255,0.10); color: #d8deea; border-radius: 8px; padding: 7px; font: inherit; }
+
+    /* MOBILE */
+
+    @media(max-width: 800px) {
+      .sidebar {
+        display: none;
+      }
+
+      .mobile-nav { display: block; }
+
+      .workspace {
+        padding: 20px 16px;
+      }
+
+      .topbar {
+        padding: 0 18px;
+      }
+
+      .message {
+        max-width: 90%;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="layout">
+
+  <aside class="sidebar">
+
+    <div class="brand">
+      <div class="logo">J</div>
+      <div class="brand-name">Jarvis</div>
+    </div>
+
+    <div class="nav-label">Workspace</div>
+
+    <button type="button" class="nav-item active" data-view="assistant" aria-controls="assistantView" aria-current="page">
+      Assistant
+    </button>
+
+    <button type="button" class="nav-item" data-view="tasks" aria-controls="tasksView">
+      Tasks
+    </button>
+
+    <button type="button" class="nav-item" data-view="memory" aria-controls="memoryView">
+      Memory
+    </button>
+
+    <div class="nav-label">Systems</div>
+
+    <button type="button" class="nav-item" data-view="agents" aria-controls="agentsView">
+      Agents
+    </button>
+
+    <button type="button" class="nav-item" data-view="tools" aria-controls="toolsView">
+      Tools
+    </button>
+
+    <button type="button" class="nav-item" data-view="activity" aria-controls="activityView">
+      Activity
+    </button>
+
+    <div class="sidebar-bottom">
+
+      <div class="system-box">
+        <span class="online-dot"></span>
+        Jarvis Core Online
+      </div>
+
+    </div>
+
+  </aside>
+
+
+  <main class="main">
+
+    <div class="topbar">
+
+      <div class="status-title">
+        JARVIS
+      </div>
+
+      <select id="mobileNav" class="mobile-nav" aria-label="Workspace view">
+        <option value="assistant">Assistant</option>
+        <option value="tasks">Tasks</option>
+        <option value="memory">Memory</option>
+        <option value="agents">Agents</option>
+        <option value="tools">Tools</option>
+        <option value="activity">Activity</option>
+      </select>
+
+      <div class="status-value">
+        Local Development
+      </div>
+
+    </div>
+
+
+    <section id="assistantView" class="workspace" aria-label="Assistant">
+
+      <div id="welcome" class="welcome">
+
+        <div class="orb"></div>
+
+        <h1>Good evening, Shashank.</h1>
+
+        <p>
+          What would you like me to work on?
+        </p>
+
+      </div>
+
+
+      <div id="messages" role="log" aria-label="Conversation" aria-live="polite"></div>
+
+
+      <div class="composer-wrapper">
+
+        <div class="composer">
+
+          <textarea
+            id="prompt"
+            aria-label="Message Jarvis"
+            placeholder="Message Jarvis..."
+          ></textarea>
+
+          <div class="composer-actions">
+
+            <div class="left-actions">
+
+              <button
+                class="small-button"
+                type="button"
+                title="Attachments will be added later"
+              >
+                +
+              </button>
+
+              <button
+                class="small-button"
+                type="button"
+                title="Voice will be added later"
+              >
+                ◉
+              </button>
+
+            </div>
+
+            <button
+              id="sendBtn"
+              class="send-button"
+              onclick="sendTask()"
+            >
+              Send
+            </button>
+
+          </div>
+
+        </div>
+
+        <div class="footer-text">
+          Jarvis is under active development.
+        </div>
+
+      </div>
+
+    </section>
+
+    <section id="tasksView" class="workspace" aria-labelledby="tasksTitle" hidden>
+      <div class="view-header">
+        <div><h1 id="tasksTitle">Tasks</h1><p>Plans and progress from your conversations with Jarvis.</p></div>
+        <button type="button" class="small-button" data-refresh="tasks">Refresh</button>
+      </div>
+      <div id="tasksContent" aria-live="polite"></div>
+    </section>
+
+    <section id="memoryView" class="workspace" aria-labelledby="memoryTitle" hidden>
+      <div class="view-header">
+        <div><h1 id="memoryTitle">Memory</h1><p>A dedicated space for what Jarvis will remember.</p></div>
+      </div>
+      <div class="view-state">
+        <div class="state-symbol" aria-hidden="true">◇</div>
+        <h2>Memory, coming soon</h2>
+        <p>Saved context and preferences will appear here when memory is available. For now, keep sharing your goals in Assistant.</p>
+        <button type="button" class="small-button" data-open-assistant>Back to Assistant</button>
+      </div>
+    </section>
+
+    <section id="agentsView" class="workspace" aria-labelledby="agentsTitle" hidden>
+      <div class="view-header">
+        <div><h1 id="agentsTitle">Agents</h1><p>A workspace for your future specialist agents.</p></div>
+      </div>
+      <div class="view-state">
+        <div class="state-symbol" aria-hidden="true">◎</div>
+        <h2>Agents, coming soon</h2>
+        <p>Agent management is coming in a future milestone. You can already review the suggested agent assignments in your task plans.</p>
+        <button type="button" class="small-button" data-open-assistant>Back to Assistant</button>
+      </div>
+    </section>
+
+    <section id="toolsView" class="workspace" aria-labelledby="toolsTitle" hidden>
+      <div class="view-header">
+        <div><h1 id="toolsTitle">Tools</h1><p>A home for the capabilities Jarvis will use.</p></div>
+      </div>
+      <div class="view-state">
+        <div class="state-symbol" aria-hidden="true">⌘</div>
+        <h2>Tools, coming soon</h2>
+        <p>Tool management is coming in a future milestone. Jarvis currently creates plans; connected capabilities will appear here later.</p>
+        <button type="button" class="small-button" data-open-assistant>Back to Assistant</button>
+      </div>
+    </section>
+
+    <section id="activityView" class="workspace" aria-labelledby="activityTitle" hidden>
+      <div class="view-header">
+        <div><h1 id="activityTitle">Activity</h1><p>The latest events across your tasks.</p></div>
+        <button type="button" class="small-button" data-refresh="activity">Refresh</button>
+      </div>
+      <div id="activityContent" aria-live="polite"></div>
+    </section>
+
+  </main>
+
+</div>
+
+
+<script>
+const promptBox = document.getElementById("prompt");
+const sendBtn = document.getElementById("sendBtn");
+const messages = document.getElementById("messages");
+const welcome = document.getElementById("welcome");
+const viewNames = ["assistant", "tasks", "memory", "agents", "tools", "activity"];
+const requests = {};
+let activeView = "assistant";
+let conversationId = null;
+try { conversationId = localStorage.getItem("jarvis.conversationId"); } catch (_) {}
+
+function rememberConversation(id) {
+    conversationId = id;
+    try {
+        if (id) localStorage.setItem("jarvis.conversationId", id);
+        else localStorage.removeItem("jarvis.conversationId");
+    } catch (_) {}
+}
+
+async function restoreConversation() {
+    if (!conversationId) return;
+    sendBtn.disabled = true;
+    try {
+        const response = await fetch("/conversations/" + encodeURIComponent(conversationId) + "/messages", { cache: "no-store" });
+        if (response.status === 404) { rememberConversation(null); return; }
+        if (!response.ok) return;
+        const data = await response.json();
+        if (Array.isArray(data.messages)) data.messages.forEach(message => addMessage(message.role, message.content));
+    } catch (_) {
+        // Keep the ID so a temporary outage cannot silently split the conversation.
+    } finally { sendBtn.disabled = false; }
+}
+
+function showView(name) {
+    if (!viewNames.includes(name)) return;
+    activeView = name;
+    viewNames.forEach(view => {
+        document.getElementById(view + "View").hidden = view !== name;
+    });
+    document.querySelectorAll("[data-view]").forEach(button => {
+        const selected = button.dataset.view === name;
+        button.classList.toggle("active", selected);
+        if (selected) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+    });
+    document.getElementById("mobileNav").value = name;
+    if (name === "tasks" || name === "activity") loadView(name);
+}
+
+function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+}
+
+function state(content, title, description, retry) {
+    const panel = element("div", "view-state");
+    panel.append(element("h2", "", title), element("p", "", description));
+    if (retry) {
+        const button = element("button", "small-button", "Try again");
+        button.type = "button";
+        button.addEventListener("click", retry);
+        panel.append(button);
+    }
+    content.replaceChildren(panel);
+}
+
+function timestamp(value) {
+    if (!value) return "Time unavailable";
+    // The existing backend stores UTC timestamps without a timezone suffix.
+    const date = new Date(/(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : value + "Z");
+    return Number.isNaN(date.getTime()) ? "Time unavailable" : date.toLocaleString();
+}
+
+function dataCard(title, status) {
+    const card = element("article", "data-card");
+    const heading = element("div", "card-heading");
+    const badge = element("span", "badge", status || "unknown");
+    if (status === "failed" || status === "error") badge.classList.add(status);
+    heading.append(element("h2", "", title), badge);
+    card.append(heading);
+    return card;
+}
+
+function taskCard(task) {
+    const card = dataCard(task.goal, task.status);
+    card.append(element("p", "card-meta", "Created " + timestamp(task.created_at)));
+    const steps = Array.isArray(task.steps) ? task.steps : [];
+    if (steps.length) {
+        const details = element("details");
+        details.append(element("summary", "", steps.length + " planned steps"));
+        const list = element("ol");
+        steps.forEach(step => list.append(element("li", "", step.description + (step.agent ? " [" + step.agent + "]" : ""))));
+        details.append(list);
+        card.append(details);
+    } else {
+        card.append(element("p", "card-meta", task.status === "failed" ? "Planning failed. See Activity for details." : "No planned steps yet."));
+    }
+    return card;
+}
+
+function activityCard(event) {
+    const card = dataCard(event.message, event.type);
+    card.append(element("p", "card-meta", event.goal), element("p", "card-meta", timestamp(event.timestamp)));
+    return card;
+}
+
+async function loadView(name) {
+    if (requests[name]) requests[name].abort();
+    const controller = new AbortController();
+    requests[name] = controller;
+    const content = document.getElementById(name + "Content");
+    content.setAttribute("aria-busy", "true");
+    state(content, "Loading " + name + "…", "Fetching the latest from Jarvis.");
+    try {
+        const response = await fetch("/" + name, { signal: controller.signal, cache: "no-store" });
+        if (!response.ok) throw new Error("Request failed");
+        const data = await response.json();
+        if (!Array.isArray(data[name])) throw new Error("Unexpected response");
+        if (requests[name] !== controller) return;
+        if (!data[name].length) {
+            state(content, name === "tasks" ? "No tasks yet" : "No activity yet", "Send a goal in Assistant to create your first task and follow its progress here.");
+            return;
+        }
+        const list = element("div", "data-list");
+        const items = [...data[name]];
+        if (name === "tasks") items.sort((a, b) => b.created_at.localeCompare(a.created_at));
+        items.forEach(item => list.append(name === "tasks" ? taskCard(item) : activityCard(item)));
+        content.replaceChildren(list);
+    } catch (error) {
+        if (controller.signal.aborted) return;
+        state(content, "Unable to load " + name, "Check your connection to Jarvis and try again.", () => loadView(name));
+    } finally {
+        if (requests[name] === controller) {
+            content.removeAttribute("aria-busy");
+            delete requests[name];
+        }
+    }
+}
+
+function addMessage(role, text) {
+    welcome.style.display = "none";
+    const row = element("div", role === "user" ? "message-row user-row" : "message-row");
+    const message = element("div", role === "user" ? "message user-message" : "message jarvis-message", text);
+    row.append(message);
+    messages.append(row);
+    messages.scrollTop = messages.scrollHeight;
+    return message;
+}
+
+async function sendTask() {
+    const goal = promptBox.value.trim();
+    if (!goal || sendBtn.disabled) return;
+    addMessage("user", goal);
+    promptBox.value = "";
+    sendBtn.disabled = true;
+    const waiting = addMessage("jarvis", "Thinking...");
+    try {
+        const response = await fetch("/task", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ goal, mode: "agent", ...(conversationId ? { conversation_id: conversationId } : {}) })
+        });
+        const data = await response.json();
+        const id = data.conversation_id || response.headers?.get("X-Conversation-ID");
+        if (id) rememberConversation(id);
+        waiting.textContent = response.ok ? formatPlan(data.plan || data) : (typeof data.detail === "string" ? data.detail : "Something went wrong.");
+    } catch (error) {
+        waiting.textContent = "Unable to reach Jarvis backend.";
+    } finally {
+        sendBtn.disabled = false;
+        if (activeView === "assistant") {
+            messages.scrollTop = messages.scrollHeight;
+            promptBox.focus();
+        }
+        if (activeView === "tasks" || activeView === "activity") loadView(activeView);
+    }
+}
+
+function formatPlan(plan) {
+    if (typeof plan.response === "string") return plan.response;
+    if (!Array.isArray(plan.steps)) return JSON.stringify(plan, null, 2);
+    let result = plan.goal ? "Goal: " + plan.goal + "\n\n" : "";
+    plan.steps.forEach(step => {
+        result += step.id + ". " + step.description + (step.agent ? " [" + step.agent + "]" : "") + "\n";
+    });
+    return result;
+}
+
+document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => showView(button.dataset.view)));
+document.querySelectorAll("[data-refresh]").forEach(button => button.addEventListener("click", () => loadView(button.dataset.refresh)));
+document.querySelectorAll("[data-open-assistant]").forEach(button => button.addEventListener("click", () => showView("assistant")));
+document.getElementById("mobileNav").addEventListener("change", event => showView(event.target.value));
+promptBox.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        sendTask();
+    }
+});
+restoreConversation();
+</script>
+
+</body>
+</html>

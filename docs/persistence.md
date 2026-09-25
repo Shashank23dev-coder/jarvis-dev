@@ -1,0 +1,115 @@
+# Conversations, tasks and memory
+
+Jarvis uses SQLite for local persistence. The default application stores data at
+`~/.local/state/jarvis/jarvis.sqlite3`. Set `JARVIS_DB_PATH` to an absolute path
+outside the checkout to choose another location. The directory is created on
+startup. Database paths inside the checkout are rejected so private conversations
+and memories cannot enter repository listings or Bubblewrap snapshots. Keep custom
+locations outside the Python runtime and system directories mounted by Bubblewrap,
+too. Configuration belongs to the host; it is never a model or HTTP argument.
+
+`main.create_app(database_path)` creates an independent app and store. Startup
+initializes the database, and shutdown closes it. Imports do not open a database.
+For isolated Python callers/tests, `TaskStore()` uses SQLite `:memory:`;
+`TaskStore(path)` provides durability. Call `close()` when finished. The former
+in-memory store had no saved records to migrate. Existing live process data must
+be exported before upgrading if it needs to be retained.
+
+## API
+
+Existing `/task`, `/tasks`, `/tasks/{id}`, `/activity`, `/health`, and `/` routes
+retain their response contracts. Tasks add `conversation_id`. Submitting
+`POST /task` without that field creates a new conversation; supplying an existing
+ID continues that conversation. The agent receives its ordered user/assistant
+history through the current task, subject to the existing context-size limit.
+Other conversations, durable memories, tool outputs, and model reasoning are not
+silently inserted into that context. Planning mode still returns its usual steps.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /conversations` | Create an empty conversation; no body required |
+| `GET /conversations` | List conversation IDs and creation timestamps |
+| `GET /conversations/{id}` | Retrieve conversation metadata |
+| `GET /conversations/{id}/messages` | Retrieve messages in insertion order |
+| `POST /memories` | Explicitly save `{scope, scope_id, content}` |
+| `GET /memories?scope=user&scope_id=local` | List explicitly saved memories for one scope |
+| `GET /memories/{id}` | Read a saved memory |
+| `DELETE /memories/{id}` | Delete a saved memory; return `{deleted: true}` |
+
+Memory scope is `user` or `project`; `scope_id` identifies the user/project in
+this local application. It is a namespace, not an authentication boundary.
+Missing/invalid resource IDs return 404; malformed payloads return 422. Memory
+payloads reject unknown fields. Blank text, NULs and oversized text are rejected.
+Task goals and memory content are limited to 32,000 characters; scope IDs to 200.
+UTC timestamp formatting remains compatible with the previous API.
+
+The existing browser layout and styling are unchanged. JavaScript retains the
+conversation ID in local storage, sends it on subsequent requests, and restores
+saved messages after reload. It stores only the ID locally. Agent failures return
+an `X-Conversation-ID` header so a first failed request can still be revisited.
+Conversation selection and memory management UI are intentionally deferred.
+
+## Schema and writes
+
+Schema version 2 is recorded in SQLite `PRAGMA user_version`. Initialization runs
+inside `BEGIN IMMEDIATE`, creates/migrates the schema, and is safe to repeat or run
+concurrently. A newer, unsupported schema version fails explicitly. Foreign keys
+are enabled on every connection; all statements use parameterized values.
+Transactions commit each store operation, serialize access to each connection,
+and use SQLite's lock timeout across connections/processes.
+
+| Table | Stored data |
+| --- | --- |
+| `conversations` | UUID primary key, creation timestamp |
+| `messages` | Monotonic sequence, UUID, conversation/task foreign keys, role, content, timestamp |
+| `tasks` | UUID, conversation foreign key, goal, status, creation time, steps JSON, response, agent metadata JSON |
+| `activity` | Monotonic sequence, task foreign key, existing event JSON including timestamps and tool metadata |
+| `memories` | UUID, user/project scope, scope ID, content, creation timestamp |
+| `candidates`, `candidate_events` | Isolated self-edit attempts, evidence, limits and ordered stage history; see [self-edit.md](self-edit.md) |
+
+Messages are indexed by conversation and sequence; activity by task and sequence;
+memories by scope and scope ID. A unique task/role pair prevents duplicate user or
+assistant records for one task. User message, new conversation (if needed), task,
+and initial activity are committed together. Agent response/status/metadata and
+assistant message are committed together. Store methods refresh compatible task
+dictionary views, but callers must use `update_task` to persist changes; mutating
+returned dictionaries directly is not a persistence interface.
+
+## Three memory categories
+
+`MemoryStore` exposes `conversation_history`, `task_history` (including activity),
+and explicit `create_memory`, `get_memory`, `list_memories`, `delete_memory`.
+
+Conversation history records what was said. Task/activity history records what
+Jarvis attempted and its outcomes. Durable user/project memories contain only
+facts or preferences deliberately saved through the explicit memory interface.
+No automatic extraction or promotion occurs. No memory mutation tools have been
+added to the agent registry.
+
+Conversations, messages, task status/steps/responses, safe tool activity and explicit
+memories survive restarts. Tool events continue to contain metadata only: no raw
+arguments, file content, command output, exception details or reasoning. Existing
+legacy planning errors retain their prior API behavior. Protected paths, tool
+allowlists, bounds, and read-only Bubblewrap execution are unchanged.
+
+## Limits and next milestone
+
+This remains a local, single-user synchronous application. There are no embeddings,
+semantic search, automatic long-term memory extraction, automatic memory injection,
+background job recovery or resumed tool calls. Explicit isolated self-edit candidates
+are now available through a separate [controlled workflow](self-edit.md); the normal
+chat tools remain read-only. Interrupted tasks retain their last committed status; a restart does
+not resume them. Concurrent conversation requests are ordered by stored message
+sequence, without a conversation-level execution queue. History pagination,
+retention/export controls, authentication and multi-user authorization are deferred.
+Deletion removes a memory from the application, not a forensic secure erase or
+backup deletion.
+
+Recommended next milestone: explicit conversation selection and memory review/
+delete controls using these APIs, plus history pagination and retention/export.
+Main-tree editing remains disabled; candidate changes require a separate future
+human-approved integration workflow before they can reach the main checkout.
+
+Run the complete Python suite through `RepositoryTools().run_pytest()` on a host
+that permits Bubblewrap, and run `node --test tests/ui.test.cjs` for the UI. Tests
+use temporary databases, scripted models and no provider calls.
