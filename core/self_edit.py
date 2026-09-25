@@ -17,7 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .candidate_store import CandidateStore
-from .database import Database, text_value, valid_id
+from .database import Database, text_value, valid_id, timestamp
 from tools.candidate_edit import CandidateEditor, CandidatePolicy, digest, safe_text, scan
 from tools.policy import ToolDenied, ToolError
 from tools.repository import RepositoryTools
@@ -333,7 +333,9 @@ class SelfEditService:
         text_value(review.summary, 4000)
         if fingerprint != self._diff():
             raise ToolDenied('Candidate changed during review')
-        self.record.update(state=review.verdict, reviewer_result=review.model_dump())
+        self.record.update(state=review.verdict, reviewer_result=review.model_dump(),
+                           reviewed_at=timestamp(), reviewed_fingerprint=fingerprint,
+                           reviewed_diff_hash=digest(self.record['diff'].encode()))
         self.store.save(self.record, 'review_finished')
 
     def _work(self, candidate_id, action):
@@ -407,6 +409,8 @@ class SelfEditService:
         existing = self.store.get(candidate_id)
         if existing is None or (action != 'discard' and existing['state'] in {'discarded', 'rejected'}):
             raise ValueError('Candidate is unavailable for this operation')
+        if existing.get('apply', {}).get('status') in {'applying', 'verifying', 'committing', 'rolling_back', 'rollback_failed'}:
+            raise ValueError('Resolve the pending apply before other candidate operations')
         if existing.get('source_root', str(self.source)) != str(self.source) and action != 'discard':
             raise ValueError('Candidate belongs to another source checkout')
         self.store.claim(candidate_id)

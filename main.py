@@ -285,4 +285,29 @@ def discard_candidate(candidate_id: str, service: SelfEditService = Depends(get_
     return candidate_action(service, candidate_id, service.discard)
 
 
+class ApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    confirmation: str = Field(min_length=1, max_length=200)
+
+
+@router.get("/candidates/{candidate_id}/apply/preview")
+def preview_candidate_apply(candidate_id: str, service: SelfEditService = Depends(get_self_edit)):
+    from core.candidate_apply import CandidateApply
+    return candidate_action(service, candidate_id, CandidateApply(service).preview)
+
+
+@router.post("/candidates/{candidate_id}/apply")
+def apply_candidate(candidate_id: str, request: ApplyRequest,
+                    service: SelfEditService = Depends(get_self_edit)):
+    from core.candidate_apply import CandidateApply
+    return candidate_action(service, candidate_id,
+                            lambda identifier: CandidateApply(service).apply(identifier, request.confirmation))
+
+
+@router.get("/candidates/{candidate_id}/apply")
+def inspect_candidate_apply(candidate_id: str, service: SelfEditService = Depends(get_self_edit)):
+    from core.candidate_apply import CandidateApply
+    return candidate_action(service, candidate_id, CandidateApply(service).inspect)
+
+
 app.include_router(router)

@@ -172,8 +172,12 @@ review of its newly created candidate, but not discard. Permissions never persis
 into a later chat turn. Candidate records themselves remain in SQLite.
 
 Existing service budgets, protected paths, sandboxed tests and worktree isolation
-are unchanged. Normal tools stay read-only. No merge, apply-to-main, commit, push,
-arbitrary shell, direct editing or budget/root override is exposed. Rerunning
+are unchanged. Normal tools stay read-only. No push, arbitrary shell, direct
+editing or budget/root override is exposed. A separate current request of
+`Approve and apply candidate <UUID> to main` enables only that UUID through
+`approve_and_apply_candidate`; it applies the reviewed patch, verifies it in the
+sandbox, then commits locally or rolls back. See self-edit.md for eligibility,
+audit and recovery APIs. Rerunning
 tests invalidates review. Final responses for observed candidates use factual
 state, diff counts and test/review evidence rather than trusting model claims.
 The evidence URL exposes the full candidate record; tool evidence is bounded and

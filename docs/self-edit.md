@@ -1,7 +1,8 @@
 # Controlled self-edit candidates
 
-Self-editing is an explicit workflow, separate from the read-only `/task` agent.
-It never merges, commits, pushes, edits the source working tree, or exposes a shell.
+Candidate generation is isolated and never modifies the source checkout.
+A separate human-approved apply operation can change main and create a local
+commit after verification. No operation pushes or exposes a shell.
 The existing UI and its appearance are unchanged.
 
 ## Preconditions and isolation
@@ -21,7 +22,7 @@ Candidate checkout configuration is not copied from the source repository.
 Default storage is `candidates/<UUID>/` beside the configured SQLite database:
 `repository.git/` contains private Git metadata and `worktree/` contains the code.
 These locations must be outside the source checkout and cannot be symlinked.
-Code writes happen only in the candidate worktree; administrative writes are
+During candidate generation, code writes happen only in the candidate worktree; administrative writes are
 limited to private candidate storage, SQLite records and isolated test scratch.
 Candidates remain on disk until explicitly discarded, including useful failures.
 
@@ -61,7 +62,7 @@ These are local application APIs, not a multi-user authorization boundary.
 Unknown/invalid IDs return 404; malformed requests return 422; busy, discarded or
 terminally rejected candidates cannot be tested/reviewed and return 409. Starting
 a well-formed attempt returns its record even when a safety or test gate fails.
-Discard is idempotent. There is no merge, commit, push or apply-to-main endpoint.
+Discard is idempotent. Human-approved application uses the separate interfaces below.
 
 Python host interfaces are `SelfEditService` and `CandidateStore`. The scoped
 `CandidateEditor.apply` tool accepts validated `{path, content}` replacements;
@@ -160,9 +161,8 @@ worker/descendant timeouts, cleanup, API validation, migration and restart recov
 Provider calls are scripted; no paid model requests are made by the test suite.
 
 Next: a candidate review UI with visible diff, test evidence, reviewer findings and
-explicit keep/discard controls. Any later apply-to-main milestone should introduce
-a separate human-approved integration operation with fresh baseline validation;
-it must not be inferred from a passing candidate.
+explicit keep/discard controls and a preview of apply eligibility and audit.
+A passing candidate never implies approval to apply.
 
 ### Inspection path selection
 
@@ -181,3 +181,66 @@ was caused by `README.md` following the valid documentation path in
 entry and returns the generic “Protected or invalid candidate path” on the first
 denial, before Git/worktree/model/test operations. This message does not identify
 which entry failed. No policy relaxation is necessary for `docs/persistence.md`.
+
+
+## Human-approved application
+
+Only the exact current request `Approve and apply candidate <UUID> to main`
+(optionally prefixed with Please) authorizes `approve_and_apply_candidate` in
+Assistant. The tool accepts only `candidate_id`; its confirmation comes from the
+current host-supplied user request. Prior conversation, model arguments, file
+content, “continue”, and “looks good” grant no authority.
+
+- `GET /candidates/{UUID}/apply/preview`: eligibility and required confirmation.
+- `POST /candidates/{UUID}/apply`: JSON `{"confirmation": "Approve and apply candidate <UUID> to main"}`.
+- `GET /candidates/{UUID}/apply`: durable result and audit; also reconciles an
+  interrupted apply while holding the exclusive source lock.
+
+These retain the existing local trusted-user API model; they do not introduce
+multi-user authentication. Invalid UUIDs are unavailable, malformed data is
+rejected, and invalid confirmation is denied. Eligibility failures return a
+persisted `denied` audit. Duplicate requests return the recorded result and never
+apply twice. A denied or rolled-back attempt requires a new candidate.
+
+A passed candidate must have complete targeted/full Python and available UI test
+evidence, matching fingerprint, and a passing review sealed to its exact diff.
+Reviews expire after 24 hours. Older records without review seals require fresh
+review. The source checkout must be clean, on a local branch, at the original
+base commit. Drift requires a new candidate; this flow never rebases or stashes.
+Protected paths, worktree manifests, symlinks, file/line limits and remaining
+candidate tool/time budgets are rechecked. Preview also consumes bounded Git/diff
+checks from that budget. No schema migration is needed: review seals and apply
+journals extend the existing candidate JSON records in SQLite schema version 2.
+
+The service serializes applies per source checkout with an OS file lock. It
+journals the approved patch before `git apply --index`, validates exact changed
+paths, bytes and modes, then runs targeted checks, full Python and available UI
+checks in the existing read-only, network-isolated Bubblewrap sandbox. It checks
+the index tree, working tree, branch and HEAD again. Only then does fixed
+`commit-tree` create a local commit with message `Jarvis: apply candidate <UUID>`;
+`update-ref` advances the branch using the expected baseline as a compare-and-swap.
+Hooks and signing are disabled. No shell, push, deployment or service restart is
+involved. Empty/unavailable UI suites are recorded as `not_present`; a present UI
+suite must pass.
+
+Failure reverses only the approved patch in both index and working tree, then
+checks the original clean baseline. Rollback has a separate bounded recovery
+allowance even when candidate budgets are exhausted. No broad reset/clean is used.
+If a concurrent external edit prevents safe rollback, the audit reports
+`rollback_failed` and requires manual intervention rather than deleting human
+work. Cooperating Jarvis operations are serialized; the existing trust boundary
+still excludes privileged concurrent replacement of host files. After interruption,
+audit inspection reconciles a completed commit or rolls back the journaled patch.
+Candidate operations are blocked while apply/recovery is unresolved.
+
+The audit records UUID, exact approval text, timestamps, files, patch hash,
+baseline/branch, verification results, commit hash, and rollback outcome. The
+reviewed patch is stored internally for recovery. Candidate isolation, UI and
+memory behavior otherwise remain unchanged.
+
+Live validation: start from a clean committed checkout, create a small docs
+candidate using `inspect_paths: ["docs/persistence.md"]`, inspect its passed
+state/diff/tests/review, and request the preview endpoint. Then send exactly
+`Approve and apply candidate <UUID> to main` in Assistant or the apply POST.
+Inspect the audit and local Git log/status. Repeating the same approval must
+return the same result without another commit. Do not expect a push or restart.
