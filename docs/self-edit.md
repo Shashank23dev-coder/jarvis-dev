@@ -220,6 +220,8 @@ content, “continue”, and “looks good” grant no authority.
 - `GET /candidates/{UUID}/apply`: durable result and audit; also reconciles an
   interrupted apply while holding the exclusive source lock.
 
+Apply preview is read-only and does not modify main.
+
 Assistant exposes `preview_candidate_apply` for named eligibility requests and
 `inspect_candidate_apply` for read-only audit snapshots. Unlike HTTP audit recovery,
 the Assistant audit tool does not change candidate state or main. Exact current
