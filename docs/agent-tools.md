@@ -171,6 +171,27 @@ requested action are authorized. A creation request permits inspection, tests an
 review of its newly created candidate, but not discard. Permissions never persist
 into a later chat turn. Candidate records themselves remain in SQLite.
 
+Apply workflow tools use the same `CandidateApply` service as the HTTP endpoints:
+
+- `preview_candidate_apply`: “Show the apply eligibility preview for candidate
+  UUID. Do not apply it.” Exposed without approval for that UUID only. Never applies
+  or recovers interrupted changes; retains existing budget/lease and shared-lock
+  bookkeeping. Source files, index and refs remain unchanged.
+- `inspect_candidate_apply`: “Inspect apply audit for candidate UUID. Do not apply
+  it.” Returns a read-only audit snapshot, including `not_applied` when absent.
+  Does not repair expired leases, recover an interrupted apply, or alter evidence.
+- `approve_and_apply_candidate`: “Approve and apply candidate UUID to main”.
+  Only this exact current-message approval (optional Please and final punctuation,
+  case-insensitive words) enables apply, scoped to the exact canonical UUID.
+  Missing/wrong UUIDs, “continue”, “looks good”, “go ahead” and prior-turn approvals
+  grant no apply authority. Model arguments cannot supply approval text.
+
+The Assistant audit tool uses the service's read-only inspection mode. The existing
+HTTP audit endpoint retains its locked interrupted-apply recovery behavior.
+Preview reports eligibility only; explicit approval rechecks every gate. Independent
+review binding/expiry, baseline, protected paths, diff hash, sandbox verification,
+local commit, rollback and duplicate-request idempotency remain service-owned.
+
 Existing service budgets, protected paths, sandboxed tests and worktree isolation
 are unchanged. Normal tools stay read-only. No push, arbitrary shell, direct
 editing or budget/root override is exposed. A separate current request of

@@ -22,7 +22,8 @@ class CandidateStore:
                        (record['id'], record['created_at'], record['state'], json.dumps(record)))
         return record
 
-    def get(self, candidate_id, *, internal=False):
+    def get(self, candidate_id, *, internal=False, recover=True):
+        """Read a record; observational audit callers disable expired-lease recovery."""
         if not valid_id(candidate_id):
             return None
         with self.database.transaction() as db:
@@ -30,7 +31,7 @@ class CandidateStore:
             if row is None:
                 return None
             record = json.loads(row['record'])
-            if row['busy'] and record.get('lease_until', float('inf')) < time.time():
+            if recover and row['busy'] and record.get('lease_until', float('inf')) < time.time():
                 record.update(state='rejected', error='Previous worker was interrupted.',
                               tested_fingerprint=None, reviewer_result=None)
                 db.execute('UPDATE candidates SET busy=0,state=?,record=? WHERE id=?',

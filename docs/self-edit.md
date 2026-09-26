@@ -214,10 +214,16 @@ Assistant. The tool accepts only `candidate_id`; its confirmation comes from the
 current host-supplied user request. Prior conversation, model arguments, file
 content, “continue”, and “looks good” grant no authority.
 
-- `GET /candidates/{UUID}/apply/preview`: eligibility and required confirmation.
+- `GET /candidates/{UUID}/apply/preview`: eligibility and required confirmation;
+  never applies or recovers interrupted main-tree changes.
 - `POST /candidates/{UUID}/apply`: JSON `{"confirmation": "Approve and apply candidate <UUID> to main"}`.
 - `GET /candidates/{UUID}/apply`: durable result and audit; also reconciles an
   interrupted apply while holding the exclusive source lock.
+
+Assistant exposes `preview_candidate_apply` for named eligibility requests and
+`inspect_candidate_apply` for read-only audit snapshots. Unlike HTTP audit recovery,
+the Assistant audit tool does not change candidate state or main. Exact current
+approval exposes `approve_and_apply_candidate` for that UUID only.
 
 These retain the existing local trusted-user API model; they do not introduce
 multi-user authentication. Invalid UUIDs are unavailable, malformed data is

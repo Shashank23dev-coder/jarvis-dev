@@ -39,8 +39,8 @@ class CandidateApply:
         self.store = service.store
         self.source = service.source
 
-    def _setup(self, candidate_id):
-        record = self.store.get(candidate_id, internal=True)
+    def _setup(self, candidate_id, *, read_only=False):
+        record = self.store.get(candidate_id, internal=True, recover=not read_only)
         if record is None:
             raise ValueError('Candidate not found')
         if self.store.database.path == ':memory:' or record.get('source_root') != str(self.source):
@@ -144,7 +144,7 @@ class CandidateApply:
         self.record['lease_until'] = self.store.get(candidate_id, internal=True)['lease_until']
         try:
             with self._lock():
-                self._recover()
+                # Preview never recovers interrupted mutations or changes main.
                 self._eligible()
                 return {'candidate_id': candidate_id, 'eligible': True,
                         'files_changed': self.record['files_changed'], 'diff_summary': self.record['diff_summary'],
@@ -255,8 +255,11 @@ class CandidateApply:
         self.store.save(self.record)
         self.store.release(self.record['id'])
 
-    def inspect(self, candidate_id):
-        self._setup(candidate_id)
+    def inspect(self, candidate_id, *, read_only=False):
+        """Read an audit snapshot, optionally retaining the legacy recovery behavior."""
+        self._setup(candidate_id, read_only=read_only)
+        if read_only:
+            return self._public()
         # Recover interrupted mutations only while holding the source lock.
         with self._lock():
             pending = self.record.get('apply', {}).get('status') in {'applying', 'verifying', 'committing', 'rolling_back'}

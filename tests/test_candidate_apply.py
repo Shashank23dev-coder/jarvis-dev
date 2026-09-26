@@ -1,5 +1,6 @@
 """Human UUID approval, exact patch application, verification and recovery."""
 import json
+import hashlib
 from pathlib import Path
 from uuid import uuid4
 
@@ -293,3 +294,152 @@ def test_apply_serializes_main_and_recovery_source_is_bound(setup, tmp_path):
     with pytest.raises(ToolDenied, match='original source'):
         foreign.inspect(candidate['id'])
     assert (source / 'src/app.py').read_text() == 'value = 1\n'
+
+
+def agent_apply_request(setup, goal, name, identifier, *, tester=None):
+    from test_agent import ScriptedModel, call, final
+    from test_candidate_tools import run
+    model = ScriptedModel(call(name, {'candidate_id': identifier}), final('Applied successfully!'))
+    result, _ = run(setup, goal, model, tester=tester or (lambda *args: CommandResult(('test',), 0, 'passed')))
+    output = json.loads(model.requests[1]['input'][-1]['output'])
+    names = {t['name'] for t in model.requests[0]['tools']}
+    return result, output, names
+
+
+def test_agent_named_preview_available_without_approval_and_main_unchanged(setup):
+    source, _, factory = setup
+    candidate = start(factory())
+    identifier = candidate['id']
+    before = tree_bytes(source)
+    result, output, names = agent_apply_request(setup,
+        f'Show the apply eligibility preview for candidate {identifier}. Do not apply it.',
+        'preview_candidate_apply', identifier)
+    assert output['ok'] and output['data']['state'] == 'eligible', output
+    assert 'preview_candidate_apply' in names
+    assert 'approve_and_apply_candidate' not in names
+    assert 'apply eligible' in result.response and 'Preview only' in result.response
+    # Preview retains the service's shared lock bookkeeping; all source, index,
+    # refs and object bytes remain untouched.
+    after = tree_bytes(source)
+    assert after.pop('.git/jarvis-apply.lock') == hashlib.sha256(b'').hexdigest()
+    assert after == before
+    assert factory().store.get(identifier).get('apply') is None
+
+
+@pytest.mark.parametrize('status', ['absent', 'applied', 'interrupted'])
+def test_agent_apply_audit_is_read_only_even_with_expired_lease(setup, status):
+    source, database, factory = setup
+    candidate = start(factory())
+    identifier = candidate['id']
+    if status == 'applied':
+        apply_service(factory).apply(identifier, confirmation(identifier))
+    elif status == 'interrupted':
+        def crash(*args):
+            raise SystemExit('Simulated interruption')
+        with pytest.raises(SystemExit):
+            apply_service(factory, crash).apply(identifier, confirmation(identifier))
+        service = factory()
+        service.store.claim(identifier)
+        record = service.store.get(identifier, internal=True)
+        record['lease_until'] = 0
+        service.store.save(record)
+    before = tree_bytes(source)
+    def saved():
+        with database.transaction() as db:
+            return tuple(db.execute('SELECT record,busy FROM candidates WHERE id=?', (identifier,)).fetchone())
+    stored = saved()
+    result, output, names = agent_apply_request(setup,
+        f'Inspect apply audit candidate {identifier}. Do not apply it.',
+        'inspect_candidate_apply', identifier)
+    assert output['ok'], output
+    assert 'inspect_candidate_apply' in names and 'approve_and_apply_candidate' not in names
+    assert output['data']['state'] == {'absent': 'not_applied', 'applied': 'applied', 'interrupted': 'verifying'}[status]
+    assert identifier in result.response
+    assert tree_bytes(source) == before
+    assert saved() == stored  # No lease cleanup, budget/event writes or recovery.
+
+
+def test_preview_does_not_recover_interrupted_apply(setup):
+    source, _, factory = setup
+    candidate = start(factory())
+    def crash(*args):
+        raise SystemExit('Simulated interruption')
+    with pytest.raises(SystemExit):
+        apply_service(factory, crash).apply(candidate['id'], confirmation(candidate['id']))
+    before = tree_bytes(source)
+    result = apply_service(factory).preview(candidate['id'])
+    assert not result['eligible']
+    assert tree_bytes(source) == before
+    # The existing explicit backend recovery path remains functional.
+    assert apply_service(factory).inspect(candidate['id'])['apply']['status'] == 'rolled_back'
+
+
+def test_agent_exact_approval_applies_and_duplicate_is_idempotent(setup):
+    source, _, factory = setup
+    candidate = start(factory())
+    identifier = candidate['id']
+    result, output, names = agent_apply_request(setup, confirmation(identifier),
+        'approve_and_apply_candidate', identifier)
+    assert 'approve_and_apply_candidate' in names
+    assert output['ok'] and output['data']['state'] == 'applied', output
+    assert 'apply applied' in result.response
+    before = tree_bytes(source)
+    _, duplicate, _ = agent_apply_request(setup, confirmation(identifier),
+        'approve_and_apply_candidate', identifier)
+    assert duplicate['data'] == output['data']
+    assert tree_bytes(source) == before
+
+
+@pytest.mark.parametrize('goal', ['continue', 'looks good', 'go ahead',
+    'Approve and apply candidate to main',
+    'Approve and apply candidate invalid to main',
+    'Show the apply eligibility preview for candidate {id}. Do not apply it.'])
+def test_agent_unapproved_apply_not_exposed_or_invoked(setup, goal):
+    source, _, factory = setup
+    candidate = start(factory())
+    before = tree_bytes(source)
+    _, output, names = agent_apply_request(setup, goal.format(id=candidate['id']),
+        'approve_and_apply_candidate', candidate['id'])
+    assert 'approve_and_apply_candidate' not in names
+    assert output['error']['code'] == 'unknown_tool'
+    assert tree_bytes(source) == before
+
+
+@pytest.mark.parametrize('name,goal', [
+    ('preview_candidate_apply', 'Show the apply eligibility preview for candidate {id}'),
+    ('inspect_candidate_apply', 'Inspect apply audit candidate {id}'),
+    ('approve_and_apply_candidate', 'Approve and apply candidate {id} to main')])
+def test_agent_apply_tools_wrong_uuid_fail_closed(setup, name, goal):
+    source, _, factory = setup
+    candidate = start(factory())
+    before = tree_bytes(source)
+    _, output, _ = agent_apply_request(setup, goal.format(id=str(uuid4())), name, candidate['id'])
+    assert output['error']['code'] == 'denied'
+    assert tree_bytes(source) == before
+
+
+def test_agent_apply_failure_preserves_rollback(setup):
+    source, _, factory = setup
+    candidate = start(factory())
+    _, output, _ = agent_apply_request(setup, confirmation(candidate['id']),
+        'approve_and_apply_candidate', candidate['id'],
+        tester=lambda *args: CommandResult(('test',), 1, 'failed'))
+    assert output['data']['state'] == 'rolled_back', output
+    assert (source / 'src/app.py').read_text() == 'value = 1\n'
+    assert git(source, 'rev-parse', 'HEAD').strip() == candidate['base_commit']
+    assert git(source, 'status', '--porcelain') == ''
+
+
+@pytest.mark.parametrize('arguments', [{}, {'candidate_id': 'invalid'},
+    {'candidate_id': None}, {'candidate_id': '00000000-0000-0000-0000-000000000000', 'confirmation': 'approved'}])
+@pytest.mark.parametrize('name', ['preview_candidate_apply', 'inspect_candidate_apply', 'approve_and_apply_candidate'])
+def test_agent_apply_tools_missing_or_extra_identity_arguments_fail_closed(setup, arguments, name):
+    _, database, factory = setup
+    candidate = start(factory())
+    store = TaskStore(database.path)
+    goal = confirmation(candidate['id'])
+    task = store.create_task(goal)
+    adapter = CandidateTools(goal, database, lambda db: pytest.fail('Invalid arguments must not dispatch'))
+    result = adapter.bind(ToolRegistry()).execute(name, json.dumps(arguments),
+        task_id=task['id'], task_store=store)
+    assert result.error.code == 'invalid_arguments'
