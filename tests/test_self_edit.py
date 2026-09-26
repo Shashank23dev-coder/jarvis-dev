@@ -545,3 +545,61 @@ def test_bounded_evidence_does_not_claim_untruncated_success(setup):
     assert len(candidate['test_results']) == 1
     assert candidate['test_results'][0]['truncated']
     assert len(candidate['test_results'][0]['stdout']) == 16000
+
+
+def test_docs_candidate_identity_and_reporting_are_separate_from_change_review(setup, monkeypatch):
+    source, _, factory = setup
+    candidate_id = '863d53a2-52d9-42cb-9a35-ad6526198a70'
+    monkeypatch.setattr('core.candidate_store.uuid4', lambda: candidate_id)
+    original = '# Controlled self-edit candidates\n'
+    addition = '\n## Candidate application\n\nPassed candidates require explicit human approval before modifying main.\n'
+    (source / 'docs/self-edit.md').write_text(original)
+    (source / 'tests/ui.test.cjs').write_text("require('node:test')('example', () => {});\n")
+    git(source, 'add', '.')
+    git(source, 'commit', '-m', 'Documentation baseline')
+    goal = ('Add a Candidate application note to docs/self-edit.md explaining explicit '
+            'human approval before modifying main. Report the candidate UUID and evidence. Do not apply it.')
+
+    def model(payload, instructions, timeout):
+        if instructions == PROPOSE:
+            return {'edits': [{'path': 'docs/self-edit.md', 'content': original + addition}]}
+        # Reproduce the live review's metadata-only veto with the old payload.
+        if 'candidate' not in payload:
+            return {'verdict': 'needs_revision', 'summary': 'The candidate UUID is not provided.'}
+        metadata = payload['candidate']
+        assert metadata['id'] == candidate_id
+        assert metadata['base_commit'] == git(source, 'rev-parse', 'HEAD').strip()
+        assert metadata['branch'] == 'jarvis/candidate-' + candidate_id
+        assert metadata['created_at']
+        assert metadata['state'] == 'needs_revision'
+        assert metadata['files_changed'] == ['docs/self-edit.md']
+        assert metadata['diff_summary'] == dict(files=1, added=4, deleted=0)
+        assert metadata['diff_hash'] == hashlib.sha256(payload['diff'].encode()).hexdigest()
+        assert metadata['fingerprint'] == metadata['tested_fingerprint']
+        assert metadata['inspect_paths'] == ['docs/self-edit.md']
+        assert metadata['targeted_tests'] == ['tests']
+        assert payload['original_files'] == {'docs/self-edit.md': original}
+        assert payload['goal'] == goal
+        assert [t['phase'] for t in payload['tests']] == ['targeted', 'full_python', 'full_ui']
+        for result in payload['tests']:
+            assert result['fingerprint'] == metadata['fingerprint']
+            assert result['returncode'] == 0 and not result['timed_out'] and not result['truncated']
+            assert result['stdout'] == 'passed' and result['stderr'] == ''
+        assert set(payload) == {'candidate', 'goal', 'diff', 'tests', 'original_files'}
+        assert 'separate response validation' in instructions
+        assert 'Reject unsafe changes' in instructions
+        return {'verdict': 'passed', 'summary': 'Documentation and evidence satisfy the change goal.'}
+
+    service = factory(model=model, tester=lambda *args: CommandResult(('test',), 0, 'passed'))
+    candidate = service.start(goal, ['docs/self-edit.md'], ['tests'])
+    assert candidate['state'] == 'passed', candidate
+    assert candidate['reviewed_fingerprint'] == candidate['tested_fingerprint']
+    assert candidate['reviewed_diff_hash'] == hashlib.sha256(candidate['diff'].encode()).hexdigest()
+    # A historical metadata-only veto can use the normal fresh-review path.
+    record = service.store.get(candidate_id, internal=True)
+    record.update(state='needs_revision', reviewer_result={
+        'verdict': 'needs_revision', 'summary': 'The candidate UUID is not provided.'})
+    service.store.save(record)
+    reviewed = service.review(candidate_id)
+    assert reviewed['state'] == 'passed', reviewed
+    assert reviewed['iterations'] == 3

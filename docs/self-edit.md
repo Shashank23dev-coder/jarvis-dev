@@ -106,8 +106,31 @@ match the running trusted policy byte-for-byte before it is included for tests.
 
 The reviewer is a separate model request in a fresh process/context. It receives
 the goal, original changed files, Git diff and test evidence, with no author
-reasoning or tool authority. It may veto passing tests. The review is independent
-in context, not a guarantee of correctness or a requirement for a different model.
+reasoning or tool authority. The host also supplies candidate UUID, creation time,
+base commit, branch, pre-review state, changed paths/line counts, inspection/test
+paths, current and tested content fingerprints, and the SHA-256 of the exact diff.
+Test evidence includes phase, paths, exit status, timeout/truncation flags, bounded
+stdout/stderr and content fingerprint; only evidence matching current content is
+sent. These fields come from the validated stored candidate, not chat output.
+
+`SelfEditService._review` builds this payload after validating the current diff
+and tested fingerprint. `_ask` sends it with the independent `REVIEW` rubric to
+`model_request`, which serializes input/instructions to `core.candidate_model`.
+That fresh worker sends one JSON user message with those instructions and no
+tools or conversation history. The verdict is schema-validated, content is checked
+again, and the result is sealed to the fingerprint, diff hash and review time.
+The existing apply gate enforces those bindings and the 24-hour review expiry.
+
+Change review evaluates correctness, scope, safety, regressions, documentation
+content and test adequacy. Final Assistant reporting requirements (such as listing
+the UUID and formatting an evidence report) are separate response validation;
+they cannot veto the candidate because the final response is absent from review.
+No verdict is automatically upgraded: a fresh independent review is still required
+following a metadata-only veto. Existing `needs_revision` candidates can be
+reviewed again if their worktree and passing evidence still match and lifetime
+budgets remain. Source drift requires a fresh candidate before application.
+The reviewer may still veto passing tests. Independence means a separate context,
+not a guarantee of correctness or a requirement for a different model.
 
 Final decision states are `passed`, `needs_revision`, and `rejected`; `created`
 and `discarded` are lifecycle states. Failed tests and incomplete model responses
