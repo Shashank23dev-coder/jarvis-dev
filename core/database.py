@@ -77,7 +77,7 @@ class Database:
             try:
                 connection.execute('BEGIN IMMEDIATE')
                 version = connection.execute('PRAGMA user_version').fetchone()[0]
-                if version > 2:
+                if version > 3:
                     raise ValueError('Unsupported database schema version')
                 if version == 0:
                     for statement in SCHEMA:
@@ -93,6 +93,16 @@ class Database:
                         candidate_id TEXT NOT NULL REFERENCES candidates(id),
                         timestamp TEXT NOT NULL, event TEXT NOT NULL)''')
                     connection.execute('PRAGMA user_version=2')
+                if version < 3:
+                    connection.execute('''CREATE TABLE experiences (
+                        id TEXT PRIMARY KEY, source_key TEXT NOT NULL UNIQUE,
+                        source_task_id TEXT REFERENCES tasks(id),
+                        source_candidate_id TEXT REFERENCES candidates(id),
+                        task_type TEXT NOT NULL, outcome TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        record TEXT NOT NULL CHECK(length(record)<=8000))''')
+                    connection.execute('CREATE INDEX experiences_type_time ON experiences(task_type,created_at)')
+                    connection.execute('PRAGMA user_version=3')
                 connection.commit()
             except Exception:
                 connection.rollback()

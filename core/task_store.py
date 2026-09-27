@@ -5,12 +5,14 @@ from uuid import uuid4
 
 from .database import Database, text_value, timestamp, valid_id
 from .memory import MemoryStore
+from .experience import ExperienceStore
 
 
 class TaskStore:
     def __init__(self, path=':memory:'):
         self.database = Database(path)
         self.memory = MemoryStore(self)
+        self.experiences = ExperienceStore(self.database)
         # Preserve references returned to existing Python callers; SQLite remains
         # authoritative. Mutations must go through update_task, not these views.
         self.tasks = {}

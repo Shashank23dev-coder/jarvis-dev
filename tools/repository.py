@@ -280,6 +280,16 @@ class RepositoryTools:
                 raise ToolDenied("Unsafe test runtime dependency")
             return source.read(self.max_file_bytes + 1)
 
+    def _runtime_deployment_files(self):
+        # Fixed host-owned dependencies: main imports the deployment perimeter,
+        # whose names are intentionally blocked by CandidatePolicy. Include its
+        # regression tests too, without granting candidate read/edit authority.
+        if self.root != Path(__file__).resolve().parents[1]:
+            return {}
+        return {path: self._read_bytes(path) for path in (
+            'core/deployment.py', 'core/deployment_server.py',
+            'core/deployment_healthcheck.py', 'tests/test_deployment.py')}
+
     def _run_test_command(self, paths, *, ui=False):
         if isinstance(paths, (str, bytes)) or not paths:
             raise ToolDenied("Supply a nonempty sequence of test paths")
@@ -305,12 +315,15 @@ class RepositoryTools:
                 destination.write_bytes(data)
             # Provision only host-approved runtime dependencies, never arbitrary
             # protected sources nominated by a model or test path.
+            dependencies = self._runtime_deployment_files()
             data = self._runtime_policy_bytes()
             if data is not None:
+                dependencies['tools/policy.py'] = data
+            for name, data in dependencies.items():
                 total += len(data)
                 if len(data) > self.max_file_bytes or total > 50_000_000:
                     raise ToolDenied("Test runtime dependency exceeds snapshot limits")
-                destination = snapshot / "tools" / "policy.py"
+                destination = snapshot / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(data)
             argv = [self._bwrap, "--unshare-all", "--die-with-parent", "--new-session",

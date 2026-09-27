@@ -145,6 +145,18 @@ class CandidateRepository(RepositoryTools):
             raise ToolDenied('Candidate policy differs from the trusted runtime')
         return data
 
+    def _runtime_deployment_files(self):
+        runtime = Path(__file__).resolve().parents[1]
+        if self.source_root != runtime:
+            return {}
+        dependencies = RepositoryTools(runtime)._runtime_deployment_files()
+        reader = RepositoryTools(self.root)
+        for path, data in dependencies.items():
+            self.check()
+            if reader._read_bytes(path) != data:
+                raise ToolDenied('Candidate deployment dependencies differ from the trusted runtime')
+        return dependencies
+
 
 class SelfEditService:
     def __init__(self, database, *, source_root=None, candidate_root=None,

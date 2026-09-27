@@ -1,0 +1,6 @@
+# Replace jarvis.example.com and set JARVIS_PUBLIC_ORIGIN to the same HTTPS origin.
+jarvis.example.com {
+    # Authentication remains mandatory inside Jarvis; retain Authorization and Host.
+    reverse_proxy 127.0.0.1:8000
+    header Strict-Transport-Security "max-age=31536000"
+}

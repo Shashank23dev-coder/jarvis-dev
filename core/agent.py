@@ -7,6 +7,8 @@ from typing import Callable
 from models.openai_client import request_agent_turn
 from tools.registry import ToolRegistry
 from .task_store import TaskStore
+from .experience import ExperienceStore, TaskReflection, task_type, attempt_capture, EXPERIENCE_INSTRUCTIONS
+from .recall import RecallService, RECALL_INSTRUCTIONS, NAVIGATION_INSTRUCTIONS, encoded, wants_recall
 
 
 INSTRUCTIONS = """You are Jarvis, a conversational assistant with read-only repository tools.
@@ -42,12 +44,15 @@ class AgentOutcome:
 
 class AgentRunner:
     def __init__(self, registry: ToolRegistry | None = None, *, model: Callable | None = None,
-                 max_tool_calls: int = 8, max_iterations: int = 10, candidate_service_factory=None):
+                 max_tool_calls: int = 8, max_iterations: int = 10, candidate_service_factory=None,
+                 recall_limits=None, experience_limits=None):
         # Host-only configuration with absolute ceilings; never model/API arguments.
         if type(max_tool_calls) is not int or not 1 <= max_tool_calls <= 32:
             raise ValueError("max_tool_calls must be between 1 and 32")
         if type(max_iterations) is not int or not 1 <= max_iterations <= 64:
             raise ValueError("max_iterations must be between 1 and 64")
+        self.recall_limits = recall_limits
+        self.experience_limits = experience_limits
         self.candidate_service_factory = candidate_service_factory
         self.registry = registry or ToolRegistry()
         self.model = model or request_agent_turn
@@ -72,7 +77,7 @@ class AgentRunner:
         task_store.add_activity(task_id, "Jarvis started the request.", "agent_started")
         task = task_store.get_task(task_id)
         history = [{"role": message["role"], "content": message["content"]}
-                   for message in task_store.memory.conversation_history(
+                   for message in task_store.memory.prompt_history(
                        task["conversation_id"], through_task=task_id)]
         # Preserve the direct runner interface, including its context-size guard.
         history[-1] = {"role": "user", "content": goal}
@@ -81,15 +86,48 @@ class AgentRunner:
         registry = candidates.bind(self.registry)
         seen_calls = set()
         calls = iterations = 0
+        reflection = TaskReflection()
 
         def finish(status, response, reason):
-            return self._finish(task_store, task_id, status, candidates.final_response(response), iterations, calls, reason)
+            outcome = self._finish(task_store, task_id, status, candidates.final_response(response), iterations, calls, reason)
+            attempt_capture(lambda: task_store.experiences.capture_task(task_store.get_task(task_id), reflection.observations))
+            return outcome
 
         try:
+            recall = None
+            experiences = None
+            if task_type(goal) is not None:
+                experiences = attempt_capture(lambda: ExperienceStore(task_store.database, limits=self.experience_limits).search(
+                    goal[:500], before_time=task['created_at'], exclude_task_id=task_id))
+                if experiences and experiences['results']:
+                    history.insert(0, {'role': 'user', 'content': encoded(experiences)})
+            if wants_recall(goal):
+                recall = RecallService(task_store.database, limits=self.recall_limits).for_task(goal, task)
+                if recall.get('mode') == 'conversation_navigation':
+                    if not recall['results']:
+                        return finish('completed',
+                            "I couldn't find readable excerpts from the most recent prior conversation "
+                            "within the bounded history window.", 'recall_not_found')
+                    if recall['brief']:
+                        excerpts = '; '.join(
+                            f"{item['role']}: {json.dumps(item['content'][:100], ensure_ascii=False)}"
+                            for item in recall['results'])
+                        return finish('completed',
+                            'The available excerpt from the prior conversation is extremely short: ' + excerpts +
+                            '. There is not enough context to infer a topic or next step.', 'recall_brief')
+                if not recall['results'] and len(history) == 1:
+                    return finish('completed',
+                        "I couldn't find relevant prior conversation history or explicit durable memories "
+                        "within the bounded search. Can you remind me of the topic or details?", 'recall_not_found')
+                history.insert(0, {'role': 'user', 'content': encoded(recall)})
             for iterations in range(1, self.max_iterations + 1):
                 # Reserve the last iteration for a final answer; never invoke after it.
                 allow_tools = calls < self.max_tool_calls and iterations < self.max_iterations
-                instructions = INSTRUCTIONS + candidates.instructions
+                instructions = INSTRUCTIONS + candidates.instructions + (RECALL_INSTRUCTIONS if recall is not None else '')
+                if experiences and experiences['results']:
+                    instructions += EXPERIENCE_INSTRUCTIONS
+                if recall is not None and recall.get('mode') == 'conversation_navigation':
+                    instructions += NAVIGATION_INSTRUCTIONS
                 if not allow_tools:
                     instructions += "\nTool use is now disabled. Give your final answer using only existing evidence."
                 if len(json.dumps(history)) > 256_000:
@@ -126,6 +164,7 @@ class AgentRunner:
                     calls += 1  # Invalid names/arguments and policy denials consume budget too.
                     result = registry.execute(name, request.get("arguments"),
                                                    task_id=task_id, task_store=task_store)
+                    attempt_capture(lambda: reflection.observe(name, request.get('arguments'), result))
                     # Preserve reasoning and all other output items as required by Responses.
                     history.extend(turn.output)
                     history.append({"type": "function_call_output", "call_id": call_id,

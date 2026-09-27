@@ -54,6 +54,11 @@ class CandidateStore:
                 db.execute('INSERT INTO candidate_events(candidate_id,timestamp,event) VALUES (?,?,?)',
                            (record['id'], timestamp(), event))
 
+        # Reflection is derived after the authoritative state/event commits.
+        from .experience import CANDIDATE_EVENTS, ExperienceStore, attempt_capture
+        if event in CANDIDATE_EVENTS:
+            attempt_capture(lambda: ExperienceStore(self.database).capture_candidate(data, event))
+
     def claim(self, candidate_id):
         with self.database.transaction() as db:
             row = db.execute('SELECT record,busy FROM candidates WHERE id=?', (candidate_id,)).fetchone()

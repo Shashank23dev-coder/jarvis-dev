@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
 import json
+import logging
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Depends, Query, APIRouter
 from fastapi.responses import FileResponse
@@ -8,25 +10,34 @@ from typing import Annotated, Literal
 
 from core.orchestrator import Orchestrator
 from core.task_store import TaskStore
-from core.database import default_database_path
+from core.deployment import Settings, DeploymentMiddleware
 from core.self_edit import SelfEditService
 from tools.policy import ToolDenied
 
 @asynccontextmanager
 async def lifespan(application):
     store = application.state.store if hasattr(application.state, "store") else task_store
-    store.database.initialize()
     try:
+        application.state.settings.check_storage()
+        store.database.initialize()
+        with store.database.transaction() as db:
+            if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise RuntimeError('Database integrity check failed')
+        logging.getLogger('jarvis.lifecycle').info('startup_ready')
         yield
     finally:
         store.close()
+        logging.getLogger('jarvis.lifecycle').info('shutdown_complete')
 
 
 app = FastAPI(title="Jarvis", lifespan=lifespan)
 router = APIRouter()
 
 orchestrator = Orchestrator()
-task_store = TaskStore(default_database_path())
+settings = Settings.from_env()
+app.state.settings = settings
+app.add_middleware(DeploymentMiddleware, settings=settings)
+task_store = TaskStore(settings.database_path)
 
 
 def get_store():
@@ -41,11 +52,16 @@ class TaskRequest(BaseModel):
 
 @router.get("/")
 def home():
-    return FileResponse("static/index.html")
+    return FileResponse(Path(__file__).resolve().parent / "static/index.html")
 
 
 @router.get("/health")
-def health():
+def health(store: TaskStore = Depends(get_store)):
+    try:
+        with store.database.transaction() as db:
+            db.execute('SELECT 1').fetchone()
+    except Exception:
+        raise HTTPException(status_code=503, detail='Not ready') from None
     return {"status": "ok"}
 
 
@@ -171,6 +187,36 @@ def list_conversations(store: TaskStore = Depends(get_store)):
     return {"conversations": store.memory.list_conversations()}
 
 
+def recall_service(store, limit, max_bytes):
+    from core.recall import RecallService, RecallLimits
+    return RecallService(store.database, limits=RecallLimits(results=limit, context_bytes=max_bytes))
+
+
+@router.get("/conversations/search")
+def search_conversations(q: str = Query(min_length=1, max_length=500),
+                         conversation_id: str | None = None, exclude_conversation_id: str | None = None,
+                         limit: int = Query(default=6, ge=1, le=12),
+                         max_bytes: int = Query(default=10000, ge=512, le=16000),
+                         store: TaskStore = Depends(get_store)):
+    try:
+        return recall_service(store, limit, max_bytes).search_messages(q,
+            conversation_id=conversation_id, exclude_conversation_id=exclude_conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid search request') from None
+
+
+@router.get("/conversations/recent")
+def recent_conversations(conversation_id: str | None = None, exclude_conversation_id: str | None = None,
+                         limit: int = Query(default=6, ge=1, le=12),
+                         max_bytes: int = Query(default=10000, ge=512, le=16000),
+                         store: TaskStore = Depends(get_store)):
+    try:
+        return recall_service(store, limit, max_bytes).recent_history(
+            conversation_id=conversation_id, exclude_conversation_id=exclude_conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid recent-history request') from None
+
+
 @router.get("/conversations/{conversation_id}")
 def get_conversation(conversation_id: str, store: TaskStore = Depends(get_store)):
     conversation = store.memory.get_conversation(conversation_id)
@@ -210,6 +256,18 @@ def list_memories(scope: Literal["user", "project"],
         raise HTTPException(status_code=422, detail="Invalid memory scope") from None
 
 
+@router.get("/memories/search")
+def search_durable_memories(q: str = Query(min_length=1, max_length=500),
+                           scope: Literal["user", "project"] | None = None, scope_id: str | None = None,
+                           limit: int = Query(default=6, ge=1, le=12),
+                           max_bytes: int = Query(default=10000, ge=512, le=16000),
+                           store: TaskStore = Depends(get_store)):
+    try:
+        return recall_service(store, limit, max_bytes).search_memories(q, scope=scope, scope_id=scope_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid memory search request') from None
+
+
 @router.get("/memories/{memory_id}")
 def get_memory(memory_id: str, store: TaskStore = Depends(get_store)):
     memory = store.memory.get_memory(memory_id)
@@ -225,10 +283,13 @@ def delete_memory(memory_id: str, store: TaskStore = Depends(get_store)):
     return {"deleted": True}
 
 
-def create_app(database_path):
+def create_app(database_path=None, *, settings=None):
     """Independent app/store lifecycle for trusted deployments and restart tests."""
     application = FastAPI(title="Jarvis", lifespan=lifespan)
-    application.state.store = TaskStore(database_path)
+    settings = settings or Settings.from_env(database_path=database_path)
+    application.state.settings = settings
+    application.add_middleware(DeploymentMiddleware, settings=settings)
+    application.state.store = TaskStore(settings.database_path)
     application.include_router(router)
     application.dependency_overrides[get_store] = lambda: application.state.store
     return application
@@ -308,6 +369,39 @@ def apply_candidate(candidate_id: str, request: ApplyRequest,
 def inspect_candidate_apply(candidate_id: str, service: SelfEditService = Depends(get_self_edit)):
     from core.candidate_apply import CandidateApply
     return candidate_action(service, candidate_id, CandidateApply(service).inspect)
+
+
+@router.get("/experiences")
+def list_experiences(limit: int = Query(20, ge=1, le=50), store: TaskStore = Depends(get_store)):
+    return store.experiences.list(limit=limit)
+
+
+@router.get("/experiences/search")
+def search_experiences(q: str = Query(min_length=1, max_length=500),
+                       limit: int = Query(3, ge=1, le=5),
+                       context_bytes: int = Query(6000, ge=1024, le=10000),
+                       store: TaskStore = Depends(get_store)):
+    from core.experience import ExperienceStore, ExperienceLimits
+    try:
+        return ExperienceStore(store.database, limits=ExperienceLimits(
+            results=limit, context_bytes=context_bytes)).search(q)
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid experience search request') from None
+
+
+@router.get("/experiences/{experience_id}")
+def inspect_experience(experience_id: str, store: TaskStore = Depends(get_store)):
+    experience = store.experiences.get(experience_id)
+    if experience is None:
+        raise HTTPException(status_code=404, detail="Experience not found")
+    return experience
+
+
+@router.delete("/experiences/{experience_id}")
+def delete_experience(experience_id: str, store: TaskStore = Depends(get_store)):
+    if not store.experiences.delete(experience_id):
+        raise HTTPException(status_code=404, detail="Experience not found")
+    return {"deleted": True}
 
 
 app.include_router(router)

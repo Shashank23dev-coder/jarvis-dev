@@ -1,0 +1,38 @@
+name: jarvis
+services:
+  jarvis:
+    build: .
+    image: jarvis:local
+    user: "10001:10001"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      JARVIS_MODE: production
+      JARVIS_HOST: 0.0.0.0
+      JARVIS_PORT: "8000"
+      JARVIS_STATE_DIR: /var/lib/jarvis
+      JARVIS_DB_PATH: /var/lib/jarvis/jarvis.sqlite3
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in a protected external env file}
+      JARVIS_AUTH_TOKEN: ${JARVIS_AUTH_TOKEN:?Set a random JARVIS_AUTH_TOKEN}
+      JARVIS_PUBLIC_ORIGIN: ${JARVIS_PUBLIC_ORIGIN:-http://localhost:8000}
+    ports:
+      - "127.0.0.1:${JARVIS_PUBLISHED_PORT:-8000}:8000"
+    volumes:
+      - state:/var/lib/jarvis
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    mem_limit: 1g
+    cpus: 2.0
+    pids_limit: 256
+    stop_grace_period: 390s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+volumes:
+  state:

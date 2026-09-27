@@ -21,9 +21,12 @@ Existing `/task`, `/tasks`, `/tasks/{id}`, `/activity`, `/health`, and `/` route
 retain their response contracts. Tasks add `conversation_id`. Submitting
 `POST /task` without that field creates a new conversation; supplying an existing
 ID continues that conversation. The agent receives its ordered user/assistant
-history through the current task, subject to the existing context-size limit.
-Other conversations, durable memories, tool outputs, and model reasoning are not
-silently inserted into that context. Planning mode still returns its usual steps.
+history through the current task using bounded current-chat context. Explicit
+recall-oriented requests also receive selective prior-chat/durable-memory excerpts
+as separate labelled data; ordinary chat does not trigger those searches. Tool
+outputs and model reasoning are not retrieval sources. See [recall.md](recall.md)
+for ranking, source labels, filtering, limits and search APIs. Planning mode still
+returns its usual steps.
 
 | Route | Purpose |
 | --- | --- |
@@ -51,7 +54,7 @@ Conversation selection and memory management UI are intentionally deferred.
 
 ## Schema and writes
 
-Schema version 2 is recorded in SQLite `PRAGMA user_version`. Initialization runs
+Schema version 3 is recorded in SQLite `PRAGMA user_version`. Initialization runs
 inside `BEGIN IMMEDIATE`, creates/migrates the schema, and is safe to repeat or run
 concurrently. A newer, unsupported schema version fails explicitly. Foreign keys
 are enabled on every connection; all statements use parameterized values.
@@ -65,6 +68,7 @@ and use SQLite's lock timeout across connections/processes.
 | `tasks` | UUID, conversation foreign key, goal, status, creation time, steps JSON, response, agent metadata JSON |
 | `activity` | Monotonic sequence, task foreign key, existing event JSON including timestamps and tool metadata |
 | `memories` | UUID, user/project scope, scope ID, content, creation timestamp |
+| `experiences` | Bounded evidence-derived task lessons; separate from memory, with source IDs and a unique task/workflow-phase key; see [experiences.md](experiences.md) |
 | `candidates`, `candidate_events` | Isolated self-edit attempts, evidence, limits and ordered stage history; see [self-edit.md](self-edit.md) |
 
 Messages are indexed by conversation and sequence; activity by task and sequence;
@@ -75,7 +79,7 @@ assistant message are committed together. Store methods refresh compatible task
 dictionary views, but callers must use `update_task` to persist changes; mutating
 returned dictionaries directly is not a persistence interface.
 
-## Three memory categories
+## History, memory, and experiences
 
 `MemoryStore` exposes `conversation_history`, `task_history` (including activity),
 and explicit `create_memory`, `get_memory`, `list_memories`, `delete_memory`.
@@ -94,22 +98,29 @@ allowlists, bounds, and read-only Bubblewrap execution are unchanged.
 
 ## Limits and next milestone
 
-This remains a local, single-user synchronous application. There are no embeddings,
-semantic search, automatic long-term memory extraction, automatic memory injection,
+This remains a single-owner synchronous application. Text-based intent-aware recall
+is available through [recall.md](recall.md). There are no embeddings, semantic
+search, automatic long-term memory extraction,
 background job recovery or resumed tool calls. Explicit isolated self-edit candidates
 are now available through a separate [controlled workflow](self-edit.md); the normal
 chat tools remain read-only. Interrupted tasks retain their last committed status; a restart does
 not resume them. Concurrent conversation requests are ordered by stored message
-sequence, without a conversation-level execution queue. History pagination,
-retention/export controls, authentication and multi-user authorization are deferred.
+sequence, without a conversation-level execution queue. Retrieval has bounded search/recent-history APIs. Full-history pagination,
+retention/export controls and multi-user authorization remain deferred. Production
+authentication is described in [deployment.md](deployment.md).
 Deletion removes a memory from the application, not a forensic secure erase or
 backup deletion.
 
 Recommended next milestone: explicit conversation selection and memory review/
 delete controls using these APIs, plus history pagination and retention/export.
-Main-tree editing remains disabled; candidate changes require a separate future
-human-approved integration workflow before they can reach the main checkout.
+Main-tree changes require the existing exact human-approved apply workflow;
+retrieved historical approval never grants current authority.
 
 Run the complete Python suite through `RepositoryTools().run_pytest()` on a host
 that permits Bubblewrap, and run `node --test tests/ui.test.cjs` for the UI. Tests
 use temporary databases, scripted models and no provider calls.
+
+Schema version 3 adds only `experiences` and its index. Existing conversations, tasks,
+memories, candidate records and apply audits are retained unchanged. Experiences
+use the same persistent database and backup/restore procedure. They are derived
+operational lessons, not automatically promoted durable user/project memories.

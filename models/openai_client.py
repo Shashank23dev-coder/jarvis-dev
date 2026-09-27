@@ -10,7 +10,8 @@ MODEL = "gpt-5.6"
 @lru_cache(maxsize=1)
 def get_client():
     """Create the client only when needed, so imports/tests need no credentials."""
-    load_dotenv()
+    if os.getenv("JARVIS_MODE", "development") != "production":
+        load_dotenv()
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 

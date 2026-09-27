@@ -1,4 +1,4 @@
-"""Three explicit memory categories; no automatic extraction or semantic search."""
+"""Explicit memory categories and bounded, read-only recall interfaces."""
 
 from uuid import uuid4
 from .database import text_value, timestamp, valid_id
@@ -40,6 +40,43 @@ class MemoryStore:
             rows = db.execute('SELECT * FROM messages WHERE conversation_id=? AND (? IS NULL OR sequence<=?) ORDER BY sequence',
                               (conversation_id, cutoff, cutoff))
             return [dict(row) for row in rows]
+
+    def prompt_history(self, conversation_id, *, through_task, limit=40, max_bytes=64000):
+        """Bound current-chat context without dropping/truncating the active request."""
+        from .recall import encoded, safe_record
+        if (type(limit) is not int or not 1 <= limit <= 100 or
+                type(max_bytes) is not int or not 1024 <= max_bytes <= 128000):
+            raise ValueError('Invalid current-chat context limits')
+        with self.database.transaction() as db:
+            row = db.execute("SELECT sequence FROM messages WHERE conversation_id=? AND task_id=? AND role='user'",
+                             (conversation_id, through_task)).fetchone()
+            if row is None:
+                raise ValueError('Unknown conversation task')
+            cutoff = row['sequence']
+            rows = db.execute('SELECT * FROM messages WHERE conversation_id=? AND sequence<=? '
+                              'ORDER BY sequence DESC LIMIT ?', (conversation_id, cutoff, limit)).fetchall()
+        selected, used = [], 2
+        for row in rows:
+            current = row['sequence'] == cutoff
+            if not current and not safe_record(row['content']):
+                continue
+            size = len(encoded({'role': row['role'], 'content': row['content']})) + 1
+            if current or used + size <= max_bytes:
+                selected.append(dict(row))
+                used += size
+        return list(reversed(selected))
+
+    def search_messages(self, query, **options):
+        from .recall import RecallService
+        return RecallService(self.database).search_messages(query, **options)
+
+    def search_memories(self, query, **options):
+        from .recall import RecallService
+        return RecallService(self.database).search_memories(query, **options)
+
+    def recent_history(self, **options):
+        from .recall import RecallService
+        return RecallService(self.database).recent_history(**options)
 
     def task_history(self, conversation_id=None):
         if conversation_id is not None and self.get_conversation(conversation_id) is None:
