@@ -77,7 +77,7 @@ class Database:
             try:
                 connection.execute('BEGIN IMMEDIATE')
                 version = connection.execute('PRAGMA user_version').fetchone()[0]
-                if version > 3:
+                if version > 4:
                     raise ValueError('Unsupported database schema version')
                 if version == 0:
                     for statement in SCHEMA:
@@ -103,6 +103,33 @@ class Database:
                         record TEXT NOT NULL CHECK(length(record)<=8000))''')
                     connection.execute('CREATE INDEX experiences_type_time ON experiences(task_type,created_at)')
                     connection.execute('PRAGMA user_version=3')
+                if version < 4:
+                    connection.execute('''CREATE TABLE experience_quality (
+                        experience_id TEXT PRIMARY KEY REFERENCES experiences(id) ON DELETE CASCADE,
+                        retrieval_count INTEGER NOT NULL DEFAULT 0,
+                        helpful_count INTEGER NOT NULL DEFAULT 0,
+                        neutral_count INTEGER NOT NULL DEFAULT 0,
+                        misleading_count INTEGER NOT NULL DEFAULT 0,
+                        confidence_score REAL NOT NULL DEFAULT 0.5 CHECK(confidence_score BETWEEN 0.05 AND 0.95),
+                        last_used_at TEXT, last_evaluated_at TEXT, last_signal_at TEXT,
+                        generation INTEGER NOT NULL DEFAULT 0)''')
+                    connection.execute('INSERT INTO experience_quality(experience_id) SELECT id FROM experiences')
+                    connection.execute('''CREATE TABLE experience_uses (
+                        experience_id TEXT NOT NULL REFERENCES experiences(id) ON DELETE CASCADE,
+                        task_id TEXT NOT NULL REFERENCES tasks(id), generation INTEGER NOT NULL,
+                        used_at TEXT NOT NULL, snapshot TEXT NOT NULL CHECK(length(snapshot)<=8000),
+                        evaluated INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(experience_id,task_id))''')
+                    connection.execute('CREATE INDEX experience_uses_task ON experience_uses(task_id)')
+                    connection.execute('''CREATE TABLE experience_evaluations (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+                        experience_id TEXT NOT NULL REFERENCES experiences(id) ON DELETE CASCADE,
+                        task_id TEXT REFERENCES tasks(id), generation INTEGER NOT NULL,
+                        source TEXT NOT NULL CHECK(source IN ('automatic','owner','reset')),
+                        verdict TEXT NOT NULL CHECK(verdict IN ('helpful','neutral','misleading','reset')),
+                        evidence TEXT NOT NULL CHECK(length(evidence)<=2000), created_at TEXT NOT NULL)''')
+                    connection.execute('CREATE INDEX experience_evaluations_history ON experience_evaluations(experience_id,sequence)')
+                    connection.execute('PRAGMA user_version=4')
                 connection.commit()
             except Exception:
                 connection.rollback()

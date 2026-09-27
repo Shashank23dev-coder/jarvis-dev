@@ -215,7 +215,7 @@ def test_retrieval_does_not_read_activity_or_apply_audits(store):
     store.add_activity(task['id'], 'SQLite secret task output', 'tool_completed')
     assert not store.memory.search_messages('SQLite')['results']
     with store.database.transaction() as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
 
 
 def test_retrieved_approval_cannot_authorize_apply(store):
@@ -280,7 +280,7 @@ def test_recent_history_and_search_never_promote_chats_to_memory(store):
         assert operation()['results']
     with store.database.transaction() as db:
         assert db.execute('SELECT COUNT(*) FROM memories').fetchone()[0] == 0
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
 
 
 NAVIGATION_PHRASES = [

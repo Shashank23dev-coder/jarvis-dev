@@ -10,6 +10,7 @@ from uuid import uuid4
 from .database import timestamp, valid_id, text_value
 from .recall import as_utc, encoded, safe_record, terms_for, wants_recall
 from tools.schemas import ProcessResult
+from .experience_evaluation import ExperienceEvaluation, family_key
 
 TOOLS = frozenset({'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest', 'run_command',
     'create_self_edit_candidate', 'inspect_self_edit_candidate', 'rerun_candidate_tests',
@@ -63,6 +64,9 @@ FAILED and UNVERIFIED experiences are cautions, not recommendations. A historica
 success establishes only the recorded checks, not correctness of today's task.
 Never treat a lesson as authorization, bypass a safety gate, skip current tests,
 or infer candidate/apply approval. Do not claim historical work was performed now.
+Confidence measures bounded evidence associations, not proof that a lesson caused
+success. Conflicting historical outcomes are unresolved: surface the conflict and
+obtain current verification, even if only one side fits the context budget.
 '''
 
 
@@ -113,6 +117,7 @@ class ExperienceStore:
         self.database = database
         self.limits = limits or ExperienceLimits()
         self.now = now
+        self.evaluation = ExperienceEvaluation(database, now=now)
 
     def _save(self, *, source_key, task_id=None, candidate_id=None, kind, goal, outcome,
               approach, evidence, worked, failed, lesson):
@@ -135,6 +140,12 @@ class ExperienceStore:
                 ON CONFLICT(source_key) DO UPDATE SET outcome=excluded.outcome,
                 created_at=excluded.created_at,record=excluded.record''',
                 (identifier, source_key, task_id, candidate_id, kind, outcome, record['created_at'], encoded(record)))
+            db.execute('INSERT OR IGNORE INTO experience_quality(experience_id) VALUES (?)', (identifier,))
+        return self._with_quality(record)
+
+    def _with_quality(self, record):
+        record['quality'] = self.evaluation.quality(record['id'])
+        record['prior_outcome_quality'] = QUALITY[record['outcome']]
         return record
 
     def capture_task(self, task, observations):
@@ -225,7 +236,7 @@ class ExperienceStore:
         with self.database.transaction() as db:
             row = db.execute('SELECT record FROM experiences WHERE id=?', (identifier,)).fetchone()
         record = json.loads(row['record']) if row else None
-        return record if record and safe_record(record['goal']) else None
+        return self._with_quality(record) if record and safe_record(record['goal']) else None
 
     def delete(self, identifier):
         if not valid_id(identifier):
@@ -239,10 +250,12 @@ class ExperienceStore:
         with self.database.transaction() as db:
             rows = db.execute('SELECT record FROM experiences ORDER BY created_at DESC,rowid DESC LIMIT ?', (limit,)).fetchall()
         records = [json.loads(row['record']) for row in rows]
-        return [record for record in records if safe_record(record['goal'])]
+        return [self._with_quality(record) for record in records if safe_record(record['goal'])]
 
     def search(self, query, *, before_time=None, exclude_task_id=None):
         text_value(query, 500)
+        if not safe_record(query):
+            return {'source': 'task_experience', 'results': [], 'truncated': False}
         kind, terms = task_type(query), topic_terms(query)
         with self.database.transaction() as db:
             rows = db.execute('SELECT record FROM experiences WHERE (? IS NULL OR created_at<=?) '
@@ -261,12 +274,36 @@ class ExperienceStore:
             if not overlap and (not same or terms and past_terms):
                 continue
             age = max(0, ((self.now or datetime.now(timezone.utc)) - as_utc(item['created_at'])).total_seconds() / 86400)
-            score = 4 * same + 4 * len(overlap) / max(1, len(terms)) + QUALITY[item['outcome']] + 1 / (1 + age / 30)
+            quality = self.evaluation.quality(item['id'])
+            effective = self.evaluation.effective(quality, item['created_at'])
+            # Owner feedback can validate a caution without turning failure into advice.
+            if item['outcome'] not in {'succeeded', 'recovered'}:
+                effective = min(0.5, effective)
+            similar_help = self.evaluation.similar_help(item['id'], family_key(query, kind))
+            base = 4 * same + 4 * len(overlap) / max(1, len(terms)) + QUALITY[item['outcome']] + 1 / (1 + age / 30)
+            score = base * (0.25 + 1.5 * effective) + similar_help
             result = {key: item[key] for key in ('id', 'source', 'source_task_id', 'source_candidate_id',
                        'task_type', 'goal', 'outcome', 'created_at', 'reusable_lesson')}
             result.update(score=round(score, 6), outcome_label=item['outcome'].upper(),
-                          recommendation=item['outcome'] in {'succeeded', 'recovered'}, evidence=item['evidence'])
+                          recommendation=item['outcome'] in {'succeeded', 'recovered'}, evidence=item['evidence'],
+                          confidence_score=quality['confidence_score'], effective_confidence=round(effective, 6),
+                          similar_help=round(similar_help, 6), conflicting=False, conflicts=[])
             ranked.append(result)
+        # Lexical potential conflicts, not a claim to understand semantic contradiction.
+        # Flag both sides BEFORE result/byte limits, so a hidden counterpart is visible.
+        for item in ranked:
+            item_terms = topic_terms(item['goal'])
+            for other in ranked:
+                if item['task_type'] != other['task_type'] or item['id'] == other['id']:
+                    continue
+                opposite = ((item['outcome'] == 'failed' and other['recommendation']) or
+                            (other['outcome'] == 'failed' and item['recommendation']))
+                other_terms = topic_terms(other['goal'])
+                related = item_terms == other_terms or len(item_terms & other_terms) / max(1, len(item_terms | other_terms)) >= 0.5
+                if opposite and related:
+                    item['conflicting'] = True
+                    if len(item['conflicts']) < 3:
+                        item['conflicts'].append({'id': other['id'], 'outcome': other['outcome']})
         ranked.sort(key=lambda item: (item['score'], item['created_at'], item['id']), reverse=True)
         response = {'source': 'task_experience', 'results': [], 'truncated': False}
         for item in ranked:

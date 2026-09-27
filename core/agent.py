@@ -87,10 +87,12 @@ class AgentRunner:
         seen_calls = set()
         calls = iterations = 0
         reflection = TaskReflection()
+        retrieval_tracked = False
 
         def finish(status, response, reason):
             outcome = self._finish(task_store, task_id, status, candidates.final_response(response), iterations, calls, reason)
             attempt_capture(lambda: task_store.experiences.capture_task(task_store.get_task(task_id), reflection.observations))
+            attempt_capture(lambda: task_store.experiences.evaluation.evaluate(task_id, reflection.observations))
             return outcome
 
         try:
@@ -132,6 +134,9 @@ class AgentRunner:
                     instructions += "\nTool use is now disabled. Give your final answer using only existing evidence."
                 if len(json.dumps(history)) > 256_000:
                     return finish("limit_reached", "Stopped at the conversation size limit.", "context_limit")
+                if experiences and experiences['results'] and not retrieval_tracked:
+                    attempt_capture(lambda: task_store.experiences.evaluation.track(task_id, experiences['results']))
+                    retrieval_tracked = True
                 turn = self.model(input=history.copy(), tools=registry.model_tools(),
                                   instructions=instructions, allow_tools=allow_tools)
                 if turn.status != "completed":

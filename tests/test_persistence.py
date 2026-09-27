@@ -24,9 +24,9 @@ def test_repeated_initialization_and_future_schema(tmp_path):
     db.close()
     db.initialize()
     with db.transaction() as connection:
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 4
         assert connection.execute('PRAGMA foreign_keys').fetchone()[0] == 1
-        connection.execute('PRAGMA user_version=4')
+        connection.execute('PRAGMA user_version=5')
     db.close()
     with pytest.raises(ValueError, match='schema'):
         Database(path).initialize()

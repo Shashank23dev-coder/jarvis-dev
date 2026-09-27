@@ -404,4 +404,33 @@ def delete_experience(experience_id: str, store: TaskStore = Depends(get_store))
     return {"deleted": True}
 
 
+class ExperienceFeedback(BaseModel):
+    model_config = {"extra": "forbid"}
+    verdict: Literal['helpful', 'misleading']
+    request_id: str = Field(min_length=36, max_length=36)
+
+
+@router.get('/experiences/{experience_id}/evaluations')
+def experience_evaluations(experience_id: str, limit: int = Query(20, ge=1, le=50),
+                          before: int | None = Query(None, ge=1), store: TaskStore = Depends(get_store)):
+    experience = inspect_experience(experience_id, store)
+    return dict(quality=experience['quality'],
+                **store.experiences.evaluation.history(experience_id, limit=limit, before=before))
+
+
+@router.post('/experiences/{experience_id}/feedback')
+def experience_feedback(experience_id: str, feedback: ExperienceFeedback, store: TaskStore = Depends(get_store)):
+    inspect_experience(experience_id, store)
+    try:
+        return store.experiences.evaluation.feedback(experience_id, feedback.verdict, feedback.request_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid experience feedback') from None
+
+
+@router.post('/experiences/{experience_id}/confidence/reset')
+def reset_experience_confidence(experience_id: str, store: TaskStore = Depends(get_store)):
+    inspect_experience(experience_id, store)
+    return store.experiences.evaluation.reset(experience_id)
+
+
 app.include_router(router)

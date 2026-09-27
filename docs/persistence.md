@@ -54,7 +54,7 @@ Conversation selection and memory management UI are intentionally deferred.
 
 ## Schema and writes
 
-Schema version 3 is recorded in SQLite `PRAGMA user_version`. Initialization runs
+Schema version 4 is recorded in SQLite `PRAGMA user_version`. Initialization runs
 inside `BEGIN IMMEDIATE`, creates/migrates the schema, and is safe to repeat or run
 concurrently. A newer, unsupported schema version fails explicitly. Foreign keys
 are enabled on every connection; all statements use parameterized values.
@@ -69,6 +69,9 @@ and use SQLite's lock timeout across connections/processes.
 | `activity` | Monotonic sequence, task foreign key, existing event JSON including timestamps and tool metadata |
 | `memories` | UUID, user/project scope, scope ID, content, creation timestamp |
 | `experiences` | Bounded evidence-derived task lessons; separate from memory, with source IDs and a unique task/workflow-phase key; see [experiences.md](experiences.md) |
+| `experience_quality` | Smoothed bounded confidence, outcome/use counters, timestamps, and reset generation |
+| `experience_uses` | Unique task/lesson delivery attempts with frozen metadata-only evidence |
+| `experience_evaluations` | Paginated automatic/owner evaluations and reset history; no raw output or prose |
 | `candidates`, `candidate_events` | Isolated self-edit attempts, evidence, limits and ordered stage history; see [self-edit.md](self-edit.md) |
 
 Messages are indexed by conversation and sequence; activity by task and sequence;
@@ -124,3 +127,6 @@ Schema version 3 adds only `experiences` and its index. Existing conversations, 
 memories, candidate records and apply audits are retained unchanged. Experiences
 use the same persistent database and backup/restore procedure. They are derived
 operational lessons, not automatically promoted durable user/project memories.
+Version 4 adds quality, use, and evaluation tables with neutral initial confidence
+for existing lessons. Resets preserve evaluation history in prior generations;
+explicit lesson deletion cascades only its derived evaluation records.

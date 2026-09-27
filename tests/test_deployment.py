@@ -115,7 +115,7 @@ def test_restart_keeps_all_persistent_records_and_closes_db(production):
         recovered = CandidateStore(store.database).get(record['id'])
         assert recovered['apply']['status'] == 'denied' and recovered['events'][0]['event'] == 'audit_saved'
         with store.database.transaction() as db:
-            assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+            assert db.execute('PRAGMA user_version').fetchone()[0] == 4
             assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 

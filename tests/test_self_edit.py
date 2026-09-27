@@ -371,7 +371,7 @@ def test_version_one_migration_preserves_data_and_is_repeatable(tmp_path):
     with database.transaction() as connection:
         assert connection.execute('SELECT id FROM conversations').fetchone()[0] == 'old'
         assert connection.execute('SELECT count(*) FROM candidates').fetchone()[0] == 0
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 4
     database.close()
 
 

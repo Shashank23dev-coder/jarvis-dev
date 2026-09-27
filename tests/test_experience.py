@@ -226,6 +226,8 @@ def test_v2_migration_preserves_existing_state(tmp_path):
     candidates.save(candidate, 'apply_rolled_back')
     before = candidates.get(candidate['id'])
     with store.database.transaction() as db:
+        for table in ('experience_evaluations', 'experience_uses', 'experience_quality'):
+            db.execute('DROP TABLE ' + table)
         db.execute('DROP TABLE experiences')
         db.execute('PRAGMA user_version=2')
     store.close()
