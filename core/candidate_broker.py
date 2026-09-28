@@ -18,10 +18,28 @@ CONTAINER = 'jarvis-jarvis-1'
 
 
 class Broker:
-    def __init__(self, service):
+    def __init__(self, service, *, source=SOURCE):
         self.service = service
+        # Trusted host configuration only; no request may select a repository.
+        self.source = Path(source)
+
+    def check_source(self):
+        try:
+            canonical = self.source.resolve(strict=True)
+            actual = self.service.source.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ToolDenied('Broker development checkout unavailable') from exc
+        if (os.environ.get('JARVIS_MODE') != 'development'
+                or not self.source.is_absolute()
+                or canonical != self.source
+                or self.service.source != self.source
+                or actual != self.source
+                or not (self.source / '.git').is_dir()
+                or (self.source / '.git').is_symlink()):
+            raise ToolDenied('Broker requires the configured development checkout')
 
     def execute(self, raw):
+        self.check_source()
         request = Request.model_validate(raw).checked()
         context = dict(source='production_chat', task_id=request.task_id,
                        conversation_id=request.conversation_id, request_id=request.request_id)

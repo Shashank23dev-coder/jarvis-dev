@@ -37,6 +37,10 @@ CREATE = re.compile(PREFIX + r'(?:create (?:a |an )?self-edit candidate\b|(?:mod
 MANAGE = re.compile(PREFIX + r'(inspect|rerun tests for|review|discard) (?:self-edit )?candidate ([0-9a-f-]{36})[.!]?\s*$', re.I)
 APPLY_READ = re.compile(PREFIX + r'(?:show (?:the )?apply eligibility preview for|preview (?:the )?apply eligibility for|inspect (?:the )?apply (?:audit|result)(?: for)?|show (?:the )?apply (?:audit|result) for) candidate ([0-9a-f-]{36})[.!]?(?:\s+Do not apply it[.!]?)?\s*$', re.I)
 NEGATIVE = re.compile(r"\b(?:do not (?:edit|modify|create|change|improve)|don't (?:edit|modify|create|change|improve)|never (?:edit|modify|create|change|improve)|only explain|only plan|without (?:editing|changes|creating)|hypothetical)\b", re.I)
+# This complete constraint preserves production defaults; it does not prohibit
+# isolated proposals. Do not exempt arbitrary text following a negative verb.
+PRESERVE_PRODUCTION = re.compile(
+    r"(?im)^[ \t]*(?:-[ \t]+)?do not change production behavior by default[.!]?[ \t]*$")
 
 
 class CandidateTools:
@@ -50,7 +54,7 @@ class CandidateTools:
         self.created = False
         self.allowed = set()
         self.ids = set()
-        if not NEGATIVE.search(goal):
+        if not NEGATIVE.search(PRESERVE_PRODUCTION.sub('', goal)):
             if CREATE.match(goal) or re.match(PREFIX + r'(?:build|implement|add|fix|update|refactor)\b', goal, re.I):
                 self.allowed = {'create', 'inspect', 'tests', 'review'}
             else:

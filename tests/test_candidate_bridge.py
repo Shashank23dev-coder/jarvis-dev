@@ -17,7 +17,7 @@ from test_agent import ScriptedModel, call, final
 from test_self_edit import setup, tree_bytes
 
 ARGS = dict(inspect_paths=['src/app.py'], targeted_tests=['tests/test_app.py'])
-GOAL = 'Build Phase 1 of JarvisBrain'
+GOAL = 'Build Phase 1 of JarvisBrain\n- Do not change production behavior by default.\nDo not apply. Do not deploy.'
 
 
 def request(action='create', goal=GOAL, arguments=None, **extra):
@@ -26,9 +26,61 @@ def request(action='create', goal=GOAL, arguments=None, **extra):
                 created=time.time(), **extra)
 
 
+@pytest.mark.parametrize('goal', [
+    GOAL + '\nDo not create a candidate.',
+    GOAL + '\nDo not edit your code.',
+    'Create a self-edit candidate. Do not change production behavior by default or create candidates.',
+    'Create a self-edit candidate\nDo not change production behavior by default and do not edit.',
+    'Only plan\nDo not change production behavior by default.',
+])
+def test_production_preservation_does_not_erase_other_denials(setup, goal):
+    with pytest.raises(ToolDenied):
+        Broker(setup[2](), source=setup[0]).execute(request(goal=goal))
+
+
+@pytest.mark.parametrize('target', ['/app', '/home/ubuntu/jarvis', '/tmp/arbitrary'])
+def test_request_cannot_select_repository(setup, target):
+    from pydantic import ValidationError
+    broker = Broker(setup[2](), source=setup[0])
+    with pytest.raises(ValidationError):
+        broker.execute(request(arguments=dict(ARGS, source_root=target)))
+    with pytest.raises(ValidationError):
+        broker.execute(request(source_root=target))
+
+
+@pytest.mark.parametrize('kind', ['production', 'arbitrary', 'symlink', 'traversal', 'mode'])
+def test_misconfigured_broker_fails_closed(setup, tmp_path, monkeypatch, kind):
+    source, _, factory = setup
+    service = factory()
+    configured = source
+    if kind in {'production', 'arbitrary'}:
+        service.source = tmp_path / kind
+        service.source.mkdir()
+    elif kind == 'symlink':
+        configured = tmp_path / 'alias'
+        configured.symlink_to(source, target_is_directory=True)
+    elif kind == 'traversal':
+        configured = source / '..' / source.name
+    else:
+        monkeypatch.setenv('JARVIS_MODE', 'production')
+    with pytest.raises(ToolDenied):
+        Broker(service, source=configured).execute(request())
+    with service.store.database.transaction() as db:
+        assert db.execute('SELECT COUNT(*) FROM candidates').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('path', ['.env', 'tools/policy.py', 'core/candidate_broker.py',
+    '../outside.py', '/home/ubuntu/jarvis/main.py', '/tmp/arbitrary.py',
+    'src/../../outside.py', 'src/./app.py', 'src//app.py', 'src\\app.py'])
+def test_broker_rejects_protected_and_noncanonical_paths(setup, path):
+    result = Broker(setup[2](), source=setup[0]).execute(
+        request(arguments=dict(ARGS, inspect_paths=[path])))
+    assert result['state'] == 'rejected'
+
+
 def test_ordinary_production_chat_routes_to_dev_and_audits(setup, tmp_path, monkeypatch):
     source, db, factory = setup
-    broker = Broker(factory())
+    broker = Broker(factory(), source=source)
     before = tree_bytes(source)
     production = tmp_path / 'production'
     production.mkdir()
@@ -64,7 +116,9 @@ def test_ordinary_production_chat_routes_to_dev_and_audits(setup, tmp_path, monk
     assert Path(record['worktree']).is_relative_to(tmp_path / 'candidates')
     assert (Path(record['worktree']) / 'src/app.py').read_text() == 'value = 2\n'
     assert tree_bytes(source) == before and tree_bytes(production) == untouched
-    assert broker.execute(requests[0])['id'] == record['id']
+    with monkeypatch.context() as host:
+        host.setenv('JARVIS_MODE', 'development')
+        assert broker.execute(requests[0])['id'] == record['id']
     assert 'PRIVATE SENTINEL' not in json.dumps(data)
     assert 'worktree' not in project(record)
 
@@ -72,17 +126,17 @@ def test_ordinary_production_chat_routes_to_dev_and_audits(setup, tmp_path, monk
 @pytest.mark.parametrize('action', ['apply', 'deploy', 'command', 'start'])
 def test_bridge_has_no_privileged_operations(setup, action):
     with pytest.raises(ToolDenied):
-        Broker(setup[2]()).execute(request(action))
+        Broker(setup[2](), source=setup[0]).execute(request(action))
 
 
 @pytest.mark.parametrize('goal', ['Only plan to build JarvisBrain', 'Do not modify your code', 'Hello', '"Build JarvisBrain"'])
 def test_host_rechecks_authority(setup, goal):
     with pytest.raises(ToolDenied):
-        Broker(setup[2]()).execute(request(goal=goal))
+        Broker(setup[2](), source=setup[0]).execute(request(goal=goal))
 
 
 def test_protected_paths_and_sanitized_projection(setup):
-    record = Broker(setup[2]()).execute(request(arguments=dict(ARGS, inspect_paths=['.env'])))
+    record = Broker(setup[2](), source=setup[0]).execute(request(arguments=dict(ARGS, inspect_paths=['.env'])))
     assert record['state'] == 'rejected'
     record.update(diff='secret', worktree='/private/path', goal='secret',
                   reviewer_result=dict(verdict='rejected', summary='secret'),
@@ -125,7 +179,7 @@ def test_broker_create_rerun_review_discard_real_docker(setup, monkeypatch):
     monkeypatch.setenv('JARVIS_MODE', 'development')
     source, _, factory = setup
     before = tree_bytes(source)
-    broker = Broker(factory(tester=None))
+    broker = Broker(factory(tester=None), source=source)
     created = request()
     result = broker.execute(created)
     assert result['state'] == 'passed', result
