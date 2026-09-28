@@ -122,8 +122,52 @@ codes. It stores no goal copies, prompts, tool arguments/results, model outputs,
 exception details, credentials or reasoning. The ordinary user message and final
 answer are still stored through the existing conversation system. Routing records
 survive process restarts and appear through existing task/activity APIs. Flag-off
-requests create no new routing events. Tasks answered by deterministic context
+requests now record the legacy path with the fixed `brain_disabled` category.
+Tasks answered by deterministic context
 handling also create no provider-turn events because no provider was called.
+
+## Read-only runtime introspection
+
+Ordinary chat can call `inspect_current_brain` with no arguments. The runner binds
+it to the current task (the current user request/turn), never a model-supplied ID.
+It reads a bounded projection of that task's routing activity, not process
+environment, prompts, model payloads, conversation content or private tool traces.
+No flag changes, provider selection, candidate apply or deployment capability is
+added. The ordinary registry still logs only the tool's safe status summary.
+
+At each Brain invocation a `brain_runtime` event records the effective cached
+settings: enabled/disabled and the selected registered provider. Existing
+`brain_route` events record which path actually executes each model iteration.
+The tool exposes the following allowlisted fields:
+
+- `available` and `recording_status`: distinguish recorded evidence, missing
+  records, invalid metadata and an unavailable store.
+- `jarvisbrain_enabled` and `feature_flag_state`: effective settings for this
+  execution, with the flag normalized to `1` or `0`, never raw configuration.
+- `brain_path`: `jarvisbrain`, `legacy`, `legacy_fallback` or `not_recorded`.
+- `provider_selected`, `provider_used`, `fallback_used`, `fallback_reason`,
+  `routing_decision_category`, `model_iteration` and `route_status`.
+- `task_id` (the request/turn ID), `recorded_at`, `latest_route_at`, and
+  `observed_at`, with timestamps normalized to UTC.
+
+Provider names and categories come from closed allowlists. `legacy` identifies
+the legacy adapter; it does not claim a vendor or model identity that wasn't
+recorded. Provider exceptions, arbitrary configuration strings, event messages,
+extra fields, system prompts, secrets and hidden reasoning are never projected.
+Readers validate stored fields again rather than trusting the entire event.
+
+Missing metadata is unknown, not proof that the Brain was disabled. Older tasks
+without the new runtime marker, and callers bypassing the Brain, report metadata
+not recorded. A context-only answer may have recorded settings but no provider
+execution; its path and provider-used fields remain explicitly unrecorded. A new
+runtime marker excludes previous executions of the same task.
+
+When chat uses the tool, the final routing answer is regenerated from the latest
+sanitized record. This includes the answer-generating iteration, so fallback after
+the initial tool snapshot cannot produce a stale “no fallback” claim. Existing
+candidate/apply/deployment outcome reporting retains priority. No provider API call
+is made by the reader, and no database migration or production setting change is
+required by this introspection patch.
 
 ## Phase 2
 

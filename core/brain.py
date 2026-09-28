@@ -35,24 +35,30 @@ class JarvisBrain:
         return assemble_context(context, store, **limits)
 
     def run(self, goal, *, task_id, task_store):
-        if not self.settings.enabled:
-            return self.runner.run(goal, task_id=task_id, task_store=task_store)
         task = task_store.get_task(task_id)
         if task is None:
             raise ValueError('Brain execution requires an existing task')
         context = TaskContext.from_task(goal, task)
-        session = _ProviderSession(self.route(context), self.runner.model, task_store, task_id)
+        provider = self.route(context) if self.settings.enabled else None
+        task_store.add_brain_runtime(task_id, enabled=self.settings.enabled,
+                                    selected_provider=(provider.name if provider else None)
+                                    if self.settings.enabled else 'legacy')
+        session = _ProviderSession(provider, self.runner.model, task_store, task_id, enabled=self.settings.enabled)
+        if not self.settings.enabled:
+            return self.runner.run(goal, task_id=task_id, task_store=task_store, model=session.turn)
         return self.runner.run(goal, task_id=task_id, task_store=task_store,
                                model=session.turn, context_builder=self.assemble_context, engineering=True)
 
 
 class _ProviderSession:
     """Task-local routing/fallback state. Never restart or replay the agent loop."""
-    def __init__(self, provider, legacy, store, task_id):
+    def __init__(self, provider, legacy, store, task_id, *, enabled=True):
         self.provider, self.legacy = provider, legacy
+        self.enabled = enabled
         self.store, self.task_id = store, task_id
         self.iteration = 0
-        self.fallback_reason = 'provider_unavailable' if provider is None else None
+        self.fallback_reason = ('brain_disabled' if not enabled else
+                                'provider_unavailable' if provider is None else None)
         self.foreign_prefix_length = None
 
     def record(self, provider, reason, status):
@@ -96,5 +102,5 @@ class _ProviderSession:
             self.record('legacy', reason, 'failed')
             raise
         self.record('legacy', reason, 'completed' if result.status == 'completed' else 'incomplete')
-        self.fallback_reason = 'legacy_continuation'
+        self.fallback_reason = 'legacy_continuation' if self.enabled else 'brain_disabled'
         return result

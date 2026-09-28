@@ -89,13 +89,16 @@ class AgentRunner:
         from .deployment_tools import DeploymentTools
         deployments = DeploymentTools(goal)
         registry = deployments.bind(registry)
+        from .brain_status import BrainStatusTools
+        brain_status = BrainStatusTools(task_store, task_id)
+        registry = brain_status.bind(registry)
         seen_calls = set()
         calls = iterations = 0
         reflection = TaskReflection()
         retrieval_tracked = False
 
         def finish(status, response, reason):
-            outcome = self._finish(task_store, task_id, status, deployments.final_response(candidates.final_response(response)), iterations, calls, reason)
+            outcome = self._finish(task_store, task_id, status, deployments.final_response(candidates.final_response(brain_status.final_response(response))), iterations, calls, reason)
             attempt_capture(lambda: task_store.experiences.capture_task(task_store.get_task(task_id), reflection.observations))
             attempt_capture(lambda: task_store.experiences.evaluation.evaluate(task_id, reflection.observations))
             return outcome
@@ -109,7 +112,7 @@ class AgentRunner:
             for iterations in range(1, self.max_iterations + 1):
                 # Reserve the last iteration for a final answer; never invoke after it.
                 allow_tools = calls < self.max_tool_calls and iterations < self.max_iterations
-                instructions = INSTRUCTIONS + candidates.instructions + deployments.instructions + (RECALL_INSTRUCTIONS if recall is not None else '')
+                instructions = INSTRUCTIONS + candidates.instructions + deployments.instructions + brain_status.instructions + (RECALL_INSTRUCTIONS if recall is not None else '')
                 if experiences and experiences['results']:
                     instructions += EXPERIENCE_INSTRUCTIONS
                 if recall is not None and recall.get('mode') == 'conversation_navigation':

@@ -74,7 +74,8 @@ def test_orchestrator_selects_flagged_path(tmp_path, monkeypatch, enabled):
     assert outcome.response == ('Brain answer' if enabled else 'Legacy answer')
     assert bool(provider.requests) is enabled
     assert bool(legacy.requests) is not enabled
-    assert bool(routes(store, task['id'])) is enabled
+    assert routes(store, task['id'])
+    assert routes(store, task['id'])[0]['reason'] == ('configured_provider' if enabled else 'brain_disabled')
     assert runner.model is legacy
 
 

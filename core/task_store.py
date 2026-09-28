@@ -143,12 +143,25 @@ class TaskStore:
             return None
         return self.update_task(task_id, status=status)
 
+    def add_brain_runtime(self, task_id, *, enabled, selected_provider):
+        """Record effective task-local settings, never raw environment values."""
+        from models.provider import PROVIDER_NAMES
+        if (type(enabled) is not bool or selected_provider not in PROVIDER_NAMES | {'legacy', None}
+                or (not enabled and selected_provider != 'legacy')
+                or (enabled and selected_provider == 'legacy')):
+            raise ValueError('Invalid Brain runtime metadata')
+        return self._append_activity(task_id, {
+            'type': 'brain_runtime', 'task_id': task_id, 'timestamp': self.timestamp(),
+            'message': 'JarvisBrain runtime settings recorded.',
+            'enabled': enabled, 'selected_provider': selected_provider,
+        })
+
     def add_routing_activity(self, task_id, *, provider, reason, iteration, status):
         """Closed metadata schema: never persist prompts, outputs or reasoning."""
         from models.provider import PROVIDER_NAMES
         if (provider not in PROVIDER_NAMES | {'legacy'}
                 or reason not in {'configured_provider', 'provider_unavailable',
-                                  'provider_error', 'provider_incomplete', 'legacy_continuation'}
+                                  'provider_error', 'provider_incomplete', 'legacy_continuation', 'brain_disabled'}
                 or type(iteration) is not int or not 1 <= iteration <= 64
                 or status not in {'started', 'completed', 'failed', 'incomplete'}):
             raise ValueError('Invalid routing metadata')

@@ -140,7 +140,7 @@ class ToolRegistry:
             return (f"Exit code {data.returncode}; output characters {len(data.stdout) + len(data.stderr)}; "
                     f"timed_out={data.timed_out}; truncated={data.truncated}.")
         if result.data is not None:
-            return "Returned candidate status and bounded evidence."
+            return "Returned structured status and bounded evidence."
         return result.error.message
 
     def execute(self, name: str, arguments: str, *, task_id: str,
