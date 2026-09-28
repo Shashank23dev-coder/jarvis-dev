@@ -1,0 +1,133 @@
+# JarvisBrain Phase 1
+
+Jarvis owns task state, context selection, routing and tool execution. A model is
+a provider of bounded turns, not the owner of the conversation or its authority.
+Phase 1 introduces this boundary while retaining the existing execution engine.
+
+```text
+Existing /task API (agent mode)
+  Orchestrator
+    JarvisBrain (feature flag)
+      normalized TaskContext
+      shared bounded memory / recall / experience assembly
+      configured ProviderRegistry route
+        OpenAIProvider -> existing request_agent_turn transport
+      AgentRunner -> existing authorized tools -> normalized AgentOutcome
+      TaskStore -> routing activity, ordinary task/messages/experience
+
+Flag off: Orchestrator -> legacy AgentRunner model callable
+Provider failure: same running loop -> legacy model callable
+```
+
+`core/brain.py` owns provider choice and per-task fallback. The shared
+`core/task_context.py` assembles context using existing services and their limits,
+provenance, sensitive-content filtering and current-task cutoffs. Brief/missing
+recall can still produce a deterministic answer without calling any provider.
+Experience capture, retrieval evaluation and durable-memory writes retain their
+existing rules. There is no new memory store or database migration.
+
+`AgentRunner` remains the execution engine. It binds tools to the original current
+user goal and task/conversation IDs, enforces call/iteration limits, executes tools,
+and applies authoritative candidate/deployment response overrides. Provider output
+never grants authority. Normalized results remain the existing `AgentOutcome` and
+task API records; UI code and response field contracts are unchanged. Explicit
+`mode=plan` continues through the legacy planner. Candidate author/reviewer model
+workers also retain their existing path; Phase 1 changes ordinary agent routing.
+
+## Configuration and rollback
+
+Configuration is read when the orchestrator is constructed, normally at process
+startup. It is host configuration, never an API field, user message or tool input.
+
+| Variable | Default | Behavior |
+| --- | --- | --- |
+| `JARVIS_BRAIN_ENABLED` | `0` | Only exact `1` enables the new path. Other values leave legacy behavior enabled. |
+| `JARVIS_BRAIN_PROVIDER` | `openai` | Selects one explicitly registered provider for the task. |
+
+For an operator-managed development process, set `JARVIS_BRAIN_ENABLED=1` and
+optionally `JARVIS_BRAIN_PROVIDER=openai` before startup. Only OpenAI is implemented
+and registered by default. Unknown or uninstalled providers fall back to the
+legacy callable; the arbitrary configuration value is not included in audit data.
+Changing environment variables after construction does not reroute running tasks.
+
+Rollback to legacy orchestration by unsetting the flag or setting it to `0`, then
+restarting the relevant development process. Existing data needs no conversion;
+older code can read routing entries as ordinary activity records. A production
+rollback remains subject to the existing release controller and approval contract.
+The production controller currently supplies a fixed environment without these
+flags, so deploying this milestone keeps production on the legacy path. Enabling
+it in controlled production requires a separately reviewed operator configuration
+change; this milestone does not expand the controller's environment allowlist.
+
+## Provider contract and extension points
+
+`models/provider.py` defines `ProviderRequest`, `ProviderTurn`, the `Provider`
+protocol and an explicit immutable registry. A provider implements
+`complete(request) -> ProviderTurn`, and declares its host-owned `name`.
+Reserved extension names are `claude`, `codex`, `gemini` and `local`; none is an
+implemented integration or automatic plugin. There are no request-supplied module
+names, executable commands, base URLs or credential locations.
+
+The Jarvis transcript contract retains the established item vocabulary:
+
+- Input messages have `role` and `content`. Assistant message content can contain
+  `output_text` or `refusal` parts, as emitted by the existing OpenAI transport.
+- A tool request is a `function_call` with `name`, `call_id`, and JSON-string
+  `arguments`. A completed tool response is `function_call_output` with the same
+  `call_id` and a JSON-string `output`.
+- Tool definitions are the existing registry function schemas. `instructions` and
+  `allow_tools` are host constraints that adapters must carry to their provider.
+- Results contain `output`, user-facing `text`, and `status` (`completed` for a
+  usable turn). The runner independently rejects unsupported operations, multiple
+  calls per turn, malformed calls and execution-limit violations.
+- OpenAI `reasoning` items are transient opaque continuation state. They remain
+  only in the in-memory transcript and are never routing metadata or stored
+  messages. Adapters must never put hidden chain-of-thought in answer text.
+
+To add a future provider, implement an adapter that translates this vocabulary to
+and from its SDK, enforces bounded timeouts/output and disables remote tool
+execution, then register a trusted instance in `ProviderRegistry`. Configure its
+credentials only through trusted host configuration. Add transport, context,
+tool-loop, failure and continuation-isolation tests before making it selectable.
+Providers must keep request-specific state local; the registry is shared across
+tasks. No future SDK dependencies or autonomous model debates are included here.
+
+`OpenAIProvider` delegates to the existing bounded `request_agent_turn` function.
+The model, timeout, retry policy, tool settings and response handling are unchanged.
+`models.openai_client.AgentTurn` remains an alias for the normalized `ProviderTurn`
+to preserve existing Python callers and candidate-worker imports.
+
+## Failure and persistence semantics
+
+A provider exception, invalid result object, or incomplete turn switches the task
+to its legacy callable. Fallback is sticky for the rest of that task. It retries
+only the failed model turn with the current context and tool results, never the
+whole task. Existing call IDs, tool counts and remaining iteration budget stay in
+place, and already completed tools are not re-executed by fallback. There is at
+most one additional model call beyond the original iteration budget. If legacy
+also fails, the normal sanitized failed-task result is returned. Invalid tool
+operations remain host denials and do not trigger a second attempt with expanded
+authority. Context/storage failures also do not bypass checks by restarting.
+
+Adapter requests are copied so a failed adapter cannot mutate the fallback's
+context or tool definitions. When crossing from a non-OpenAI provider to legacy
+OpenAI, opaque reasoning items are removed; normalized calls and results remain.
+An OpenAI-to-legacy fallback preserves compatible OpenAI continuation data.
+
+Routing decisions and attempt outcomes use the existing SQLite activity table:
+`type=brain_route`, task ID, timestamp, provider, iteration, status and a fixed
+reason code. The closed schema accepts only known provider names and reason/status
+codes. It stores no goal copies, prompts, tool arguments/results, model outputs,
+exception details, credentials or reasoning. The ordinary user message and final
+answer are still stored through the existing conversation system. Routing records
+survive process restarts and appear through existing task/activity APIs. Flag-off
+requests create no new routing events. Tasks answered by deterministic context
+handling also create no provider-turn events because no provider was called.
+
+## Phase 2
+
+Future work includes separately tested provider adapters, explicit provider
+capabilities, cost/latency-aware routing policies, richer bounded context planning,
+and operator-controlled production activation. Multi-model debate, parallel
+specialists and local-model execution require their own budgets, isolation and
+evaluation; they are not Phase 1 behaviors.

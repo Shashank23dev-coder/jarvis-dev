@@ -1,8 +1,8 @@
 import os
-from dataclasses import dataclass
 from functools import lru_cache
 from dotenv import load_dotenv
 from openai import OpenAI
+from .provider import ProviderTurn as AgentTurn
 
 MODEL = "gpt-5.6"
 
@@ -13,13 +13,6 @@ def get_client():
     if os.getenv("JARVIS_MODE", "development") != "production":
         load_dotenv()
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-
-@dataclass(frozen=True)
-class AgentTurn:
-    output: list[dict]
-    text: str
-    status: str = "completed"
 
 
 def request_agent_turn(*, input: list[dict], tools: list[dict],

@@ -1,14 +1,16 @@
 import json
 from models.openai_client import ask_model
 from core.agent import AgentRunner
+from core.brain import JarvisBrain
 
 
 class Orchestrator:
-    def __init__(self, agent_runner: AgentRunner | None = None):
+    def __init__(self, agent_runner: AgentRunner | None = None, *, brain_settings=None, providers=None):
         self.agent_runner = agent_runner or AgentRunner()
+        self.brain = JarvisBrain(self.agent_runner, settings=brain_settings, providers=providers)
 
     def run_goal(self, goal: str, *, task_id: str, task_store):
-        return self.agent_runner.run(goal, task_id=task_id, task_store=task_store)
+        return self.brain.run(goal, task_id=task_id, task_store=task_store)
 
     def create_plan(self, goal: str):
         prompt = f"""

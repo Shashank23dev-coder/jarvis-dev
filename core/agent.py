@@ -7,8 +7,9 @@ from typing import Callable
 from models.openai_client import request_agent_turn
 from tools.registry import ToolRegistry
 from .task_store import TaskStore
-from .experience import ExperienceStore, TaskReflection, task_type, attempt_capture, EXPERIENCE_INSTRUCTIONS
-from .recall import RecallService, RECALL_INSTRUCTIONS, NAVIGATION_INSTRUCTIONS, encoded, wants_recall
+from .experience import TaskReflection, attempt_capture, EXPERIENCE_INSTRUCTIONS
+from .recall import RECALL_INSTRUCTIONS, NAVIGATION_INSTRUCTIONS
+from .task_context import TaskContext, assemble_context
 
 
 INSTRUCTIONS = """You are Jarvis, a conversational assistant with read-only repository tools.
@@ -70,17 +71,16 @@ class AgentRunner:
         store.add_activity(task_id, summaries[status], "agent_" + status)
         return outcome
 
-    def run(self, goal: str, *, task_id: str, task_store: TaskStore) -> AgentOutcome:
+    def run(self, goal: str, *, task_id: str, task_store: TaskStore,
+            model=None, context_builder=assemble_context) -> AgentOutcome:
         if task_store.get_task(task_id) is None:
             raise ValueError("Agent execution requires an existing task")
         task_store.set_status(task_id, "running")
         task_store.add_activity(task_id, "Jarvis started the request.", "agent_started")
         task = task_store.get_task(task_id)
-        history = [{"role": message["role"], "content": message["content"]}
-                   for message in task_store.memory.prompt_history(
-                       task["conversation_id"], through_task=task_id)]
-        # Preserve the direct runner interface, including its context-size guard.
-        history[-1] = {"role": "user", "content": goal}
+        context = TaskContext.from_task(goal, task)
+        # Per-run dependencies: concurrent tasks never mutate the shared runner.
+        request_turn = model if model is not None else self.model
         from .candidate_tools import CandidateTools
         candidates = CandidateTools(goal, task_store.database, self.candidate_service_factory,
                                     source_context={'task_id': task_id, 'conversation_id': task['conversation_id']})
@@ -100,32 +100,11 @@ class AgentRunner:
             return outcome
 
         try:
-            recall = None
-            experiences = None
-            if task_type(goal) is not None:
-                experiences = attempt_capture(lambda: ExperienceStore(task_store.database, limits=self.experience_limits).search(
-                    goal[:500], before_time=task['created_at'], exclude_task_id=task_id))
-                if experiences and experiences['results']:
-                    history.insert(0, {'role': 'user', 'content': encoded(experiences)})
-            if wants_recall(goal):
-                recall = RecallService(task_store.database, limits=self.recall_limits).for_task(goal, task)
-                if recall.get('mode') == 'conversation_navigation':
-                    if not recall['results']:
-                        return finish('completed',
-                            "I couldn't find readable excerpts from the most recent prior conversation "
-                            "within the bounded history window.", 'recall_not_found')
-                    if recall['brief']:
-                        excerpts = '; '.join(
-                            f"{item['role']}: {json.dumps(item['content'][:100], ensure_ascii=False)}"
-                            for item in recall['results'])
-                        return finish('completed',
-                            'The available excerpt from the prior conversation is extremely short: ' + excerpts +
-                            '. There is not enough context to infer a topic or next step.', 'recall_brief')
-                if not recall['results'] and len(history) == 1:
-                    return finish('completed',
-                        "I couldn't find relevant prior conversation history or explicit durable memories "
-                        "within the bounded search. Can you remind me of the topic or details?", 'recall_not_found')
-                history.insert(0, {'role': 'user', 'content': encoded(recall)})
+            assembled = context_builder(context, task_store, recall_limits=self.recall_limits,
+                                        experience_limits=self.experience_limits)
+            history, recall, experiences = assembled.history, assembled.recall, assembled.experiences
+            if assembled.answer is not None:
+                return finish('completed', assembled.answer, assembled.stop_reason)
             for iterations in range(1, self.max_iterations + 1):
                 # Reserve the last iteration for a final answer; never invoke after it.
                 allow_tools = calls < self.max_tool_calls and iterations < self.max_iterations
@@ -141,7 +120,7 @@ class AgentRunner:
                 if experiences and experiences['results'] and not retrieval_tracked:
                     attempt_capture(lambda: task_store.experiences.evaluation.track(task_id, experiences['results']))
                     retrieval_tracked = True
-                turn = self.model(input=history.copy(), tools=registry.model_tools(),
+                turn = request_turn(input=history.copy(), tools=registry.model_tools(),
                                   instructions=instructions, allow_tools=allow_tools)
                 if turn.status != "completed":
                     return finish("failed", "The model did not complete its response.", "model_incomplete")

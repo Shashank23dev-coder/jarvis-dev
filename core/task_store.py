@@ -142,3 +142,18 @@ class TaskStore:
         if self.get_task(task_id) is None:
             return None
         return self.update_task(task_id, status=status)
+
+    def add_routing_activity(self, task_id, *, provider, reason, iteration, status):
+        """Closed metadata schema: never persist prompts, outputs or reasoning."""
+        from models.provider import PROVIDER_NAMES
+        if (provider not in PROVIDER_NAMES | {'legacy'}
+                or reason not in {'configured_provider', 'provider_unavailable',
+                                  'provider_error', 'provider_incomplete', 'legacy_continuation'}
+                or type(iteration) is not int or not 1 <= iteration <= 64
+                or status not in {'started', 'completed', 'failed', 'incomplete'}):
+            raise ValueError('Invalid routing metadata')
+        return self._append_activity(task_id, {
+            'type': 'brain_route', 'message': 'JarvisBrain provider turn ' + status + '.',
+            'timestamp': self.timestamp(), 'task_id': task_id, 'provider': provider,
+            'reason': reason, 'iteration': iteration, 'status': status,
+        })
