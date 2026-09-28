@@ -1,5 +1,9 @@
 # Jarvis production deployment
 
+For the controlled local release path from `~/jarvis-dev`, see
+[the deployment pipeline](deployment-pipeline.md). It replaces archive/SCP releases
+with exact-commit approval, immutable image builds, checks and verified rollback.
+
 This foundation runs one Jarvis web/API process behind an HTTPS reverse proxy.
 The UI and task/model workflows are unchanged. Production adds authentication,
 configuration checks, persistent storage, health checks and structured logging.

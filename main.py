@@ -433,4 +433,39 @@ def reset_experience_confidence(experience_id: str, store: TaskStore = Depends(g
     return store.experiences.evaluation.reset(experience_id)
 
 
+def get_release_service():
+    from core.deployment_release import configured_service
+    try:
+        return configured_service()
+    except Exception:
+        raise HTTPException(status_code=409, detail='Deployment controller unavailable') from None
+
+
+def release_action(action):
+    try:
+        return action()
+    except Exception:
+        raise HTTPException(status_code=409, detail='Deployment operation denied or failed') from None
+
+
+@router.get('/deployments')
+def deployment_history(service=Depends(get_release_service)):
+    return release_action(service.history)
+
+
+@router.get('/deployments/preview/{commit}')
+def deployment_preview(commit: str, service=Depends(get_release_service)):
+    return release_action(lambda: service.preview(commit))
+
+
+@router.get('/deployments/{deployment_id}')
+def deployment_inspect(deployment_id: str, service=Depends(get_release_service)):
+    return release_action(lambda: service.inspect(deployment_id))
+
+
+@router.post('/deployments/{commit}/deploy')
+def deployment_approve(commit: str, request: ApplyRequest, service=Depends(get_release_service)):
+    return release_action(lambda: service.deploy(commit, request.confirmation))
+
+
 app.include_router(router)

@@ -48,7 +48,9 @@ def test_explicit_creation_evidence_and_main_immutability(setup):
 def test_chat_cannot_authorize_candidate_tools(setup, goal):
     model = ScriptedModel(call('create_self_edit_candidate', ARGS), final('Unavailable'))
     run(setup, goal, model)
-    assert len(model.requests[0]['tools']) == 6
+    assert {tool['name'] for tool in model.requests[0]['tools']} == {
+        'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest', 'run_command',
+        'preview_deployment', 'inspect_deployment', 'deployment_history'}
     assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'unknown_tool'
 
 
@@ -127,7 +129,9 @@ def test_prior_conversation_does_not_carry_authorization(setup):
     runner = AgentRunner(ToolRegistry(RepositoryTools(source)), model=model,
                          candidate_service_factory=lambda db: pytest.fail('Unauthorized dispatch'))
     runner.run(second['goal'], task_id=second['id'], task_store=store)
-    assert len(model.requests[0]['tools']) == 6
+    assert {tool['name'] for tool in model.requests[0]['tools']} == {
+        'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest', 'run_command',
+        'preview_deployment', 'inspect_deployment', 'deployment_history'}
     assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'unknown_tool'
 
 

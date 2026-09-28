@@ -1,0 +1,7 @@
+{
+  "source": "/home/ubuntu/jarvis-dev",
+  "journal": "/home/ubuntu/.local/state/jarvis-releases",
+  "env_file": "/home/ubuntu/jarvis/.env",
+  "container": "jarvis-jarvis-1",
+  "volume": "jarvis_state"
+}

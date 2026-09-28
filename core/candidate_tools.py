@@ -75,7 +75,7 @@ request. Normal repository tools remain read-only. Candidate creation runs the
 bounded proposal, isolated edits, tests and independent review synchronously;
 inspect its returned evidence. Choose relevant inspection and targeted test paths.
 Main changes require the separately supplied approve_and_apply_candidate tool.
-Only explicit current-user UUID approval enables it. No push or deployment exists.
+Only explicit current-user UUID approval enables it. Candidate tools never push or deploy.
 Use preview_candidate_apply for eligibility; it never applies or recovers main.
 Use inspect_candidate_apply for a read-only audit snapshot; it never recovers.
 Report preview eligibility/reason or audit status, commit and verification as returned.

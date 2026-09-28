@@ -113,6 +113,10 @@ memory, process-count and scratch limits; Bubblewrap retains its existing limits
 
 ## Next milestone
 
+Deployment preview/history and exact-current-message deployment authorization are
+documented in [the controlled deployment pipeline](deployment-pipeline.md). The
+controller is development-only and disabled until configured by the operator.
+
 Validate a production sandbox deployment and add persistent execution records,
 cancellation and resource quotas. Keep file mutation disabled; introduce reviewed
 change proposals and human approval before a later editing tool.
