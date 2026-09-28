@@ -9,7 +9,7 @@ from uuid import uuid4
 from pydantic import Field
 from tools.schemas import StrictModel
 from tools.policy import ToolDenied
-from .candidate_tools import CreateArguments, CandidateArguments
+from .candidate_tools import CreateArguments, CandidateArguments, EngineeringArguments
 from .database import valid_id
 
 ROOT = Path('/tmp/jarvis-candidate-mailbox')
@@ -30,8 +30,8 @@ class Request(StrictModel):
             raise ToolDenied('Invalid request identity')
         if not 0 <= time.time() - self.created <= 330:
             raise ToolDenied('Expired request')
-        schema = CreateArguments if self.action == 'create' else CandidateArguments
-        if self.action not in {'create', 'inspect', 'tests', 'review', 'discard'}:
+        schema = EngineeringArguments if self.action == 'engineer' else CreateArguments if self.action == 'create' else CandidateArguments
+        if self.action not in {'create', 'engineer', 'inspect', 'tests', 'review', 'discard'}:
             raise ToolDenied('Unsupported candidate operation')
         schema.model_validate(self.arguments)
         return self
@@ -109,6 +109,12 @@ class CandidateClient:
     def inspect(self, candidate_id):
         return self.invoke('inspect', dict(candidate_id=candidate_id))
 
+    def engineer(self, goal, inspect_paths, targeted_tests, problem_detected, hypothesis):
+        if goal != self.goal:
+            raise ToolDenied('Goal mismatch')
+        return self.invoke('engineer', dict(inspect_paths=inspect_paths, targeted_tests=targeted_tests,
+                                          problem_detected=problem_detected, hypothesis=hypothesis))
+
     def tests(self, candidate_id):
         return self.invoke('tests', dict(candidate_id=candidate_id))
 
@@ -134,10 +140,27 @@ def project(record):
         raise ToolDenied('Invalid review result')
     summary = record.get('diff_summary') or {}
     summary = {k: v for k, v in summary.items() if k in {'files', 'added', 'deleted'} and type(v) is int and 0 <= v <= 400}
-    return dict(id=record['id'], state=record['state'], busy=bool(record.get('busy')),
+    projected = dict(id=record['id'], state=record['state'], busy=bool(record.get('busy')),
                 diff_summary=summary, files_changed=[], test_results=tests,
                 reviewer_result=dict(verdict=verdict, summary='Host review completed; detailed evidence remains in dev.') if verdict else None,
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)
+    if record.get('improvement'):
+        improvement = record['improvement']
+        comparison = improvement.get('baseline_comparison', {}).get('result')
+        if comparison not in {'not_run', 'not_compared', 'inconclusive', 'regressed', 'improved', 'unchanged_pass', 'unchanged_failure', 'changed_test_suite'}:
+            raise ToolDenied('Invalid baseline comparison')
+        projected['improvement'] = dict(
+            problem_detected='Detailed problem evidence remains in dev.',
+            hypothesis='Detailed hypothesis remains in dev.',
+            files_changed=summary.get('files', 0), tests_run=tests,
+            failures_revisions=[{'attempt': item['attempt'], 'state': item['state']}
+                for item in improvement.get('failures_revisions', [])[:2]
+                if type(item.get('attempt')) is int and item['attempt'] in (1, 2)
+                and item.get('state') in {'passed', 'needs_revision', 'rejected'}],
+            baseline_comparison={'result': comparison}, review_result=verdict,
+            confidence='supported_by_tests_and_review' if record['state'] == 'passed' and not record.get('busy') else 'insufficient',
+            implementation_provider='codex', review_provider='openai')
+    return projected
 
 
 def transfer(operation, payload=None):

@@ -88,9 +88,9 @@ issues in documentation being changed, including required documentation content.
 No earlier author reasoning or claimed review is authoritative.'''
 
 
-def model_request(payload, instructions, timeout):
+def model_request(payload, instructions, timeout, *, provider='openai'):
     """Killable model request from trusted code, never from the worktree cwd."""
-    encoded = json.dumps({'input': payload, 'instructions': instructions}).encode()
+    encoded = json.dumps({'input': payload, 'instructions': instructions, 'provider': provider}).encode()
     if len(encoded) > 256000:
         raise ToolDenied('Model context limit exceeded')
     process = subprocess.Popen([sys.executable, '-B', '-m', 'core.candidate_model'],
@@ -256,7 +256,13 @@ class SelfEditService:
             raise ToolDenied('Candidate iteration limit exceeded')
         self.record['iterations'] += 1
         self._tick('independent_review' if schema is Review else 'generate_proposal')
-        result = self.model(payload, instructions, min(30, self._check()))
+        if self.record.get('improvement') and self.model is model_request:
+            from .candidate_provider import EngineeringProviders
+            providers = EngineeringProviders.defaults(model_request)
+            provider = providers.reviewer if schema is Review else providers.implementer
+            result = provider.complete(payload, instructions, min(30, self._check()))
+        else:
+            result = self.model(payload, instructions, min(30, self._check()))
         self._check()
         return schema.model_validate(result)
 
@@ -295,6 +301,9 @@ class SelfEditService:
         self.record['manifest'] = scan(worktree, self._check)
         # Copy no source configuration/hooks, share no source object hardlinks.
         self.store.save(self.record, 'worktree_ready')
+        if self.record.get('improvement'):
+            self._engineering(context)
+            return
         proposal = self._ask({'goal': self.record['goal'], 'files': context}, PROPOSE, Proposal)
         self._tick('apply_edits')
         self._editor().apply([edit.model_dump() for edit in proposal.edits], self._original)
@@ -304,6 +313,94 @@ class SelfEditService:
             raise ToolDenied('Proposal made no changes')
         self._tests()
         self._review()
+
+    def _engineering(self, context):
+        """Baseline and at most two proposals; all execution uses existing gates."""
+        improvement = self.record['improvement']
+        _, _, worktree = self._paths(self.record)
+        repository = CandidateRepository(worktree, source_root=self.source, check=self._check)
+        self._tick('baseline_tests')
+        result = (self.tester(repository, 'baseline', self.record['targeted_tests']) if self.tester
+                  else repository.run_pytest(self.record['targeted_tests']))
+        self._check()
+        baseline = dict(commit=self.record['base_commit'], paths=self.record['targeted_tests'],
+                        returncode=result.returncode, timed_out=result.timed_out,
+                        truncated=result.truncated, sandbox=result.sandbox)
+        improvement['baseline_comparison'] = dict(baseline=baseline, result='not_compared')
+        self.record['state'] = 'needs_revision'
+        if scan(worktree, self._check) != self.record['manifest']:
+            raise ToolDenied('Baseline changed during tests')
+        self.store.save(self.record, 'baseline_finished')
+        if result.returncode not in (0, 1) or result.timed_out or result.truncated:
+            improvement['baseline_comparison']['result'] = 'inconclusive'
+            self.record['error'] = 'Baseline tests did not complete; comparison unavailable.'
+            return
+        for attempt in range(2):
+            # Reserve a provider turn for independent review of the final diff.
+            if self.record['iterations'] + 2 > self.limits.iterations:
+                break
+            test_start = len(self.record['test_results'])
+            payload = dict(goal=self.record['goal'], files=context,
+                           problem_detected=improvement['problem_detected'], hypothesis=improvement['hypothesis'],
+                           baseline=baseline)
+            if attempt:
+                payload.update(diff=self.record['diff'], tests=self.record['test_results'][-3:],
+                               review=self.record['reviewer_result'])
+            proposal = self._ask(payload, PROPOSE, Proposal)
+            self.record.update(state='needs_revision', tested_fingerprint=None, reviewer_result=None)
+            self._tick('apply_edits')
+            self._editor().apply([edit.model_dump() for edit in proposal.edits], self._original)
+            self._diff()
+            if not self.record['files_changed']:
+                raise ToolDenied('Proposal made no changes')
+            self._tests()
+            self._compare_baseline()
+            self._review()
+            improvement['failures_revisions'].append(dict(attempt=attempt + 1,
+                state=self.record['state'], fingerprint=self.record['fingerprint'],
+                review=self.record['reviewer_result'], tests=[{key: item[key] for key in
+                    ('phase', 'returncode', 'timed_out', 'truncated', 'fingerprint')}
+                    for item in self.record['test_results'][test_start:]]))
+            self._improvement_evidence()
+            self.store.save(self.record, 'engineering_attempt_finished')
+            if self.record['state'] in {'passed', 'rejected'}:
+                break
+            context = {path: self._editor().reader.read_text(path)
+                       for path in set(context) | set(self.record['files_changed'])}
+
+    def _compare_baseline(self):
+        comparison = self.record['improvement']['baseline_comparison']
+        baseline = comparison.get('baseline')
+        matches = [item for item in self.record['test_results']
+                   if item['phase'] == 'targeted' and item['fingerprint'] == self.record['fingerprint']]
+        if not baseline or not matches:
+            comparison.update(result='inconclusive')
+            return
+        target = matches[-1]
+        complete = (baseline['returncode'] in (0, 1) and target['returncode'] in (0, 1)
+                    and not any(item.get(key) for item in (baseline, target) for key in ('timed_out', 'truncated')))
+        # Changing tests is useful, but their exit-code change alone cannot prove
+        # a behavior improvement against the original test suite.
+        tests_changed = any(path.startswith('tests/') for path in self.record['files_changed'])
+        comparison['result'] = ('inconclusive' if not complete else
+            'changed_test_suite' if tests_changed else
+            'regressed' if baseline['returncode'] == 0 and target['returncode'] != 0 else
+            'improved' if baseline['returncode'] != 0 and target['returncode'] == 0 else
+            'unchanged_pass' if target['returncode'] == 0 else 'unchanged_failure')
+        comparison['candidate'] = {key: target[key] for key in ('paths', 'returncode', 'fingerprint')}
+
+    def _improvement_evidence(self):
+        improvement = self.record.get('improvement')
+        if improvement is not None:
+            attempts = improvement['failures_revisions']
+            if self.record.get('error') and (not attempts or attempts[-1].get('error') != self.record['error']):
+                if len(attempts) < 2:
+                    attempts.append(dict(attempt=len(attempts) + 1, state=self.record['state'], error=self.record['error']))
+            improvement.update(files_changed=self.record['files_changed'],
+                tests_run=[{key: item[key] for key in ('phase', 'paths', 'returncode', 'fingerprint',
+                                                     'timed_out', 'truncated')} for item in self.record['test_results']],
+                review_result=self.record['reviewer_result'],
+                confidence='supported_by_tests_and_review' if self.record['state'] == 'passed' else 'insufficient')
 
     def _tests(self):
         if self.record['state'] in {'discarded', 'rejected'} or not self.record['manifest']:
@@ -355,6 +452,13 @@ class SelfEditService:
             'fingerprint', 'tested_fingerprint', 'files_changed', 'diff_summary',
             'inspect_paths', 'targeted_tests')}
         candidate['diff_hash'] = diff_hash
+        if self.record.get('improvement'):
+            self._compare_baseline()
+            candidate['baseline_comparison'] = self.record['improvement']['baseline_comparison']
+            if candidate['baseline_comparison']['result'] in {'not_run', 'not_compared', 'inconclusive', 'regressed'}:
+                self.record.update(state='needs_revision', reviewer_result=None)
+                self.store.save(self.record, 'review_requires_baseline_comparison')
+                return
         review = self._ask({'candidate': candidate,
                             'goal': self.record['goal'], 'diff': self.record['diff'],
                             'tests': evidence, 'original_files': {path: self._original(path) for path in self.record['files_changed']}},
@@ -394,6 +498,7 @@ class SelfEditService:
                                tested_fingerprint=None, reviewer_result=None)
             self.store.save(self.record, 'candidate_failed')
         finally:
+            self._improvement_evidence()
             self.record['elapsed_seconds'] += time.monotonic() - started
             self.store.save(self.record)
         return self.store.get(candidate_id)
@@ -502,7 +607,7 @@ class SelfEditService:
             self.store.release(candidate_id)
         return self.store.get(candidate_id)
 
-    def start(self, goal, inspect_paths, targeted_tests, *, source_context=None):
+    def start(self, goal, inspect_paths, targeted_tests, *, source_context=None, improvement=None):
         text_value(goal)
         if not isinstance(inspect_paths, list) or not 1 <= len(inspect_paths) <= 8:
             raise ValueError('Supply 1 to 8 inspection paths')
@@ -512,6 +617,8 @@ class SelfEditService:
             raise ValueError('Invalid candidate path length or type')
         record = self.store.create(goal, inspect_paths, targeted_tests, source_context=source_context)
         record.update(source_root=str(self.source), limits=asdict(self.limits))
+        if improvement is not None:
+            record['improvement'] = improvement
         self.store.save(record)
         # Validate before any model, Git, or worktree mutation; denials are durable.
         try:
@@ -526,6 +633,16 @@ class SelfEditService:
             self.store.save(record, 'candidate_rejected')
             return self.store.get(record['id'])
         return self._operate(record['id'], 'start')
+
+    def engineer(self, goal, inspect_paths, targeted_tests, problem_detected, hypothesis, *, source_context=None):
+        for value in (problem_detected, hypothesis):
+            text_value(value, 2000)
+            safe_text(value)
+        improvement = dict(problem_detected=problem_detected, hypothesis=hypothesis,
+            implementation_provider='codex', review_provider='openai', files_changed=[], tests_run=[],
+            failures_revisions=[], baseline_comparison={'result': 'not_run'}, review_result=None,
+            confidence='insufficient')
+        return self.start(goal, inspect_paths, targeted_tests, source_context=source_context, improvement=improvement)
 
     def inspect(self, candidate_id):
         record = self.store.get(candidate_id, internal=True)

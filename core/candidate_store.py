@@ -40,6 +40,9 @@ class CandidateStore:
                            (record['state'], json.dumps(record), candidate_id))
                 row = {'busy': 0}
             record['busy'] = bool(row['busy'])
+            if record.get('improvement'):
+                record['improvement'].update(review_result=record['reviewer_result'],
+                    confidence='supported_by_tests_and_review' if record['state'] == 'passed' and (internal or not record['busy']) else 'insufficient')
             if not internal:
                 record.pop('manifest', None)
                 record.pop('lease_until', None)

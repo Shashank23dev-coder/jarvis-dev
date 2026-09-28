@@ -1,0 +1,272 @@
+"""Engineering decisions, isolated implementation, revision and approval boundaries."""
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from core.agent import AgentRunner
+from core.brain import BrainSettings, JarvisBrain
+from core.candidate_bridge import project
+from core.candidate_provider import EngineeringProviders, ProposalProvider
+from core.candidate_tools import CandidateTools
+from core.self_edit import REVIEW, Limits
+from core.task_store import TaskStore
+from models.provider import ProviderRegistry
+from tools import CommandResult, RepositoryTools, ToolRegistry
+from test_agent import call, final
+from test_brain import ScriptedProvider
+from test_self_edit import setup, tree_bytes
+
+
+ARGS = dict(inspect_paths=['src/app.py'], targeted_tests=['tests/test_app.py'],
+            problem_detected='The value is incorrect.', hypothesis='Changing the value to 2 fixes the failing assertion.')
+
+
+def run_checks(repository, phase, paths):
+    value = repository.read_text('src/app.py')
+    return CommandResult(('pytest',), 0 if value == 'value = 2\n' else 1, 'Assertion result')
+
+
+def model(payload, instructions, timeout):
+    if instructions == REVIEW:
+        assert payload['candidate']['baseline_comparison']['result'] == 'improved'
+        return dict(verdict='passed', summary='Fix verified independently.')
+    return dict(edits=[dict(path='src/app.py', content='value = 2\n')])
+
+
+def test_engineering_isolated_baseline_and_durable_metadata(setup):
+    source, database, factory = setup
+    before = tree_bytes(source)
+    candidate = factory(model=model, tester=run_checks).engineer('Fix incorrect value', **ARGS)
+    assert candidate['state'] == 'passed', candidate
+    assert tree_bytes(source) == before
+    metadata = candidate['improvement']
+    assert metadata['problem_detected'] == ARGS['problem_detected']
+    assert metadata['hypothesis'] == ARGS['hypothesis']
+    assert metadata['files_changed'] == ['src/app.py']
+    assert metadata['baseline_comparison']['baseline']['returncode'] == 1
+    assert metadata['baseline_comparison']['candidate']['returncode'] == 0
+    assert metadata['baseline_comparison']['result'] == 'improved'
+    assert metadata['review_result']['verdict'] == 'passed'
+    assert metadata['confidence'] == 'supported_by_tests_and_review'
+    assert len(metadata['failures_revisions']) == 1
+    assert len(metadata['tests_run']) == 2
+    database.close()
+    assert factory().inspect(candidate['id'])['improvement'] == metadata
+    projected = project(candidate)
+    assert project(projected) == projected
+    assert 'src/app.py' not in json.dumps(projected)
+    assert 'incorrect value' not in json.dumps(projected)
+    assert projected['improvement']['baseline_comparison']['result'] == 'improved'
+
+
+@pytest.mark.parametrize('failure', ['tests', 'review'])
+def test_failed_candidate_is_revised_with_evidence(setup, failure):
+    source, _, factory = setup
+    before = tree_bytes(source)
+    attempts = []
+    reviews = []
+    def author(payload, instructions, timeout):
+        if instructions == REVIEW:
+            reviews.append(payload)
+            return dict(verdict='needs_revision' if failure == 'review' and len(reviews) == 1 else 'passed',
+                        summary='Review of current diff.')
+        attempts.append(payload)
+        if len(attempts) == 2:
+            assert payload['tests'] and payload['diff']
+            if failure == 'review':
+                assert payload['review']['verdict'] == 'needs_revision'
+        value = 3 if failure == 'tests' and len(attempts) == 1 else 2
+        return dict(edits=[dict(path='src/app.py', content=f'value = {value}\n')])
+    candidate = factory(model=author, tester=run_checks).engineer('Fix the value', **ARGS)
+    assert candidate['state'] == 'passed', candidate
+    assert candidate['iterations'] <= 4 and candidate['tool_calls'] <= 64
+    attempts = candidate['improvement']['failures_revisions']
+    assert [item['state'] for item in attempts] == ['needs_revision', 'passed']
+    assert tree_bytes(source) == before
+
+
+@pytest.mark.parametrize('kind', ['protected', 'provider', 'review_rejected', 'baseline_timeout', 'baseline_error'])
+def test_engineering_failures_never_earn_approval(setup, kind):
+    source, _, factory = setup
+    before = tree_bytes(source)
+    def author(payload, instructions, timeout):
+        if kind == 'provider':
+            raise RuntimeError('PRIVATE_PROVIDER_EXCEPTION')
+        if kind == 'protected':
+            return dict(edits=[dict(path='core/candidate_provider.py', content='bypass = True\n')])
+        if instructions == REVIEW and kind == 'review_rejected':
+            return dict(verdict='rejected', summary='Unsafe fix')
+        return model(payload, instructions, timeout)
+    def tests(repository, phase, paths):
+        if phase == 'baseline' and kind.startswith('baseline_'):
+            return CommandResult(('pytest',), 2 if kind == 'baseline_error' else 0, '',
+                                 timed_out=kind == 'baseline_timeout')
+        return run_checks(repository, phase, paths)
+    candidate = factory(model=author, tester=tests).engineer('Fix the value', **ARGS)
+    assert candidate['state'] != 'passed'
+    assert candidate['improvement']['confidence'] == 'insufficient'
+    assert 'PRIVATE_PROVIDER_EXCEPTION' not in json.dumps(candidate)
+    assert tree_bytes(source) == before
+
+
+def test_engineering_budget_and_shared_one_candidate_limit(setup):
+    _, database, factory = setup
+    service = factory(model=model, tester=run_checks, limits=Limits(iterations=1))
+    candidate = service.engineer('Fix the value', **ARGS)
+    assert candidate['state'] != 'passed' and candidate['iterations'] == 0
+    tools = CandidateTools('Fix the value', database, lambda db: factory(model=model, tester=run_checks), engineering=True)
+    tools.engineer(**ARGS)
+    from tools import ToolDenied
+    with pytest.raises(ToolDenied):
+        tools.create(ARGS['inspect_paths'], ARGS['targeted_tests'])
+
+
+def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(setup):
+    source, database, factory = setup
+    store = TaskStore(database.path)
+    task = store.create_task('Diagnose and fix the incorrect value')
+    provider = ScriptedProvider(call('engineer_candidate', ARGS), final('Deployed!'))
+    runner = AgentRunner(ToolRegistry(RepositoryTools(source)),
+                        candidate_service_factory=lambda db: factory(model=model, tester=run_checks))
+    brain = JarvisBrain(runner, settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
+    outcome = brain.run(task['goal'], task_id=task['id'], task_store=store)
+    assert 'passed' in outcome.response and 'Deployed!' not in outcome.response
+    assert 'separate human' in outcome.response and 'improved' in outcome.response
+    names = {tool['name'] for tool in provider.requests[0].tools}
+    assert 'engineer_candidate' in names
+    assert not names & {'approve_and_apply_candidate', 'approve_and_deploy_commit'}
+
+
+@pytest.mark.parametrize('goal', ['Hello', 'Explain the bug', 'Fix the bug but only plan',
+                                'Diagnose the problem without changes', 'Do not edit anything'])
+def test_engineering_denied_without_current_task_authority(setup, goal):
+    _, database, _ = setup
+    tools = CandidateTools(goal, database, engineering=True)
+    assert 'engineer' not in tools.allowed
+
+
+def test_separate_provider_contract_and_role_routing():
+    calls = []
+    def transport(payload, instructions, timeout, *, provider):
+        calls.append(provider)
+        return {'result': provider}
+    providers = EngineeringProviders.defaults(transport)
+    assert providers.implementer.complete({}, '', 1) == {'result': 'codex'}
+    assert providers.reviewer.complete({}, '', 1) == {'result': 'openai'}
+    assert calls == ['codex', 'openai']
+    with pytest.raises(ValueError):
+        EngineeringProviders(providers.implementer, providers.implementer)
+    # A later host-installed Claude reviewer can use the same contract.
+    claude = ProposalProvider('claude_code', transport)
+    assert EngineeringProviders(providers.implementer, claude).reviewer is claude
+
+
+def test_engineering_broker_rechecks_authority_and_is_idempotent(setup):
+    from core.candidate_broker import Broker
+    from test_candidate_bridge import request
+    from tools import ToolDenied
+    source, _, factory = setup
+    broker = Broker(factory(model=model, tester=run_checks), source=source)
+    raw = request('engineer', 'Diagnose and fix the value', ARGS)
+    record = broker.execute(raw)
+    assert record['state'] == 'passed'
+    assert broker.execute(raw) == record
+    with pytest.raises(ToolDenied):
+        broker.execute(request('engineer', 'Hello', ARGS))
+    with pytest.raises(ToolDenied):
+        broker.execute(request('engineer', 'Fix the value but only diagnose', ARGS))
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        broker.execute(request('engineer', 'Fix the value', dict(ARGS, provider='claude_code')))
+    assert 'diff' not in record and 'worktree' not in record
+
+
+def test_production_brain_uses_bridge_without_local_authority(setup, tmp_path, monkeypatch):
+    from core.candidate_bridge import CandidateClient
+    from core.candidate_broker import Broker
+    from test_candidate_bridge import request
+    source, _, factory = setup
+    broker = Broker(factory(model=model, tester=run_checks), source=source)
+    def invoke(client, action, arguments):
+        raw = request(action, client.goal, arguments)
+        raw.update(client.context)
+        with monkeypatch.context() as host:
+            host.setenv('JARVIS_MODE', 'development')
+            return broker.execute(raw)
+    monkeypatch.setattr(CandidateClient, 'invoke', invoke)
+    monkeypatch.setenv('JARVIS_MODE', 'production')
+    store = TaskStore(tmp_path / 'production.db')
+    task = store.create_task('Fix the value')
+    provider = ScriptedProvider(call('engineer_candidate', ARGS), final('Applied!'))
+    brain = JarvisBrain(AgentRunner(candidate_service_factory=lambda db: pytest.fail('No local writes')),
+                       settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
+    outcome = brain.run(task['goal'], task_id=task['id'], task_store=store)
+    assert 'passed' in outcome.response and 'Applied!' not in outcome.response
+    assert 'src/app.py' not in outcome.response
+    with store.database.transaction() as db:
+        assert db.execute('SELECT COUNT(*) FROM candidates').fetchone()[0] == 0
+
+
+def test_codex_worker_pins_model_and_disables_tools(monkeypatch, capsys):
+    import io
+    from core import candidate_model
+    from models.provider import ProviderTurn
+    calls = []
+    monkeypatch.setattr(candidate_model.sys, 'stdin', io.StringIO(json.dumps(
+        dict(input={'goal': 'Fix a bug'}, instructions='Return edits', provider='codex'))))
+    def complete(**kwargs):
+        calls.append(kwargs)
+        return ProviderTurn([], '{"edits":[]}')
+    monkeypatch.setattr(candidate_model, 'request_agent_turn', complete)
+    candidate_model.main()
+    assert calls[0]['model'] == 'gpt-5.3-codex'
+    assert calls[0]['tools'] == [] and calls[0]['allow_tools'] is False
+    assert json.loads(capsys.readouterr().out) == {'edits': []}
+    monkeypatch.setattr(candidate_model.sys, 'stdin', io.StringIO(json.dumps(
+        dict(input={}, instructions='', provider='uninstalled'))))
+    with pytest.raises(ValueError):
+        candidate_model.main()
+    assert len(calls) == 1
+
+
+def test_changed_tests_are_not_claimed_as_baseline_improvement(setup):
+    _, _, factory = setup
+    def author(payload, instructions, timeout):
+        if instructions == REVIEW:
+            assert payload['candidate']['baseline_comparison']['result'] == 'changed_test_suite'
+            return dict(verdict='passed', summary='Review includes test changes.')
+        return dict(edits=[dict(path='src/app.py', content='value = 2\n'),
+                          dict(path='tests/test_added.py', content='def test_extra(): assert 1 + 1 == 2\n')])
+    candidate = factory(model=author, tester=run_checks).engineer('Fix value and add test', **ARGS)
+    assert candidate['state'] == 'passed', candidate
+    assert candidate['improvement']['baseline_comparison']['result'] == 'changed_test_suite'
+
+
+def test_rerun_and_tamper_invalidate_improvement_review(setup):
+    _, _, factory = setup
+    service = factory(model=model, tester=run_checks)
+    candidate = service.engineer('Fix the value', **ARGS)
+    tested = service.tests(candidate['id'])
+    assert tested['state'] == 'needs_revision'
+    assert tested['improvement']['review_result'] is None
+    assert tested['improvement']['confidence'] == 'insufficient'
+    reviewed = service.review(candidate['id'])
+    assert reviewed['state'] == 'passed'
+    Path(reviewed['worktree'], 'src/app.py').write_text('value = 3\n')
+    inspected = service.inspect(candidate['id'])
+    assert inspected['state'] == 'needs_revision'
+    assert inspected['improvement']['review_result'] is None
+    assert inspected['improvement']['confidence'] == 'insufficient'
+
+
+@pytest.mark.skipif(os.environ.get('JARVIS_DOCKER_TESTS') != '1', reason='Opt-in Docker integration')
+def test_engineering_real_sandbox_baseline_and_candidate(setup):
+    source, _, factory = setup
+    before = tree_bytes(source)
+    candidate = factory(model=model, tester=None).engineer('Fix the value', **ARGS)
+    assert candidate['state'] == 'passed', candidate
+    assert candidate['improvement']['baseline_comparison']['baseline']['sandbox']['backend'] == 'docker'
+    assert all(item['sandbox']['backend'] == 'docker' for item in candidate['test_results'])
+    assert tree_bytes(source) == before

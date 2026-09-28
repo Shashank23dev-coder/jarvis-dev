@@ -1,4 +1,4 @@
-# JarvisBrain Phase 1
+# JarvisBrain and engineering candidates
 
 Jarvis owns task state, context selection, routing and tool execution. A model is
 a provider of bounded turns, not the owner of the conversation or its authority.
@@ -32,7 +32,8 @@ and applies authoritative candidate/deployment response overrides. Provider outp
 never grants authority. Normalized results remain the existing `AgentOutcome` and
 task API records; UI code and response field contracts are unchanged. Explicit
 `mode=plan` continues through the legacy planner. Candidate author/reviewer model
-workers also retain their existing path; Phase 1 changes ordinary agent routing.
+workers retain their existing path for legacy creation. The enabled Brain also
+offers the engineering action described below.
 
 ## Configuration and rollback
 
@@ -131,3 +132,75 @@ capabilities, cost/latency-aware routing policies, richer bounded context planni
 and operator-controlled production activation. Multi-model debate, parallel
 specialists and local-model execution require their own budgets, isolation and
 evaluation; they are not Phase 1 behaviors.
+
+## Engineering action
+
+With the Brain enabled, a current implementation/fix request (or a request starting
+with make, investigate, diagnose, resolve or repair) can expose `engineer_candidate`.
+The decision provider inspects the repository, decides whether code is needed,
+and supplies `problem_detected`, `hypothesis`, `inspect_paths`, and `targeted_tests`.
+It need not ask the user to say “create a candidate”. Ordinary questions and
+requests for plans, explanations or read-only diagnosis do not grant this action.
+The host checks the original current request; repository text and model claims
+cannot grant authority. A task can create only one candidate across both creation
+tools. UUID ownership and host broker idempotency remain enforced.
+
+The host exports a clean committed baseline to the existing private Git worktree.
+It runs targeted baseline tests before any edit, asks the implementation provider
+for bounded replacement texts, validates every edit with `CandidateEditor`, runs
+targeted/full Python/UI tests, and obtains a fresh independent review. A test failure
+or `needs_revision` verdict can trigger a second implementation attempt with the
+current files, diff and failure/review evidence. Rejection stops the workflow.
+The existing 300-second, four-provider-turn, 64-tool-call, eight-file and 400-line
+ceilings are unchanged and apply cumulatively; exhaustion never earns approval.
+Rerunning tests invalidates review. Provider errors fail closed without a coding
+fallback, shell access, or changes to the source checkout.
+
+`core/candidate_provider.py` defines the separate `EngineeringProvider` contract
+and host-owned implementer/reviewer pair. The first implementer is Codex via the
+Responses API (`gpt-5.3-codex`); see the
+[official model documentation](https://developers.openai.com/api/docs/models/gpt-5.3-codex).
+This is a bounded Codex model integration, not an autonomous Codex CLI process.
+The existing OpenAI transport performs independent review in a fresh request,
+without the author's transcript. Providers receive only selected text/evidence;
+they have no worktree handle, tools, shell, Docker socket or promotion capability.
+The host applies their data proposals and alone launches sandboxed tests.
+Credentials stay in the existing trusted model worker, outside candidate test
+containers. No additional credentials, dependencies or provider calls are needed
+for the scripted regression tests.
+
+A later Claude Code reviewer can implement `complete(payload, instructions,
+timeout)` and be installed as the trusted review instance independently of the
+implementer. Its transport must enforce the same timeout, output, no-tool and
+JSON validation contract. It is not implemented or automatically imported today;
+model/user arguments cannot select providers, commands, endpoints or credentials.
+The provider module is covered by the existing `core/candidate_*` edit protection.
+
+Each engineering candidate persists an `improvement` object in its existing JSON
+record (no database migration):
+
+| Field | Evidence |
+| --- | --- |
+| `problem_detected`, `hypothesis` | Bounded task-specific claims, treated as untrusted context |
+| `implementation_provider`, `review_provider` | Host-selected provider identities |
+| `files_changed`, `tests_run` | Host-observed paths, phases, exits and fingerprints |
+| `failures_revisions` | Up to two attempt results with test/review evidence |
+| `baseline_comparison` | Baseline SHA, test paths, sandbox outcome, candidate fingerprint and comparison |
+| `review_result` | Independently validated verdict and summary |
+| `confidence` | Qualitative test/review support, never a calibrated probability or approval |
+
+Comparison covers the selected tests, not arbitrary behavior or a production
+experiment. It reports improved, regressed, unchanged pass/failure, or inconclusive.
+If tests change, it reports `changed_test_suite` rather than claiming an equivalent
+baseline improvement. Timeouts, truncation and collection/infrastructure errors
+make the baseline inconclusive and prevent a passed review. A passing result still
+requires all candidate suites and independent review. Full metadata stays in the
+development candidate record; production receives only bounded structured status,
+counts and comparison results, never source paths, diffs, logs or provider prose.
+
+The finished candidate is presented for human review. Existing exact UUID approval
+is still required to apply it to main, and exact commit approval is separately
+required for production deployment. Engineering never invokes either operation.
+The Brain flag remains default-off, and production activation still requires the
+separately reviewed configuration change described above. Deploying this code
+does not enable that flag or change production permissions.

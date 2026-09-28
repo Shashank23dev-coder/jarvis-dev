@@ -43,7 +43,7 @@ class JarvisBrain:
         context = TaskContext.from_task(goal, task)
         session = _ProviderSession(self.route(context), self.runner.model, task_store, task_id)
         return self.runner.run(goal, task_id=task_id, task_store=task_store,
-                               model=session.turn, context_builder=self.assemble_context)
+                               model=session.turn, context_builder=self.assemble_context, engineering=True)
 
 
 class _ProviderSession:

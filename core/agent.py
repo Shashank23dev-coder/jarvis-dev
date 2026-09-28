@@ -72,7 +72,7 @@ class AgentRunner:
         return outcome
 
     def run(self, goal: str, *, task_id: str, task_store: TaskStore,
-            model=None, context_builder=assemble_context) -> AgentOutcome:
+            model=None, context_builder=assemble_context, engineering=False) -> AgentOutcome:
         if task_store.get_task(task_id) is None:
             raise ValueError("Agent execution requires an existing task")
         task_store.set_status(task_id, "running")
@@ -83,6 +83,7 @@ class AgentRunner:
         request_turn = model if model is not None else self.model
         from .candidate_tools import CandidateTools
         candidates = CandidateTools(goal, task_store.database, self.candidate_service_factory,
+                                    engineering=engineering,
                                     source_context={'task_id': task_id, 'conversation_id': task['conversation_id']})
         registry = candidates.bind(self.registry)
         from .deployment_tools import DeploymentTools

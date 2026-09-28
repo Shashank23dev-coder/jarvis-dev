@@ -44,10 +44,10 @@ class Broker:
         context = dict(source='production_chat', task_id=request.task_id,
                        conversation_id=request.conversation_id, request_id=request.request_id)
         # Recheck current-message authority on the host, independent of the model.
-        allowed = CandidateTools(request.goal, self.service.store.database)
+        allowed = CandidateTools(request.goal, self.service.store.database, engineering=True)
         if request.action not in allowed.allowed:
             raise ToolDenied('Request lacks candidate authority')
-        if request.action == 'create':
+        if request.action in {'create', 'engineer'}:
             # Durable idempotency by source task, including crash/retry requests.
             with self.service.store.database.transaction() as db:
                 rows = db.execute("SELECT record FROM candidates WHERE json_extract(record, '$.source_context.task_id') = ? LIMIT 1", (request.task_id,)).fetchall()
@@ -58,7 +58,8 @@ class Broker:
                     if prior.get('conversation_id') != request.conversation_id:
                         raise ToolDenied('Source task mismatch')
                     return project(self.service.store.get(existing['id']))
-            record = self.service.start(request.goal, **request.arguments, source_context=context)
+            handler = self.service.engineer if request.action == 'engineer' else self.service.start
+            record = handler(request.goal, **request.arguments, source_context=context)
         else:
             identifier = request.arguments['candidate_id']
             existing = self.service.store.get(identifier, internal=True)
