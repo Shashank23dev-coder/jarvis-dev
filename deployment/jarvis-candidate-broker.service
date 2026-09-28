@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis bounded production chat candidate broker
+After=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/jarvis-dev
+Environment=JARVIS_MODE=development
+Environment=JARVIS_DB_PATH=/home/ubuntu/.local/state/jarvis-chat-candidates/candidates.sqlite3
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin HOME=/home/ubuntu JARVIS_MODE=development JARVIS_DB_PATH=/home/ubuntu/.local/state/jarvis-chat-candidates/candidates.sqlite3 /home/ubuntu/jarvis-dev/.venv/bin/python -B -m core.candidate_broker
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

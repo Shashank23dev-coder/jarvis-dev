@@ -82,7 +82,8 @@ class AgentRunner:
         # Preserve the direct runner interface, including its context-size guard.
         history[-1] = {"role": "user", "content": goal}
         from .candidate_tools import CandidateTools
-        candidates = CandidateTools(goal, task_store.database, self.candidate_service_factory)
+        candidates = CandidateTools(goal, task_store.database, self.candidate_service_factory,
+                                    source_context={'task_id': task_id, 'conversation_id': task['conversation_id']})
         registry = candidates.bind(self.registry)
         from .deployment_tools import DeploymentTools
         deployments = DeploymentTools(goal)

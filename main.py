@@ -303,6 +303,8 @@ class CandidateRequest(BaseModel):
 
 
 def get_self_edit(store: TaskStore = Depends(get_store)):
+    if app.state.settings.mode == "production":
+        raise HTTPException(status_code=403, detail="Use chat candidate tools; local candidate execution is disabled")
     return SelfEditService(store.database)
 
 

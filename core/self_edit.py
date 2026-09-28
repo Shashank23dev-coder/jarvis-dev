@@ -502,7 +502,7 @@ class SelfEditService:
             self.store.release(candidate_id)
         return self.store.get(candidate_id)
 
-    def start(self, goal, inspect_paths, targeted_tests):
+    def start(self, goal, inspect_paths, targeted_tests, *, source_context=None):
         text_value(goal)
         if not isinstance(inspect_paths, list) or not 1 <= len(inspect_paths) <= 8:
             raise ValueError('Supply 1 to 8 inspection paths')
@@ -510,7 +510,7 @@ class SelfEditService:
             raise ValueError('Supply 1 to 8 targeted test paths')
         if any(not isinstance(path, str) or not 1 <= len(path) <= 4096 for path in inspect_paths + targeted_tests):
             raise ValueError('Invalid candidate path length or type')
-        record = self.store.create(goal, inspect_paths, targeted_tests)
+        record = self.store.create(goal, inspect_paths, targeted_tests, source_context=source_context)
         record.update(source_root=str(self.source), limits=asdict(self.limits))
         self.store.save(record)
         # Validate before any model, Git, or worktree mutation; denials are durable.

@@ -10,13 +10,15 @@ class CandidateStore:
     def __init__(self, database):
         self.database = database
 
-    def create(self, goal, paths, tests):
+    def create(self, goal, paths, tests, *, source_context=None):
         record = dict(id=str(uuid4()), created_at=timestamp(), state='created', goal=goal,
                       inspect_paths=paths, targeted_tests=tests, branch=None, worktree=None,
                       base_commit=None, files_changed=[], diff='', diff_summary={},
                       test_results=[], reviewer_result=None, iterations=0, tool_calls=0,
                       elapsed_seconds=0, error=None, manifest=None, fingerprint=None,
                       tested_fingerprint=None)
+        if source_context is not None:
+            record['source_context'] = source_context
         with self.database.transaction() as db:
             db.execute('INSERT INTO candidates(id,created_at,state,record) VALUES (?,?,?,?)',
                        (record['id'], record['created_at'], record['state'], json.dumps(record)))
