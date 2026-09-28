@@ -517,3 +517,60 @@ def test_build_uses_reviewed_context_labels_and_immutable_image(docker_runtime, 
     (tmp_path / 'Dockerfile').write_text('FROM unreviewed')
     with pytest.raises(ToolDenied, match='Dockerfile'):
         docker_runtime.build('a' * 40, tmp_path)
+
+
+@pytest.mark.parametrize('fixture_path', ['tests/test_self_edit.py', 'tests/test_recall.py'])
+def test_exact_reviewed_synthetic_key_fixtures_export(release, tmp_path, fixture_path):
+    service, _, _ = release
+    content = (Path(__file__).resolve().parents[1] / fixture_path).read_bytes()
+    target = service.config.source / fixture_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    git(service.config.source, 'add', '.')
+    git(service.config.source, 'commit', '-m', 'Reviewed synthetic fixture')
+    export = tmp_path / 'export'
+    export.mkdir()
+    service.snapshot(git(service.config.source, 'rev-parse', 'HEAD'), export)
+    assert (export / fixture_path).read_bytes() == content
+
+
+@pytest.mark.parametrize('key_type', ['', 'RSA ', 'OPENSSH ', 'EC ', 'DSA ', 'ENCRYPTED '])
+@pytest.mark.parametrize('path', ['core/example.py', 'tests/test_arbitrary.py',
+                                 'tests/test_self_edit.py', 'tests/test_recall.py'])
+def test_unapproved_key_material_rejected_in_every_scope(release, tmp_path, key_type, path):
+    service, _, _ = release
+    # Construct synthetic PEM-shaped material without embedding a marker in this
+    # test source. Even an approved filename cannot authorize different bytes.
+    marker = '-----BEGIN ' + key_type + 'PRIVATE KEY' + '-----'
+    content = 'value = """' + marker + '\n' + 'MIIE' + 'A' * 256 + '\n"""\n'
+    target = service.config.source / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    git(service.config.source, 'add', '.')
+    git(service.config.source, 'commit', '-m', 'Unapproved key fixture')
+    export = tmp_path / 'export'
+    export.mkdir()
+    with pytest.raises(ToolDenied, match='Private key material'):
+        service.snapshot(git(service.config.source, 'rev-parse', 'HEAD'), export)
+
+
+@pytest.mark.parametrize('fixture_path', ['tests/test_self_edit.py', 'tests/test_recall.py'])
+@pytest.mark.parametrize('change', ['append_key', 'one_byte', 'relocate'])
+def test_synthetic_exception_requires_exact_blob_and_path(release, tmp_path, fixture_path, change):
+    service, _, _ = release
+    content = (Path(__file__).resolve().parents[1] / fixture_path).read_bytes()
+    if change == 'append_key':
+        content += b'\nkey = """-----BEGIN ' + b'PRIVATE KEY' + b'-----\nMIIE' + b'A' * 256 + b'\n"""\n'
+    elif change == 'one_byte':
+        content += b'\n'
+    else:
+        fixture_path = 'tests/test_unapproved.py'
+    target = service.config.source / fixture_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    git(service.config.source, 'add', '.')
+    git(service.config.source, 'commit', '-m', 'Altered synthetic fixture')
+    export = tmp_path / 'export'
+    export.mkdir()
+    with pytest.raises(ToolDenied, match='Private key material'):
+        service.snapshot(git(service.config.source, 'rev-parse', 'HEAD'), export)

@@ -21,6 +21,16 @@ from tools.policy import ToolDenied
 SHA = re.compile(r'[0-9a-f]{40}')
 TERMINAL = {'deployed', 'rolled_back', 'failed', 'rollback_failed'}
 
+# Reviewed synthetic negative-test fixtures only. Bind exceptions to the entire
+# Git blob AND its path: changing even one byte requires a new explicit review.
+# These files contain marker-only strings, not encoded private-key material.
+# This exception applies only to the private-key marker check below; all other
+# context restrictions and application secret detectors remain in force.
+SYNTHETIC_KEY_FIXTURES = {
+    'tests/test_self_edit.py': 'd618a3160078060cab7ee8bf07e11074e208ae3fb54061c305e754668c03478d',
+    'tests/test_recall.py': 'f9bb6152a50086a2551a69e10836fbece689dc182b61c6a129efaa9b9081a5d4',
+}
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -163,7 +173,8 @@ class ReleaseService:
             if kind != 'blob' or mode not in {'100644', '100755'}:
                 raise ToolDenied('Release context cannot contain links or submodules')
             content = self.git('cat-file', 'blob', blob)
-            if re.search(rb'-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----', content):
+            if (re.search(rb'-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----', content) and
+                    hashlib.sha256(content).hexdigest() != SYNTHETIC_KEY_FIXTURES.get(path)):
                 raise ToolDenied('Private key material is forbidden in release context')
             total += len(content)
             if len(content) > 1_000_000 or total > 50_000_000:
