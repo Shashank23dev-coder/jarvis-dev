@@ -1,6 +1,8 @@
 # Production chat candidates
 
-Requests such as `Build Phase 1 of JarvisBrain` expose one candidate creation tool.
+Every production agent turn advertises creation, inspection, test rerun, review
+and discard tools. Visibility is not action authorization or a broker-health claim.
+Requests such as `Build Phase 1 of JarvisBrain` authorize one candidate creation.
 The model selects 1–8 source inspection files and test paths. Creation performs
 proposal, isolated edits, sandbox tests and independent review synchronously.
 Explicit plan-only/negative requests grant no candidate authority. Host checks the
@@ -65,3 +67,13 @@ after the separately approved release containing these modules is deployed.
 Do not mount the broker's state or checkout into production. Stop the broker with
 `systemctl --user stop jarvis-candidate-broker` to disable delegation; requests fail
 closed. No deployment is performed by installing or starting this service.
+
+## Tool discovery
+
+Candidate schemas are rebuilt for each task, including fresh capability questions;
+there is no session capability cache. Execution still checks current-message intent
+and UUID scope in both the adapter and host broker. A displayed discard tool does
+not authorize discard during a build request. Apply/deploy schema approval gates
+are unchanged. Broker connection is lazy at invocation; missing/unreachable broker
+requests time out and fail closed, with no local candidate fallback. Read-only
+repository and deployment tools remain available independently of broker health.

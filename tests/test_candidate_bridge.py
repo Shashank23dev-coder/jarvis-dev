@@ -54,7 +54,7 @@ def test_ordinary_production_chat_routes_to_dev_and_audits(setup, tmp_path, monk
     outcome = runner.run(GOAL, task_id=task['id'], task_store=store)
     assert 'passed' in outcome.response and 'Applied and deployed' not in outcome.response
     names = {t['name'] for t in model.requests[0]['tools']}
-    assert 'create_self_edit_candidate' in names
+    assert CANDIDATE_TOOLS | READ_ONLY_TOOLS == names
     assert not names & {'approve_and_apply_candidate', 'approve_and_deploy_commit'}
     data = json.loads(model.requests[1]['input'][-1]['output'])['data']
     record = factory().store.get(data['candidate_id'], internal=True)
@@ -141,3 +141,89 @@ def test_broker_create_rerun_review_discard_real_docker(setup, monkeypatch):
     full = broker.service.store.get(identifier)
     assert len(full['chat_operations']) == 4
     assert not Path(full['worktree']).exists()
+
+
+CANDIDATE_TOOLS = {'create_self_edit_candidate', 'inspect_self_edit_candidate',
+                   'rerun_candidate_tests', 'review_self_edit_candidate', 'discard_self_edit_candidate'}
+READ_ONLY_TOOLS = {'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest',
+                   'run_command', 'deployment_status', 'preview_deployment',
+                   'inspect_deployment', 'deployment_history'}
+
+
+def test_fresh_production_http_turn_exposes_candidates_without_cached_authority(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import main
+    from core.deployment import Settings
+    from core.orchestrator import Orchestrator
+    monkeypatch.setenv('JARVIS_MODE', 'production')
+    settings = Settings.from_env(dict(JARVIS_MODE='production', OPENAI_API_KEY='test-provider-key',
+        JARVIS_AUTH_TOKEN='test-auth-' + 'x' * 32, JARVIS_PUBLIC_ORIGIN='https://jarvis.example.com',
+        JARVIS_STATE_DIR=str(tmp_path / 'state'), JARVIS_DB_PATH=str(tmp_path / 'state/chat.sqlite3')))
+    model = ScriptedModel(final('Capabilities'), final('Ready'), final('Capabilities'))
+    runner = AgentRunner(model=model)
+    monkeypatch.setattr(main, 'orchestrator', Orchestrator(runner))
+    app = main.create_app(settings=settings)
+    with TestClient(app, base_url=settings.public_origin) as client:
+        conversation = None
+        for goal in ('What tools can you use?', GOAL, 'What tools can you use?'):
+            payload = dict(goal=goal)
+            if conversation:
+                payload['conversation_id'] = conversation
+            result = client.post('/task', json=payload,
+                                 headers={'Authorization': 'Bearer ' + settings.auth_token})
+            assert result.status_code == 200, result.text
+            conversation = result.json()['conversation_id']
+            names = {t['name'] for t in model.requests[-1]['tools']}
+            assert names == READ_ONLY_TOOLS | CANDIDATE_TOOLS
+    assert set(runner.registry.schemas()) == READ_ONLY_TOOLS - {
+        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history'}
+
+
+@pytest.mark.parametrize('tool,arguments', [
+    ('create_self_edit_candidate', ARGS),
+    *[(name, {'candidate_id': '00000000-0000-0000-0000-000000000001'})
+      for name in sorted(CANDIDATE_TOOLS - {'create_self_edit_candidate'})]])
+def test_visible_tools_do_not_expand_current_request_authority(tmp_path, monkeypatch, tool, arguments):
+    monkeypatch.setenv('JARVIS_MODE', 'production')
+    monkeypatch.setattr(CandidateClient, 'invoke', lambda *a: pytest.fail('Unauthorized broker call'))
+    store = TaskStore(tmp_path / 'chat.sqlite3')
+    goal = 'What tools can you use?'
+    task = store.create_task(goal)
+    model = ScriptedModel(call(tool, arguments), final())
+    AgentRunner(model=model).run(goal, task_id=task['id'], task_store=store)
+    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'denied'
+
+
+def test_absent_broker_times_out_without_local_fallback(tmp_path, monkeypatch):
+    import core.candidate_bridge as bridge
+    from types import SimpleNamespace
+    monkeypatch.setenv('JARVIS_MODE', 'production')
+    monkeypatch.setattr(bridge, 'ROOT', tmp_path / 'mailbox')
+    # Advance only the mailbox clock, not global task/store deadlines.
+    ticks = iter((0, 311))
+    monkeypatch.setattr(bridge, 'time', SimpleNamespace(time=time.time,
+        monotonic=lambda: next(ticks), sleep=lambda _: pytest.fail('Unexpected polling')))
+    store = TaskStore(tmp_path / 'chat.sqlite3')
+    task = store.create_task(GOAL)
+    model = ScriptedModel(call('create_self_edit_candidate', ARGS), final('Unavailable'))
+    runner = AgentRunner(model=model,
+        candidate_service_factory=lambda _: pytest.fail('Production must not fall back locally'))
+    runner.run(GOAL, task_id=task['id'], task_store=store)
+    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'denied'
+    assert set(runner.registry.schemas()) >= {'list_files', 'read_text', 'git_status', 'git_diff'}
+    assert not list(bridge.ROOT.iterdir())
+    with store.database.transaction() as db:
+        assert db.execute('SELECT COUNT(*) FROM candidates').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('name,arguments', [
+    ('approve_and_apply_candidate', {'candidate_id': '00000000-0000-0000-0000-000000000001'}),
+    ('approve_and_deploy_commit', {'commit': 'a' * 40})])
+def test_ordinary_production_turn_cannot_call_apply_or_deploy(tmp_path, monkeypatch, name, arguments):
+    monkeypatch.setenv('JARVIS_MODE', 'production')
+    store = TaskStore(tmp_path / 'chat.sqlite3')
+    task = store.create_task(GOAL)
+    model = ScriptedModel(call(name, arguments), final('Unavailable'))
+    AgentRunner(model=model).run(GOAL, task_id=task['id'], task_store=store)
+    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'unknown_tool'
+    assert name not in {t['name'] for t in model.requests[0]['tools']}
