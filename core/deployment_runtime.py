@@ -25,8 +25,13 @@ class DockerRuntime:
 
     def docker(self, *args, timeout=30, optional=False):
         # Capture everything; never reflect Docker diagnostics, build logs or env.
-        result = subprocess.run([*DOCKER, *args], stdin=subprocess.DEVNULL, capture_output=True,
-                                timeout=timeout, env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent'})
+        # Docker's build client writes beneath HOME even without user config.
+        # Give each invocation an empty mode-0700 home, outside the build context;
+        # never inherit operator credentials/config or pass this path to containers.
+        # Cleanup also runs on command failure, timeout and interruption.
+        with tempfile.TemporaryDirectory(prefix='jarvis-controller-home-') as directory:
+            result = subprocess.run([*DOCKER, *args], stdin=subprocess.DEVNULL, capture_output=True,
+                                    timeout=timeout, env={'PATH': '/usr/bin:/bin', 'HOME': directory})
         if result.returncode:
             if optional:
                 return None

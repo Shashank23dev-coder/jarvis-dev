@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sqlite3
@@ -10,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.deployment_release import ReleaseConfig, ReleaseService, approval, approved_commit, now
-from core.deployment_runtime import DockerRuntime, FIXED_ENV
+from core.deployment_runtime import DOCKER, DockerRuntime, FIXED_ENV
 from core.deployment_tools import DeploymentTools
 from tools import ToolDenied, ToolRegistry
 
@@ -517,6 +518,88 @@ def test_build_uses_reviewed_context_labels_and_immutable_image(docker_runtime, 
     (tmp_path / 'Dockerfile').write_text('FROM unreviewed')
     with pytest.raises(ToolDenied, match='Dockerfile'):
         docker_runtime.build('a' * 40, tmp_path)
+
+
+@pytest.mark.parametrize('outcome', ['success', 'failure', 'optional', 'timeout', 'interrupt'])
+def test_docker_private_home_is_writable_isolated_and_always_removed(docker_runtime, monkeypatch,
+                                                                  tmp_path, outcome):
+    operator = tmp_path / 'operator'
+    for name in ('.ssh/id_rsa', '.docker/config.json', '.env', 'state/private.db'):
+        path = operator / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('OPERATOR_SECRET')
+    for key, value in {'HOME': str(operator), 'DOCKER_CONFIG': str(operator / '.docker'),
+                       'XDG_CONFIG_HOME': str(operator), 'XDG_CACHE_HOME': str(operator),
+                       'BUILDX_CONFIG': str(operator), 'SSH_AUTH_SOCK': 'PRIVATE_SOCKET',
+                       'OPENAI_API_KEY': 'OPERATOR_SECRET'}.items():
+        monkeypatch.setenv(key, value)
+    homes = []
+    def run(argv, *, stdin, capture_output, timeout, env):
+        assert argv == [*DOCKER, 'build', '--network=none', str(tmp_path)]
+        assert stdin == subprocess.DEVNULL and capture_output and timeout == 7
+        assert set(env) == {'PATH', 'HOME'} and env['PATH'] == '/usr/bin:/bin'
+        home = Path(env['HOME'])
+        homes.append(home)
+        assert home.resolve() != operator.resolve() and not home.is_relative_to(tmp_path)
+        assert home.stat().st_mode & 0o777 == 0o700
+        assert home.stat().st_uid == os.getuid() and not list(home.iterdir())
+        # Reproduce the build client's home-relative directory creation.
+        config = home / '.docker/buildx'
+        config.mkdir(parents=True)
+        (config / 'activity').write_text('private build metadata')
+        if outcome == 'timeout':
+            raise subprocess.TimeoutExpired(argv, timeout)
+        if outcome == 'interrupt':
+            raise KeyboardInterrupt()
+        return subprocess.CompletedProcess(argv, 0 if outcome == 'success' else 1,
+                                           b'built', b'PRIVATE_DIAGNOSTIC')
+    monkeypatch.setattr('core.deployment_runtime.subprocess.run', run)
+    def invoke():
+        return docker_runtime.docker('build', '--network=none', str(tmp_path), timeout=7,
+                                     optional=outcome == 'optional')
+    if outcome == 'success':
+        assert invoke() == 'built'
+        assert invoke() == 'built'
+        assert homes[0] != homes[1]
+    elif outcome == 'optional':
+        assert invoke() is None
+    else:
+        error = {'failure': ToolDenied, 'timeout': subprocess.TimeoutExpired,
+                 'interrupt': KeyboardInterrupt}[outcome]
+        with pytest.raises(error) as exc:
+            invoke()
+        assert 'PRIVATE_DIAGNOSTIC' not in str(exc.value)
+    assert homes and all(not home.exists() for home in homes)
+    assert all(path.read_text() == 'OPERATOR_SECRET' for path in operator.rglob('*') if path.is_file())
+
+
+@pytest.mark.skipif(os.environ.get('JARVIS_DOCKER_TESTS') != '1',
+                    reason='Set JARVIS_DOCKER_TESTS=1 for real Docker build regression')
+def test_live_docker_build_nonexistent_home_failure_and_private_home_fix(docker_runtime, tmp_path,
+                                                                      monkeypatch):
+    # No production image/container, credentials, base-image pull or network needed.
+    (tmp_path / 'Dockerfile').write_text('FROM scratch\nCOPY marker /marker\n')
+    (tmp_path / 'marker').write_text(tmp_path.name)
+    args = ['build', '--network=none', '--pull=false', '--quiet', str(tmp_path)]
+    legacy = subprocess.run([*DOCKER, *args], stdin=subprocess.DEVNULL, capture_output=True,
+                            timeout=60, env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent'})
+    assert legacy.returncode != 0
+    assert b'/nonexistent' in legacy.stderr and b'permission denied' in legacy.stderr.lower()
+    original_run = subprocess.run
+    homes = []
+    def run(*args, **kwargs):
+        homes.append(Path(kwargs['env']['HOME']))
+        assert homes[-1].stat().st_mode & 0o777 == 0o700
+        return original_run(*args, **kwargs)
+    monkeypatch.setattr('core.deployment_runtime.subprocess.run', run)
+    image = docker_runtime.docker(*args, timeout=60).strip()
+    try:
+        assert image.startswith('sha256:')
+        assert homes and all(not home.exists() for home in homes)
+    finally:
+        if image.startswith('sha256:'):
+            docker_runtime.docker('image', 'rm', image)
+    assert all(not home.exists() for home in homes)
 
 
 @pytest.mark.parametrize('fixture_path', ['tests/test_self_edit.py', 'tests/test_recall.py'])

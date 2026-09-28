@@ -90,6 +90,11 @@ It has exactly one persistent volume and no host or Docker socket bind mounts.
 The existing three secret/environment values are read privately from the production
 env file and passed via a mode-0600 temporary file, removed after container creation.
 No values are placed in argv, build arguments, audit records or diagnostic output.
+Each host Docker invocation receives only the fixed `PATH` and a fresh, empty,
+mode-0700 temporary `HOME` for Docker's home-relative build metadata/config.
+The directory is outside the build context, is never mounted into a container,
+and is removed when the command exits, fails, times out or is interrupted.
+No operator home, Docker config, SSH keys or inherited environment is supplied.
 Existing production env values must match; rotate credentials separately. Public
 checks disable inherited HTTP proxies and redirects; TLS verification stays enabled.
 
