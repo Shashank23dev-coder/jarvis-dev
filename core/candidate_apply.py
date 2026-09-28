@@ -178,7 +178,10 @@ class CandidateApply:
             if digest(self._git('show', ':' + path).encode()) != expected_hash:
                 raise ToolDenied('Staged bytes differ from reviewed candidate')
             entry = self._git('--literal-pathspecs', 'ls-files', '--stage', '--', path).split()
-            if not entry or int(entry[0], 8) != stat.S_IFREG | mode:
+            # Git stores only regular-file type and the owner executable bit,
+            # not umask-dependent group/other permissions (e.g. 0664 vs 0644).
+            git_mode = stat.S_IFREG | (0o755 if mode & stat.S_IXUSR else 0o644)
+            if not entry or int(entry[0], 8) != git_mode:
                 raise ToolDenied('Staged mode differs from reviewed candidate')
 
     def _verify_tree(self):
@@ -207,7 +210,7 @@ class CandidateApply:
                 result = self.service.tester(repository, phase, paths)
             else:
                 result = repository.run_ui_tests() if phase == 'full_ui' else repository.run_pytest(paths)
-            evidence = dict(phase=phase, returncode=result.returncode, timed_out=result.timed_out,
+            evidence = dict(sandbox=result.sandbox, phase=phase, returncode=result.returncode, timed_out=result.timed_out,
                             truncated=result.truncated or len(result.stdout) > 16000 or len(result.stderr) > 16000,
                             stdout=result.stdout[:16000], stderr=result.stderr[:16000])
             audit['verification'].append(evidence)

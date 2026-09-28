@@ -1,6 +1,7 @@
 """Human UUID approval, exact patch application, verification and recovery."""
 import json
 import hashlib
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ from core.database import Database
 from core.self_edit import SelfEditService
 from core.task_store import TaskStore
 from tools import ToolRegistry, CommandResult, ToolDenied
-from test_self_edit import setup, start, git, tree_bytes
+from test_self_edit import setup, start, git, tree_bytes, require_live_sandbox
 
 
 def apply_service(factory, tester=None):
@@ -47,6 +48,45 @@ def test_success_and_idempotency_restart(setup):
     database.close()
     assert apply_service(factory).inspect(candidate['id'])['apply'] == result
     assert apply_service(factory).apply(candidate['id'], confirmation(candidate['id']))['apply'] == result
+
+
+@pytest.mark.parametrize('mask', [0o002, 0o022, 0o077])
+@pytest.mark.parametrize('executable', [False, True])
+def test_apply_compares_git_modes_independently_of_umask(setup, mask, executable):
+    source, _, factory = setup
+    if executable:
+        (source / 'src/app.py').chmod(0o775)
+        git(source, 'add', 'src/app.py')
+        git(source, 'commit', '-m', 'Executable fixture')
+    previous = os.umask(mask)
+    try:
+        candidate = start(factory())
+        result = apply_service(factory).apply(candidate['id'], confirmation(candidate['id']))['apply']
+    finally:
+        os.umask(previous)
+    assert result['status'] == 'applied', result
+    assert git(source, 'ls-files', '--stage', 'src/app.py').split()[0] == ('100755' if executable else '100644')
+
+
+def test_staged_executable_change_still_rolls_back(setup):
+    source, _, factory = setup
+    candidate = start(factory())
+    apply = apply_service(factory)
+    verify = apply._verify_patch_contents
+    def change_index_mode():
+        git(source, 'update-index', '--chmod=+x', 'src/app.py')
+        with pytest.raises(ToolDenied, match='Staged mode differs'):
+            verify()
+        # Restore the injected concurrent index change so rollback can safely
+        # reverse the reviewed patch, then propagate the validation failure.
+        git(source, 'update-index', '--chmod=-x', 'src/app.py')
+        raise ToolDenied('Staged mode differs from reviewed candidate')
+    apply._verify_patch_contents = change_index_mode
+    result = apply.apply(candidate['id'], confirmation(candidate['id']))['apply']
+    assert result['status'] == 'rolled_back'
+    assert result['verification'] == []
+    assert git(source, 'status', '--porcelain') == ''
+    assert git(source, 'rev-parse', 'HEAD').strip() == candidate['base_commit']
 
 
 @pytest.mark.parametrize('approval_text', ['continue', 'looks good', 'approve', 'Apply it',
@@ -210,18 +250,15 @@ def test_additional_apply_gates(setup, tmp_path, kind):
 
 def test_real_post_apply_sandbox_python_and_ui(setup):
     source, _, factory = setup
+    require_live_sandbox(source)
     (source / 'tests/ui.test.cjs').write_text("require('node:test')('ok', () => {});\n")
     git(source, 'add', '.')
     git(source, 'commit', '-m', 'UI fixture')
     candidate = start(factory())
     result = CandidateApply(factory(tester=None)).apply(candidate['id'], confirmation(candidate['id']))['apply']
-    if result['status'] == 'applied':
-        assert [t['phase'] for t in result['verification']] == ['targeted', 'full_python', 'full_ui']
-        assert all(t['returncode'] == 0 for t in result['verification'])
-    else:
-        assert result['status'] == 'rolled_back', result
-        assert result['verification'] and 'bwrap:' in result['verification'][0]['stderr'], result
-        assert git(source, 'status', '--porcelain') == ''
+    assert result['status'] == 'applied', result
+    assert [t['phase'] for t in result['verification']] == ['targeted', 'full_python', 'full_ui']
+    assert all(t['returncode'] == 0 for t in result['verification'])
 
 
 def test_previous_turn_approval_does_not_authorize_current_chat(setup):
