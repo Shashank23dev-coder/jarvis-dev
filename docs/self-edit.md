@@ -98,8 +98,9 @@ in the displayed diff without staging them.
 
 Targeted Python tests must pass before the full `tests/` Python suite runs. If
 `tests/ui.test.cjs` exists, the fixed UI suite must also pass. Both execute inside
-the existing read-only, network-isolated Bubblewrap snapshot with a cleared
-environment. No candidate Python or JavaScript runs unsandboxed; unavailable
+a read-only, network-isolated snapshot with a cleared environment. Bubblewrap is
+preferred; development uses the hardened Docker fallback when Bubblewrap cannot
+start (see [development sandbox](development-sandbox.md)). No candidate Python or JavaScript runs unsandboxed; unavailable
 isolation fails closed. The main tree and private Git metadata are not mounted.
 For Jarvis's own candidates only, the protected runtime policy dependency must
 match the running trusted policy byte-for-byte before it is included for tests.
@@ -246,7 +247,7 @@ journals extend the existing candidate JSON records in SQLite schema version 2.
 The service serializes applies per source checkout with an OS file lock. It
 journals the approved patch before `git apply --index`, validates exact changed
 paths, bytes and modes, then runs targeted checks, full Python and available UI
-checks in the existing read-only, network-isolated Bubblewrap sandbox. It checks
+checks in the selected read-only, network-isolated sandbox. It checks
 the index tree, working tree, branch and HEAD again. Only then does fixed
 `commit-tree` create a local commit with message `Jarvis: apply candidate <UUID>`;
 `update-ref` advances the branch using the expected baseline as a compare-and-swap.

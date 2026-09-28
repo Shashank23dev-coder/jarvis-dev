@@ -31,7 +31,7 @@ def test_sandbox_runtime_and_mounts():
     for name in (".env", ".git", ".agents", ".codex", "policies"):
         assert not Path("/workspace", name).exists()
     mounts = Path("/proc/self/mountinfo").read_text().splitlines()
-    for mountpoint in ("/workspace", "/runtime", "/usr"):
+    for mountpoint in (("/workspace", "/runtime", "/usr") if Path("/usr/bin/bwrap").exists() else ("/workspace", "/")):
         assert any(line.split()[4] == mountpoint and
                    "ro" in line.split()[5].split(",") for line in mounts)
     with pytest.raises(OSError):

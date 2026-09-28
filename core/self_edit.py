@@ -325,7 +325,7 @@ class SelfEditService:
             else:
                 result = repository.run_ui_tests() if phase == 'full_ui' else repository.run_pytest(paths)
             self._check()
-            evidence = dict(phase=phase, paths=paths, returncode=result.returncode,
+            evidence = dict(sandbox=result.sandbox, phase=phase, paths=paths, returncode=result.returncode,
                             timed_out=result.timed_out,
                             truncated=result.truncated or len(result.stdout) > 16000 or len(result.stderr) > 16000,
                             stdout=result.stdout[:16000], stderr=result.stderr[:16000], fingerprint=fingerprint)

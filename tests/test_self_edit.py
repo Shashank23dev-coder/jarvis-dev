@@ -375,15 +375,20 @@ def test_version_one_migration_preserves_data_and_is_repeatable(tmp_path):
     database.close()
 
 
-def test_real_candidate_tests_use_bubblewrap_and_remain_readonly(setup):
+def require_live_sandbox(root):
+    from tools.sandbox import select_backend
+    try:
+        select_backend(RepositoryTools(root), root)
+    except ToolDenied as exc:
+        pytest.skip(str(exc))
+
+
+def test_real_candidate_tests_use_available_backend_and_remain_readonly(setup):
     source, _, factory = setup
+    require_live_sandbox(source)
     candidate = start(factory(tester=None))
-    # Restricted hosts may deny namespace creation, but never run tests on host.
-    if candidate['state'] != 'passed':
-        assert candidate['test_results'], candidate
-        assert 'bwrap:' in candidate['test_results'][0]['stderr'], candidate
-    else:
-        assert all(result['returncode'] == 0 for result in candidate['test_results'])
+    assert candidate['state'] == 'passed', candidate
+    assert all(result['returncode'] == 0 for result in candidate['test_results'])
     assert (source / 'src/app.py').read_text() == 'value = 1\n'
 
 
@@ -448,6 +453,7 @@ def test_production_subprocess_rejects_unborn_repository_without_provider(setup,
 
 def test_real_candidate_full_python_ui_and_secret_visibility(setup):
     source, _, factory = setup
+    require_live_sandbox(source)
     (source / '.env').write_text('DO_NOT_EXPOSE')
     (source / 'src/private.sqlite3').write_text('DO_NOT_EXPOSE')
     (source / 'src/credentials.py').write_text('DO_NOT_EXPOSE')
@@ -468,11 +474,9 @@ def test_real_candidate_full_python_ui_and_secret_visibility(setup):
     git(source, 'commit', '-m', 'Sandbox isolation fixtures')
     before = tree_bytes(source)
     candidate = start(factory(tester=None))
-    if candidate['state'] != 'passed':
-        assert candidate['test_results'] and 'bwrap:' in candidate['test_results'][0]['stderr'], candidate
-    else:
-        assert [result['phase'] for result in candidate['test_results']] == ['targeted', 'full_python', 'full_ui']
-        assert all(result['returncode'] == 0 for result in candidate['test_results'])
+    assert candidate['state'] == 'passed', candidate
+    assert [result['phase'] for result in candidate['test_results']] == ['targeted', 'full_python', 'full_ui']
+    assert all(result['returncode'] == 0 for result in candidate['test_results'])
     assert 'DO_NOT_EXPOSE' not in json.dumps(candidate)
     assert tree_bytes(source) == before
 

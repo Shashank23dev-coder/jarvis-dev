@@ -81,11 +81,12 @@ output-limited subprocess groups are killed. Partial Git status is never returne
 
 ## Pytest isolation
 
-Linux, `/usr/bin/bwrap`, a compatible `/usr` Python installation, and kernel support
-for unprivileged Bubblewrap namespaces are required. The current Python runtime
-must have pytest and the project's dependencies installed. Missing Bubblewrap is
-a denial; sandbox setup failure returns its nonzero exit code and diagnostics.
-**There is no fallback to host execution.**
+Linux and a functional sandbox backend are required. Bubblewrap is probed first;
+development falls back to a separately built, hardened Docker runtime if that
+probe fails. Production remains Bubblewrap-only. If neither backend is usable,
+execution is denied. **There is no fallback to host execution.** See
+[development sandbox](development-sandbox.md) for image setup, resource limits,
+audit fields, security boundaries and live validation.
 
 Tests run against a temporary snapshot of allowed regular files (at most 50 MB),
 mounted read-only at `/workspace`. Protected files and links are absent, with one
@@ -107,8 +108,8 @@ so Jarvis imports resolve against the snapshot just as they do at the repo root.
 The cleared environment has no `PYTHONPATH`; Python isolated mode remains enabled.
 The host developer test suite remains independently runnable using
 `.venv/bin/python -m pytest -q` and `node --test tests/ui.test.cjs`.
-Wall-clock and output bounds are enforced; production multi-tenant execution would
-also need supervisor-level memory, process-count and scratch-disk quotas.
+Wall-clock and output bounds are enforced. Docker additionally enforces CPU,
+memory, process-count and scratch limits; Bubblewrap retains its existing limits.
 
 ## Next milestone
 

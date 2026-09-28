@@ -49,6 +49,7 @@ class TextResult(StrictModel):
 
 
 class ProcessResult(StrictModel):
+    sandbox: dict = Field(default_factory=dict)
     returncode: int
     stdout: str
     stderr: str

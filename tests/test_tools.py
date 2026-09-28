@@ -230,10 +230,11 @@ def test_pytest_snapshot_and_sandbox_configuration(repo, monkeypatch):
         assert "-I" in argv and "-B" in argv
         assert argv[argv.index("-c") + 1] == "/dev/null"
         assert argv[-2:] == ["--", "tests"]
-        assert timeout == repo.pytest_timeout
+        assert 0 < timeout <= repo.pytest_timeout
         return CommandResult(tuple(argv), 1, "1 failed", "")
 
     monkeypatch.setattr(repo, "_execute", execute)
+    monkeypatch.setattr("tools.sandbox.select_backend", lambda *args: ("bubblewrap", None, []))
     # This test validates construction even on hosts without Bubblewrap installed.
     monkeypatch.setattr(repo, "_bwrap", "/usr/bin/true")
     result = repo.run_pytest()
@@ -244,6 +245,7 @@ def test_pytest_snapshot_and_sandbox_configuration(repo, monkeypatch):
 
 def test_pytest_requires_sandbox_and_valid_paths(repo, monkeypatch):
     monkeypatch.setattr(repo, "_bwrap", "/nonexistent/bwrap")
+    monkeypatch.setattr("tools.sandbox.DOCKER", ("/nonexistent/docker",))
     with pytest.raises(ToolDenied, match="Bubblewrap"):
         repo.run_pytest(["src"])
     for paths in ([], "src", ["-x"], ["src/app.py::test_x"], ["missing"], [".git"]):
@@ -295,4 +297,5 @@ def test_arbitrary_repository_policy_stays_protected(repo, monkeypatch):
 
     monkeypatch.setattr(repo, "_execute", execute)
     monkeypatch.setattr(repo, "_bwrap", "/usr/bin/true")
+    monkeypatch.setattr("tools.sandbox.select_backend", lambda *args: ("bubblewrap", None, []))
     repo.run_pytest(["src"])

@@ -120,11 +120,11 @@ class ToolRegistry:
             return raw
         if not isinstance(raw, CommandResult):
             raise ValueError("Unexpected process result")
-        data = ProcessResult(returncode=raw.returncode, stdout=raw.stdout, stderr=raw.stderr,
+        data = ProcessResult(sandbox=raw.sandbox, returncode=raw.returncode, stdout=raw.stdout, stderr=raw.stderr,
                              timed_out=raw.timed_out, truncated=raw.truncated)
         stdout = data.stdout[:limit]
         stderr = data.stderr[:limit - len(stdout)]
-        return ProcessResult(returncode=data.returncode, stdout=stdout, stderr=stderr,
+        return ProcessResult(sandbox=data.sandbox, returncode=data.returncode, stdout=stdout, stderr=stderr,
                              timed_out=data.timed_out,
                              truncated=data.truncated or len(stdout) + len(stderr) < len(data.stdout) + len(data.stderr))
 

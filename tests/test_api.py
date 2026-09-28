@@ -139,13 +139,14 @@ def test_assistant_inspects_repository_runs_pytest_and_returns_evidence(
     # An existing file satisfies the executable availability check; execution is
     # intercepted below, while snapshot creation and sandbox arguments stay real.
     repository._bwrap = "/usr/bin/true"
+    monkeypatch.setattr("tools.sandbox.select_backend", lambda *args: ("bubblewrap", None, []))
     commands = []
 
     def execute(argv, *, timeout):
         commands.append(argv)
         assert argv[-2:] == ["--", "tests"]
         assert "--unshare-all" in argv and "--clearenv" in argv
-        assert timeout == repository.pytest_timeout
+        assert 0 < timeout <= repository.pytest_timeout
         snapshot = Path(argv[argv.index("/workspace") - 1])
         assert (snapshot / "README.md").read_text() == evidence
         return CommandResult(tuple(argv), returncode, output)

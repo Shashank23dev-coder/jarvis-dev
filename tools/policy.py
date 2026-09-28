@@ -20,7 +20,7 @@ class ToolPolicy:
 
     _directories = frozenset({
         ".git", ".venv", "venv", ".agents", ".codex", "policy", "policies",
-        "security", ".ssh", ".aws", ".gnupg", "__pycache__", ".pytest_cache",
+        "security", ".ssh", ".aws", ".gnupg", ".docker", "state", "__pycache__", ".pytest_cache",
     })
     _files = frozenset({"agents.md", "skill.md", ".gitmodules", ".gitattributes"})
 
@@ -46,6 +46,8 @@ class ToolPolicy:
                     or name.startswith(".env-") or name.startswith(".env_")
                     or stem in {"security", "policy", "policies"}
                     or name.startswith(("security_", "security-", "policy_", "policy-"))
+                    or any(word in name for word in ("credential", "secret", "private_key", "private-key"))
+                    or any(suffix in name for suffix in (".sqlite", ".db", ".p12", ".pfx", ".kdbx"))
                     or name.endswith(("_policy.py", "-policy.json", ".pem", ".key"))):
                 raise ToolDenied("Protected repository path")
         if any(parts[:len(prefix)] == prefix for prefix in self._additional):

@@ -1,7 +1,7 @@
 """Read-only repository tools. No shell evaluation or file-editing interface."""
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import math
 import os
 from pathlib import Path
@@ -10,7 +10,6 @@ import shlex
 import signal
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 from typing import Sequence
@@ -28,6 +27,7 @@ class CommandResult:
     stderr: str = ""
     timed_out: bool = False
     truncated: bool = False
+    sandbox: dict = field(default_factory=dict)
 
 
 class RepositoryTools:
@@ -258,14 +258,14 @@ class RepositoryTools:
     def run_pytest(self, paths: Sequence[str] = ("tests",)) -> CommandResult:
         """Run tests in a read-only, secret-free snapshot with no host network.
 
-        Bubblewrap and unprivileged namespaces are mandatory. Never falls back
+        A functional Bubblewrap or development Docker backend is mandatory. Never falls back
         to running repository Python on the host. Only test paths are accepted;
         agent-provided pytest options/plugins/configuration are not supported.
         """
         return self._run_test_command(paths)
 
     def run_ui_tests(self) -> CommandResult:
-        """Host-only fixed UI suite, using the same read-only Bubblewrap snapshot."""
+        """Host-only fixed UI suite, using the same read-only sandbox snapshot."""
         return self._run_test_command(("tests/ui.test.cjs",), ui=True)
 
     def _runtime_policy_bytes(self):
@@ -299,8 +299,6 @@ class RepositoryTools:
                 raise ToolDenied("Only test file or directory paths are accepted")
             with self._open(path, directory=(self.root / path).is_dir()):
                 pass
-        if not Path(self._bwrap).is_file():
-            raise ToolDenied("Pytest requires Bubblewrap; host execution is disabled")
         with tempfile.TemporaryDirectory(prefix="jarvis-tests-") as temporary:
             snapshot = Path(temporary) / "repository"
             snapshot.mkdir()
@@ -326,26 +324,14 @@ class RepositoryTools:
                 destination = snapshot / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(data)
-            argv = [self._bwrap, "--unshare-all", "--die-with-parent", "--new-session",
-                    "--cap-drop", "ALL", "--ro-bind", "/usr", "/usr",
-                    "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
-                    "--symlink", "usr/lib64", "/lib64", "--proc", "/proc",
-                    "--dev", "/dev", "--tmpfs", "/tmp",
-                    "--ro-bind", str(snapshot), "/workspace",
-                    "--ro-bind", sys.prefix, "/runtime", "--chdir", "/workspace",
-                    "--clearenv", "--setenv", "PATH", "/runtime/bin:/usr/bin",
-                    "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C.UTF-8",
-                    "--setenv", "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1",
-                    ]
-            if ui:
-                argv += ["/usr/bin/node", "--test", "tests/ui.test.cjs"]
-            else:
-                argv += ["/runtime/bin/python", "-I", "-B", "-m", "pytest",
-                         "-p", "no:cacheprovider", "-c", "/dev/null", "--rootdir=/workspace",
-                         "-o", "pythonpath=/workspace", "--", *paths]
-            result = self._execute(argv, timeout=self.pytest_timeout)
-            return CommandResult((("node", "--test") if ui else ("pytest",)) + tuple(paths), result.returncode, result.stdout,
-                                 result.stderr, result.timed_out, result.truncated)
+            # Readable by the fixed non-root container UID even under umask 077.
+            # The parent temporary directory remains private to the host user.
+            snapshot.chmod(0o755)
+            for item in snapshot.rglob("*"):
+                item.chmod(0o755 if item.is_dir() else 0o444)
+            from .sandbox import run_tests
+            result = run_tests(self, snapshot, paths, ui=ui)
+            return replace(result, command=(("node", "--test") if ui else ("pytest",)) + tuple(paths))
 
     def run_command(self, command: str | Sequence[str]) -> CommandResult:
         """Controlled command facade, not a general-purpose shell.
