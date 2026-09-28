@@ -168,8 +168,14 @@ class DeploymentMiddleware:
                     return await JSONResponse({'detail': 'Authentication required'}, status_code=401,
                         headers={'WWW-Authenticate': 'Basic realm="Jarvis", charset="UTF-8"'})(scope, receive, logged_send)
                 origin = headers.get(b'origin')
+                # External links may carry cross-site metadata after the Basic
+                # challenge. Permit only top-level reads of the UI document;
+                # never extend this exception to API routes or mutations.
+                ui_navigation = (scope['path'] == '/' and scope['method'] in {'GET', 'HEAD'} and
+                                 headers.get(b'sec-fetch-mode') == b'navigate' and
+                                 headers.get(b'sec-fetch-dest') == b'document')
                 if ((origin is not None and origin.decode('latin1') != self.settings.public_origin) or
-                        headers.get(b'sec-fetch-site') == b'cross-site'):
+                        (headers.get(b'sec-fetch-site') == b'cross-site' and not ui_navigation)):
                     return await JSONResponse({'detail': 'Cross-origin request denied'}, status_code=403)(scope, receive, logged_send)
             await self.app(scope, receive, logged_send)
         finally:

@@ -79,6 +79,84 @@ def test_basic_browser_and_bearer_api_auth_and_csrf(production):
         assert client.post('/candidates/00000000-0000-0000-0000-000000000000/apply', json={}).status_code == 401
 
 
+@pytest.mark.parametrize('method', ['GET', 'HEAD'])
+def test_cross_site_top_level_ui_navigation_after_basic_auth(production, method):
+    headers = {'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate',
+               'Sec-Fetch-Dest': 'document'}
+    with TestClient(main.create_app(settings=Settings.from_env(production)),
+                    base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
+        assert client.request(method, '/', headers=headers).status_code == 401
+        assert client.request(method, '/', headers=headers, auth=('jarvis', 'wrong')).status_code == 401
+        assert client.request(method, '/', headers={**headers, 'Host': 'evil.example'},
+                              auth=('jarvis', production['JARVIS_AUTH_TOKEN'])).status_code == 400
+        response = client.request(method, '/', headers=headers, auth=('jarvis', production['JARVIS_AUTH_TOKEN']))
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/html')
+        assert response.headers['cache-control'] == 'no-store'
+        assert response.headers['x-frame-options'] == 'DENY'
+        if method == 'HEAD':
+            assert response.content == b''
+
+
+@pytest.mark.parametrize('method,path', [('GET', '/'), ('GET', '/tasks'), ('POST', '/conversations')])
+def test_authenticated_same_origin_browser_requests(production, method, path):
+    headers = {'Origin': production['JARVIS_PUBLIC_ORIGIN'], 'Sec-Fetch-Site': 'same-origin',
+               'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty'}
+    with TestClient(main.create_app(settings=Settings.from_env(production)),
+                    base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
+        assert client.request(method, path, headers=headers,
+                              auth=('jarvis', production['JARVIS_AUTH_TOKEN'])).status_code == 200
+
+
+@pytest.mark.parametrize('method,path,metadata', [
+    # A forged navigation tuple cannot exempt mutations or API reads.
+    ('POST', '/conversations', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}),
+    ('POST', '/', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}),
+    ('PUT', '/', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}),
+    ('PATCH', '/', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}),
+    ('DELETE', '/', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}),
+    ('GET', '/tasks', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}),
+    ('HEAD', '/tasks', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}),
+    ('GET', '/', {'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty'}),
+    ('HEAD', '/', {'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty'}),
+    ('POST', '/conversations', {'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty'}),
+    ('POST', '/conversations', {'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'empty'}),
+    ('GET', '/', {'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'image'}),
+    ('GET', '/', {'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'document'}),
+    ('GET', '/', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'empty'}),
+    ('GET', '/', {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe'}),
+    ('GET', '/', {'Sec-Fetch-Mode': 'navigate'}),
+    ('GET', '/', {'Sec-Fetch-Dest': 'document'}),
+    ('GET', '/', {}),
+    # Even an exact Origin cannot override explicit cross-site mutation metadata.
+    ('POST', '/conversations', {'Origin': 'https://jarvis.example.com'}),
+])
+def test_cross_site_unsafe_or_non_navigation_requests_are_blocked(production, method, path, metadata):
+    headers = {'Sec-Fetch-Site': 'cross-site', **metadata}
+    with TestClient(main.create_app(settings=Settings.from_env(production)),
+                    base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
+        response = client.request(method, path, headers=headers,
+                                  auth=('jarvis', production['JARVIS_AUTH_TOKEN']))
+        assert response.status_code == 403
+        if method == 'HEAD':
+            assert response.content == b''
+        else:
+            assert response.json() == {'detail': 'Cross-origin request denied'}
+
+
+@pytest.mark.parametrize('origin', ['https://evil.example', 'null', 'https://jarvis.example.com/'])
+@pytest.mark.parametrize('method,path,site', [('POST', '/conversations', 'same-origin'),
+                                             ('GET', '/', 'cross-site'),
+                                             ('HEAD', '/', 'cross-site')])
+def test_explicit_mismatched_origin_cannot_be_overridden_by_fetch_metadata(production, origin, method, path, site):
+    headers = {'Origin': origin, 'Sec-Fetch-Site': site,
+               'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}
+    with TestClient(main.create_app(settings=Settings.from_env(production)),
+                    base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
+        assert client.request(method, path, headers=headers,
+                              auth=('jarvis', production['JARVIS_AUTH_TOKEN'])).status_code == 403
+
+
 def test_health_is_minimal_and_checks_database(production, monkeypatch):
     application = main.create_app(settings=Settings.from_env(production))
     with TestClient(application) as client:

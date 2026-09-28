@@ -68,9 +68,21 @@ no built-in/default credentials or persistent sessions. Browser credentials may
 be cached until the browser closes; rotate the token and recreate the container
 to revoke access. Do not use a memorable human password in place of a random token.
 
-Host validation uses the configured origin. Cross-origin browser requests are
-rejected, including state-changing requests, and responses use `no-store` and
-anti-framing headers. Forwarded headers are not trusted; Caddy preserves Host
+Host validation uses the configured origin. After authentication, any explicit
+`Origin` must exactly equal `JARVIS_PUBLIC_ORIGIN`, even for safe navigation;
+`null`, other origins, and trailing-slash variants are rejected. Requests marked
+`Sec-Fetch-Site: cross-site` are rejected except for `GET`/`HEAD` to the UI root `/`
+with both `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`. This permits
+opening Jarvis from an external link after the Basic challenge, while cross-site
+API reads, fetches, frames, and all state-changing methods remain blocked. Missing
+or inconsistent navigation metadata does not qualify for the exception. The UI
+root serves only the static document and does not mutate state.
+
+Authenticated clients without Origin/Fetch Metadata headers remain supported for
+CLI/API compatibility; headers are browser CSRF signals, not credentials or a
+defense against non-browser clients that already possess the token. A forged
+navigation tuple cannot exempt an API route, unsafe method, or mismatched Origin.
+Responses use `no-store` and anti-framing headers. Forwarded headers are not trusted; Caddy preserves Host
 and Authorization. Always use HTTPS remotely: Basic/Bearer credentials must not
 cross an unencrypted network. Keep the backend port loopback-only and preserve
 these checks when introducing another proxy. Put any additional rate limiting

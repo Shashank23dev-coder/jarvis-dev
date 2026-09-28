@@ -50,7 +50,7 @@ class TaskRequest(BaseModel):
     conversation_id: str | None = None
 
 
-@router.get("/")
+@router.api_route("/", methods=["GET", "HEAD"])
 def home():
     return FileResponse(Path(__file__).resolve().parent / "static/index.html")
 
