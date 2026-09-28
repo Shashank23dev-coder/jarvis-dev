@@ -290,7 +290,8 @@ class RepositoryTools:
             'core/deployment.py', 'core/deployment_server.py',
             'core/deployment_healthcheck.py', 'tests/test_deployment.py',
             'core/deployment_release.py', 'core/deployment_runtime.py',
-            'core/deployment_tools.py', 'tests/test_deployment_release.py')}
+            'core/deployment_tools.py', 'tests/test_deployment_release.py',
+            'core/deployment_status.py', 'tests/test_deployment_status.py')}
 
     def _run_test_command(self, paths, *, ui=False):
         if isinstance(paths, (str, bytes)) or not paths:

@@ -42,6 +42,29 @@ class DockerRuntime:
         result = self.docker('container', 'inspect', name, optional=True)
         return json.loads(result)[0] if result else None
 
+    def publish_status(self, snapshot):
+        # Only the strict public projection enters the existing state volume.
+        # No new mounts, host journal, secrets, controller config or Docker socket.
+        from .deployment_status import projection
+        safe = self.redact(projection(snapshot['current'], snapshot['history'][::-1], snapshot['observed_at']))
+        script = '''import json, os, sys, tempfile
+from pathlib import Path
+root = Path('/var/lib/jarvis')
+assert root.resolve() == root
+data = json.loads(sys.argv[1])
+name = None
+try:
+    with tempfile.NamedTemporaryFile(mode='w', dir=root, delete=False) as stream:
+        name = stream.name
+        json.dump(data, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(name, root / 'deployment-status.json')
+finally:
+    if name and os.path.exists(name): os.unlink(name)
+'''
+        self.docker('exec', self.config.container, 'python', '-c', script, json.dumps(safe))
+
     def secrets(self):
         path = self.config.env_file
         if path.resolve() != path or not path.is_file() or path.stat().st_mode & 0o077:

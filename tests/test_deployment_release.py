@@ -288,13 +288,16 @@ def test_api_approval_and_read_only_history(release):
     service, runtime, sha = release
     app = main.create_app(database_path=':memory:')
     app.dependency_overrides[main.get_release_service] = lambda: service
+    from core.deployment_status import ControllerInspector
+    inspector = ControllerInspector(service)
+    app.dependency_overrides[main.get_release_inspector] = lambda: inspector
     with TestClient(app) as client:
         assert client.get('/deployments/preview/' + sha).status_code == 200
         assert client.post('/deployments/' + sha + '/deploy', json={'confirmation': 'yes'}).status_code == 409
         result = client.post('/deployments/' + sha + '/deploy', json={'confirmation': approval(sha)}).json()
         assert result['status'] == 'deployed'
-        assert client.get('/deployments/' + result['id']).json() == result
-        assert client.get('/deployments').json() == [result]
+        assert client.get('/deployments/' + result['id']).json() == inspector.inspect(result['id'])
+        assert client.get('/deployments').json() == inspector.history()
 
 
 def container_info(runtime, *, image='sha256:old', port=8000, volume='jarvis_state'):

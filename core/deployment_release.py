@@ -141,6 +141,17 @@ class ReleaseService:
             record['completed_at'] = record['updated_at']
         self.save(data)
 
+        # A sanitized informational copy is the only release data production can
+        # read. Publication must never alter transaction/rollback decisions.
+        if hasattr(self.runtime, 'publish_status'):
+            try:
+                from .deployment_status import projection
+                self.runtime.publish_status(projection(self.runtime.current(), data['records'], now()))
+                record['status_publication_failed'] = False
+            except Exception:
+                record['status_publication_failed'] = True
+            self.save(data)
+
     def history(self):
         return self.load()['records'][-50:][::-1]
 

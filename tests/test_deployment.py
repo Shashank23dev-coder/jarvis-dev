@@ -411,7 +411,8 @@ def test_candidate_snapshot_provisions_only_verified_deployment_dependencies(tmp
     assert set(expected) == {'core/deployment.py', 'core/deployment_server.py',
                              'core/deployment_healthcheck.py', 'tests/test_deployment.py',
                              'core/deployment_release.py', 'core/deployment_runtime.py',
-                             'core/deployment_tools.py', 'tests/test_deployment_release.py'}
+                             'core/deployment_tools.py', 'tests/test_deployment_release.py',
+                             'core/deployment_status.py', 'tests/test_deployment_status.py'}
     worktree = tmp_path / 'worktree'
     for name, data in expected.items():
         path = worktree / name

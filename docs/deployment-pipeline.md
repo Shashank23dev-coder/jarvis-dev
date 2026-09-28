@@ -131,17 +131,19 @@ release rehearsal and observation.
 
 ## Interfaces
 
-These APIs are on the configured **development** service:
+Read-only inspection APIs work in both development and production. The deployment
+POST remains restricted to the configured **development** controller:
 
 | Method/path | Purpose |
 | --- | --- |
+| `GET /deployments/status` | Current observed revision/image and latest release |
 | `GET /deployments/preview/{sha}` | Read eligibility, evidence and approval syntax |
 | `GET /deployments` | Latest 50 deployment/rollback audit records |
 | `GET /deployments/{deployment_id}` | Read one durable result, no recovery |
 | `POST /deployments/{sha}/deploy` | Body `{"confirmation":"Approve and deploy commit <SHA> to production"}` |
 
-Normal agent tools are `preview_deployment`, `inspect_deployment`, and
-`deployment_history`. `approve_and_deploy_commit` is exposed only for exact current
+Normal agent tools are `deployment_status`, `preview_deployment`,
+`inspect_deployment`, and `deployment_history`. `approve_and_deploy_commit` is exposed only for exact current
 message approval and accepts only its bound commit. Validation/build configuration
 and arbitrary rollback commands are not model arguments. Deploy/rollback outcomes
 override invented model success prose with the recorded result.
@@ -152,6 +154,40 @@ image tag/ID, timestamps, phase results, final status and rollback verification.
 Errors are fixed redacted messages, not Docker/HTTP/test exception text. Keep the
 journal private and backed up; it is operator-controlled audit storage, not a
 tamper-proof ledger against the host administrator.
+
+### Production read-only status
+
+Previously all deployment tools invoked `ReleaseConfig.configured()`, which rejects
+production mode. The tool registry translated that `ToolDenied` into its generic
+"Repository policy denied the operation" message. Repository file access is not
+the remedy: the private host journal and controller configuration remain unavailable
+inside production, and protected-path rules are unchanged.
+
+The controller now publishes an atomic, mode-0600 `deployment-status.json` in the
+existing `/var/lib/jarvis` volume at release transitions. It uses the existing
+host Docker authority; production gains no Docker socket, host mount, configuration
+or mutation capability. A failed publication is recorded as
+`status_publication_failed` in the private audit and does not initiate rollback.
+Publication occurs during an approved deployment/recovery, not during validation,
+preview or ordinary read-only requests. The next approved deployment initializes
+the snapshot; a missing snapshot reports inspection unavailable without falling
+back to protected files.
+
+Dedicated readers expose only the observed revision/image, the latest ten release
+results, rollback verification, timestamps and compact validation results. They
+exclude arbitrary commit messages, approval text, paths, logs, controller config,
+environment and conversation fingerprints. Known credential values are redacted;
+production validates and filters the projection again before returning it. Reads
+use the normal tool registry and retain its metadata-only activity audit.
+
+Production status is explicitly the **last controller observation**, not a live
+health probe. External Docker changes are not observed until the next controller
+publication. Evidence freshness is recalculated at read time, but live deployment
+eligibility is `null` in production: clean host HEAD, validation and all transaction
+gates must still be checked by the host controller. A snapshot is informational
+only and is never consulted to authorize deploy or rollback. Recovery/rollback
+retains the existing exact-current-message approval contract; no separate normal
+chat rollback mutation tool is introduced.
 
 ## Later controlled live deployment (not performed during implementation)
 

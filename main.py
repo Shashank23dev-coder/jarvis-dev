@@ -448,18 +448,31 @@ def release_action(action):
         raise HTTPException(status_code=409, detail='Deployment operation denied or failed') from None
 
 
+def get_release_inspector():
+    from core.deployment_status import configured_inspector
+    try:
+        return configured_inspector()
+    except Exception:
+        raise HTTPException(status_code=409, detail='Deployment inspection unavailable') from None
+
+
+@router.get('/deployments/status')
+def deployment_status(service=Depends(get_release_inspector)):
+    return release_action(service.status)
+
+
 @router.get('/deployments')
-def deployment_history(service=Depends(get_release_service)):
+def deployment_history(service=Depends(get_release_inspector)):
     return release_action(service.history)
 
 
 @router.get('/deployments/preview/{commit}')
-def deployment_preview(commit: str, service=Depends(get_release_service)):
+def deployment_preview(commit: str, service=Depends(get_release_inspector)):
     return release_action(lambda: service.preview(commit))
 
 
 @router.get('/deployments/{deployment_id}')
-def deployment_inspect(deployment_id: str, service=Depends(get_release_service)):
+def deployment_inspect(deployment_id: str, service=Depends(get_release_inspector)):
     return release_action(lambda: service.inspect(deployment_id))
 
 
