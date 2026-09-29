@@ -41,6 +41,24 @@ class Broker:
     def execute(self, raw):
         self.check_source()
         request = Request.model_validate(raw).checked()
+        if request.action.startswith('job_'):
+            from .engineering_jobs import EngineeringJobs, project_job
+            jobs = EngineeringJobs(self.service.store.database)
+            if request.action == 'job_create':
+                return project_job(jobs.create(request.goal, request.engineering_action.model_dump(),
+                    request.arguments, request.model_dump()))
+            if request.action == 'job_list':
+                return [project_job(j) for j in jobs.recent(request.conversation_id)]
+            job = jobs.get(request.arguments['job_id'])
+            if job['source']['conversation_id'] != request.conversation_id:
+                raise ToolDenied('Engineering job outside conversation')
+            operation = request.action.removeprefix('job_')
+            if operation != 'inspect':
+                from .engineering_tools import control_authorized
+                if not control_authorized(request.goal, operation, job['id']):
+                    raise ToolDenied('Explicit engineering job control required')
+                job = jobs.control(job['id'], operation)
+            return project_job(job)
         context = dict(source='production_chat', task_id=request.task_id,
                        conversation_id=request.conversation_id, request_id=request.request_id)
         if request.engineering_action:

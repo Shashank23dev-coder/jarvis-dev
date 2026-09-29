@@ -22,6 +22,16 @@ class CandidateStore:
         with self.database.transaction() as db:
             db.execute('INSERT INTO candidates(id,created_at,state,record) VALUES (?,?,?,?)',
                        (record['id'], record['created_at'], record['state'], json.dumps(record)))
+            job_id = (source_context or {}).get('engineering_job_id')
+            if job_id:
+                from .engineering_jobs import EngineeringJobs
+                jobs = EngineeringJobs(self.database)
+                job = jobs._get(db, job_id)
+                if job['lease_owner'] != source_context.get('lease_owner'):
+                    raise ValueError('Engineering lease mismatch')
+                job['candidate_id'] = record['id']
+                job['candidate_ids'].append(record['id'])
+                jobs._save(db, job, 'candidate_created')
         return record
 
     def get(self, candidate_id, *, internal=False, recover=True):
@@ -58,6 +68,19 @@ class CandidateStore:
             if event:
                 db.execute('INSERT INTO candidate_events(candidate_id,timestamp,event) VALUES (?,?,?)',
                            (record['id'], timestamp(), event))
+                job_id = record.get('source_context', {}).get('engineering_job_id')
+                if job_id:
+                    from .engineering_jobs import EngineeringJobs
+                    jobs = EngineeringJobs(self.database)
+                    job = jobs._get(db, job_id)
+                    if job['lease_owner'] != record['source_context'].get('lease_owner'):
+                        raise ValueError('Engineering lease mismatch')
+                    stage = ('testing' if event.startswith(('test', 'baseline')) else
+                             'reviewing' if event.startswith('review') or event == 'independent_review' else
+                             'implementing' if event in {'generate_proposal', 'apply_edits'} else None)
+                    if stage:
+                        job.update(status=stage, current_stage=stage)
+                        jobs._save(db, job, event)
 
         # Reflection is derived after the authoritative state/event commits.
         from .experience import CANDIDATE_EVENTS, ExperienceStore, attempt_capture

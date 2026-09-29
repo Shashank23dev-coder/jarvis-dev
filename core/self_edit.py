@@ -601,7 +601,8 @@ class SelfEditService:
                               candidate_id=candidate_id, action=action)
                 process = subprocess.Popen([sys.executable, '-B', '-m', 'core.candidate_worker'],
                     cwd=Path(__file__).resolve().parents[1], stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                    pass_fds=((self.engineering_lock_fd,) if hasattr(self, 'engineering_lock_fd') else ()))
                 try:
                     process.communicate(json.dumps(config).encode(), timeout=budget)
                 except subprocess.TimeoutExpired:

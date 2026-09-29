@@ -34,7 +34,7 @@ class CandidatePolicy(ToolPolicy):
                     or (parts[0] == 'docs' and Path(path).suffix in {'.md', '.txt'})
                     or (parts[0] == 'static' and Path(path).suffix in {'.html', '.css', '.js'})
                     or path == 'main.py')
-        if not approved or path.startswith(('core/candidate_', 'core/self_edit')):
+        if not approved or path.startswith(('core/candidate_', 'core/self_edit', 'core/engineering_')):
             raise ToolDenied('Path is outside approved editing scope')
         return parts
 

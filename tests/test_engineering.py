@@ -135,8 +135,14 @@ def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(
                         candidate_service_factory=lambda db: factory(model=model, tester=run_checks))
     brain = JarvisBrain(runner, settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
     outcome = brain.run(task['goal'], task_id=task['id'], task_store=store)
-    assert 'passed' in outcome.response and 'Deployed!' not in outcome.response
-    assert 'separate human' in outcome.response and 'improved' in outcome.response
+    assert 'queued' in outcome.response and 'Deployed!' not in outcome.response
+    assert 'separate human' in outcome.response
+    from core.engineering_jobs import EngineeringJobs
+    from core.engineering_worker import EngineeringWorker
+    job = EngineeringJobs(store.database).recent()[0]
+    assert job['id'] in outcome.response
+    result = EngineeringWorker(factory(model=model, tester=run_checks), source=source).once()
+    assert result['status'] == 'waiting_for_approval'
     names = {tool['name'] for tool in provider.requests[0].tools}
     assert 'prepare_engineering' in names and 'engineer_candidate' not in names
     assert 'engineer_candidate' in {tool['name'] for tool in provider.requests[2].tools}
@@ -211,7 +217,7 @@ def test_production_brain_uses_bridge_without_local_authority(setup, tmp_path, m
     brain = JarvisBrain(AgentRunner(candidate_service_factory=lambda db: pytest.fail('No local writes')),
                        settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
     outcome = brain.run(task['goal'], task_id=task['id'], task_store=store)
-    assert 'passed' in outcome.response and 'Applied!' not in outcome.response
+    assert 'queued' in outcome.response and 'Applied!' not in outcome.response
     assert 'src/app.py' not in outcome.response
     with store.database.transaction() as db:
         assert db.execute('SELECT COUNT(*) FROM candidates').fetchone()[0] == 0

@@ -32,15 +32,20 @@ class Request(StrictModel):
             raise ToolDenied('Invalid request identity')
         if not 0 <= time.time() - self.created <= 330:
             raise ToolDenied('Expired request')
-        schema = StrictModel if self.action == 'workspace' else EngineeringArguments if self.action == 'engineer' else CreateArguments if self.action == 'create' else CandidateArguments
-        if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard'}:
+        from .engineering_tools import JobArguments
+        schema = (StrictModel if self.action in {'workspace', 'job_list'} else
+                  EngineeringArguments if self.action in {'engineer', 'job_create'} else
+                  JobArguments if self.action.startswith('job_') else
+                  CreateArguments if self.action == 'create' else CandidateArguments)
+        if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard',
+                              'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume'}:
             raise ToolDenied('Unsupported candidate operation')
         schema.model_validate(self.arguments)
         if self.engineering_action is not None:
-            if self.action not in {'workspace', 'engineer', 'inspect', 'tests', 'review'}:
+            if self.action not in {'workspace', 'engineer', 'job_create', 'inspect', 'tests', 'review'}:
                 raise ToolDenied('Engineering action cannot authorize this operation')
             self.engineering_action.check(self.goal, self.model_dump())
-        elif self.action == 'workspace':
+        elif self.action in {'workspace', 'job_create'}:
             raise ToolDenied('Workspace requires a typed engineering action')
         return self
 
@@ -104,6 +109,10 @@ class CandidateClient:
                     result = read(outgoing)
                     if result.get('request_id') != request.request_id or not result.get('ok'):
                         raise ToolDenied('Candidate broker denied the request')
+                    if action.startswith('job_'):
+                        from .engineering_jobs import project_job
+                        return ([project_job(j) for j in result['record']] if action == 'job_list'
+                                else project_job(result['record']))
                     return (EngineeringWorkspace.model_validate(result['record']).checked().model_dump()
                             if action == 'workspace' else project(result['record']))
                 time.sleep(.2)

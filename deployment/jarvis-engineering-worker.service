@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis persistent engineering job worker
+After=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/jarvis-dev
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin HOME=/home/ubuntu JARVIS_MODE=development JARVIS_DB_PATH=/home/ubuntu/.local/state/jarvis-chat-candidates/candidates.sqlite3 /home/ubuntu/jarvis-dev/.venv/bin/python -B -m core.engineering_worker
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=default.target

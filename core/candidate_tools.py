@@ -59,9 +59,9 @@ PRESERVE_PRODUCTION = re.compile(
 
 class CandidateTools:
     CONTINUE_ENGINEERING = ('The current task has an authorized, prepared engineering action but no candidate. '
-        'Continue this same task by calling engineer_candidate with provider=codex and paths from the returned workspace catalog. '
+        'Continue this same task by calling create_engineering_job with provider=codex and paths from the returned workspace catalog. '
         'One tool per response allows additional tool responses in this task. Do not ask for another user request. '
-        'Stop after implementation, tests and review; never apply or deploy.')
+        'Return the queued job ID; the separate worker implements, tests and reviews. Never apply or deploy.')
 
     def __init__(self, goal, database, factory=None, *, source_context=None, engineering=False,
                  engineering_authorizer=None):
@@ -75,6 +75,7 @@ class CandidateTools:
         self.apply_results = {}
         self.previews = {}
         self.created = False
+        self.jobs = {}
         self.allowed = set()
         self.ids = set()
         if not NEGATIVE.search(PRESERVE_PRODUCTION.sub('', goal)):
@@ -132,9 +133,10 @@ Decide from the current task whether solving the problem requires code or
 documentation changes. First call prepare_engineering with provider=codex to
 authorize the action and discover editable/test paths in the configured dev
 workspace. Use the returned catalog, never guessed paths or production paths.
-Then call engineer_candidate
+Then call create_engineering_job (engineer_candidate is a compatibility alias)
 with provider=codex and a concise
-problem, testable hypothesis, relevant source paths and targeted tests. It delegates
+problem, testable hypothesis, relevant source paths and targeted tests. It durably
+queues the action and returns a job ID immediately. A separate dev worker delegates
 implementation to Codex in an isolated candidate, compares baseline tests, runs
 tests, reviews the diff independently and revises within fixed budgets. Use it
 instead of create_self_edit_candidate for engineering work. Do not fabricate a
@@ -143,8 +145,8 @@ This engineering action uses semantic current-request authorization, not a requi
 opening phrase. Choose a small improvement within
 the user's scope. Inspection paths must be editable source/test/docs files;
 protected candidate infrastructure and deployment files are outside that scope.
-Present the finished candidate and improvement evidence for human approval;
-candidate creation never authorizes applying it or deploying it.
+Present the queued job ID and current status; never claim tests or review finished
+at creation time. Job creation never authorizes applying or deploying a candidate.
 '''
 
     def _service(self):
@@ -213,6 +215,16 @@ candidate creation never authorizes applying it or deploying it.
         elif 'engineer' not in self.allowed or provider != 'codex':
             raise ToolDenied('Engineering action unavailable')
         self.created = True
+        if self.engineering_action:
+            from .engineering_jobs import EngineeringJobs, project_job
+            from .engineering_tools import JobEvidence
+            arguments = dict(inspect_paths=inspect_paths, targeted_tests=targeted_tests,
+                             problem_detected=problem_detected, hypothesis=hypothesis)
+            record = (self._service().invoke('job_create', arguments) if self.production else
+                      project_job(EngineeringJobs(self.database).create(self.goal,
+                          self.engineering_action.model_dump(), arguments, self.source_context)))
+            self.jobs[record['id']] = record
+            return JobEvidence(jobs=[record])
         options = ({'engineering_action': self.engineering_action.model_dump()}
                    if self.engineering_action and not self.production else {})
         record = self._service().engineer(self.goal, inspect_paths, targeted_tests, problem_detected, hypothesis, **options)
@@ -249,19 +261,29 @@ candidate creation never authorizes applying it or deploying it.
         return self.apply_action('apply', candidate_id)
 
     def bind(self, registry):
-        if not self.exposed:
+        job_tools = bool(self.source_context and (self.engineering_authorizer or 'engineering job' in self.goal.lower()))
+        if not self.exposed and not job_tools:
             return registry
         scoped = copy.copy(registry)
         definitions = dict(registry._definitions)
+        from .engineering_tools import JobArguments, JobEvidence, invoke
+        if job_tools:
+            for operation in ('list', 'inspect', 'pause', 'cancel', 'resume'):
+                definitions[operation + '_engineering_job' + ('s' if operation == 'list' else '')] = ToolDefinition(
+                    'Read engineering job status/history or explicitly control an inactive queue job. No execution, apply or deployment.',
+                    StrictModel if operation == 'list' else JobArguments, JobEvidence,
+                    lambda job_id=None, operation=operation: invoke(self, operation, job_id))
         if 'prepare' in self.exposed:
             definitions['prepare_engineering'] = ToolDefinition(
                 'Authorize a bounded engineering action and discover policy-filtered editable/test paths in configured dev. Read-only; never creates, applies or deploys.',
                 PrepareEngineeringArguments, EngineeringWorkspace, self.prepare)
         if 'engineer' in self.exposed:
             definitions['engineer_candidate'] = ToolDefinition(
-                'Select Codex to implement a code or documentation improvement in an isolated candidate; test, compare baseline, review and revise. Never apply or deploy.',
+                'Create a durable engineering job for Codex in configured dev. A separate worker implements, tests and reviews; stops waiting for approval. Returns immediately. Never apply or deploy.',
                 BrainEngineeringArguments if self.engineering_authorizer else EngineeringArguments,
-                CandidateEvidence, self.engineer)
+                JobEvidence if self.engineering_authorizer else CandidateEvidence, self.engineer)
+            if self.engineering_authorizer:
+                definitions['create_engineering_job'] = definitions['engineer_candidate']
         for action, name, description in (
             ('preview', 'preview_candidate_apply', 'Preview apply eligibility for the named candidate. Never applies or changes main.'),
             ('audit', 'inspect_candidate_apply', 'Read the named candidate apply audit without mutations or recovery.')):
@@ -288,6 +310,10 @@ candidate creation never authorizes applying it or deploying it.
         return scoped
 
     def final_response(self, original):
+        if self.jobs:
+            return '\n'.join(f"Engineering job {j['id']}: {j['status']}. Provider: {j['provider']}. "
+                'A separate dev worker owns execution. Tests and review are pending. '
+                'Apply and deployment require separate human approval.' for j in self.jobs.values())
         if self.apply_results:
             return '\n'.join(
                 f"Candidate {identifier}: apply {(result['apply'] or {}).get('status', 'not_applied')}. "
