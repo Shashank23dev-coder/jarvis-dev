@@ -11,6 +11,7 @@ from tools.schemas import StrictModel
 from tools.policy import ToolDenied
 from .candidate_tools import CreateArguments, CandidateArguments, EngineeringArguments
 from .database import valid_id
+from .candidate_action import EngineeringAction, EngineeringWorkspace
 
 ROOT = Path('/tmp/jarvis-candidate-mailbox')
 MAX_BYTES = 48000
@@ -24,16 +25,23 @@ class Request(StrictModel):
     action: str
     arguments: dict
     created: float
+    engineering_action: EngineeringAction | None = None
 
     def checked(self):
         if not all(valid_id(v) for v in (self.request_id, self.task_id, self.conversation_id)):
             raise ToolDenied('Invalid request identity')
         if not 0 <= time.time() - self.created <= 330:
             raise ToolDenied('Expired request')
-        schema = EngineeringArguments if self.action == 'engineer' else CreateArguments if self.action == 'create' else CandidateArguments
-        if self.action not in {'create', 'engineer', 'inspect', 'tests', 'review', 'discard'}:
+        schema = StrictModel if self.action == 'workspace' else EngineeringArguments if self.action == 'engineer' else CreateArguments if self.action == 'create' else CandidateArguments
+        if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard'}:
             raise ToolDenied('Unsupported candidate operation')
         schema.model_validate(self.arguments)
+        if self.engineering_action is not None:
+            if self.action not in {'workspace', 'engineer', 'inspect', 'tests', 'review'}:
+                raise ToolDenied('Engineering action cannot authorize this operation')
+            self.engineering_action.check(self.goal, self.model_dump())
+        elif self.action == 'workspace':
+            raise ToolDenied('Workspace requires a typed engineering action')
         return self
 
 
@@ -72,14 +80,16 @@ def write(path, data):
 
 
 class CandidateClient:
-    def __init__(self, goal, context):
+    def __init__(self, goal, context, *, engineering_action=None):
         self.goal, self.context = goal, context
+        self.engineering_action = engineering_action
 
     def invoke(self, action, arguments):
         if not self.context:
             raise ToolDenied('Source task metadata required')
         request = Request(request_id=str(uuid4()), goal=self.goal, action=action,
-                          arguments=arguments, created=time.time(), **self.context).checked()
+                          arguments=arguments, created=time.time(),
+                          engineering_action=self.engineering_action, **self.context).checked()
         directory = root()
         # Bound concurrent waiting callers and refuse rather than evicting work.
         if len(list(directory.iterdir())) >= 16:
@@ -94,7 +104,8 @@ class CandidateClient:
                     result = read(outgoing)
                     if result.get('request_id') != request.request_id or not result.get('ok'):
                         raise ToolDenied('Candidate broker denied the request')
-                    return project(result['record'])
+                    return (EngineeringWorkspace.model_validate(result['record']).checked().model_dump()
+                            if action == 'workspace' else project(result['record']))
                 time.sleep(.2)
             raise ToolDenied('Candidate broker unavailable or timed out; inspect before retrying')
         finally:
@@ -105,6 +116,11 @@ class CandidateClient:
         if goal != self.goal:
             raise ToolDenied('Goal mismatch')
         return self.invoke('create', dict(inspect_paths=inspect_paths, targeted_tests=targeted_tests))
+
+    def engineering_workspace(self, scope):
+        if not self.engineering_action or scope != self.engineering_action.scope:
+            raise ToolDenied('Workspace action mismatch')
+        return self.invoke('workspace', {})
 
     def inspect(self, candidate_id):
         return self.invoke('inspect', dict(candidate_id=candidate_id))
@@ -146,6 +162,8 @@ def project(record):
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)
     if record.get('improvement'):
         improvement = record['improvement']
+        if improvement.get('implementation_provider') != 'codex' or improvement.get('review_provider') != 'openai':
+            raise ToolDenied('Invalid engineering provider evidence')
         comparison = improvement.get('baseline_comparison', {}).get('result')
         if comparison not in {'not_run', 'not_compared', 'inconclusive', 'regressed', 'improved', 'unchanged_pass', 'unchanged_failure', 'changed_test_suite'}:
             raise ToolDenied('Invalid baseline comparison')
@@ -160,6 +178,10 @@ def project(record):
             baseline_comparison={'result': comparison}, review_result=verdict,
             confidence='supported_by_tests_and_review' if record['state'] == 'passed' and not record.get('busy') else 'insufficient',
             implementation_provider='codex', review_provider='openai')
+        if improvement.get('engineering_action') == 'engineer':
+            if improvement.get('scope') not in {'documentation', 'code'}:
+                raise ToolDenied('Invalid engineering scope')
+            projected['improvement'].update(engineering_action='engineer', scope=improvement['scope'])
     return projected
 
 
@@ -172,7 +194,7 @@ def transfer(operation, payload=None):
                 request = Request.model_validate(read(path)).checked()
                 if path.name != request.request_id + '.request':
                     continue
-                return request.model_dump()
+                return request.model_dump(exclude_none=True)
             except Exception:
                 path.unlink(missing_ok=True)
         return None

@@ -171,6 +171,25 @@ class SelfEditService:
         self.model = model or model_request
         self.tester = tester
 
+    def engineering_workspace(self, scope):
+        from .candidate_action import EngineeringWorkspace
+        if scope not in {'documentation', 'code'}:
+            raise ToolDenied('Invalid engineering scope')
+        policy = CandidatePolicy()
+        reader = RepositoryTools(self.source, policy=policy)
+        editable, tests = [], []
+        for path in reader.list_files('docs' if scope == 'documentation' else '.'):
+            try:
+                policy.edit_path(path)
+            except ToolDenied:
+                continue
+            editable.append(path)
+        for path in reader.list_files('tests'):
+            if Path(path).suffix in {'.py', '.cjs', '.js'}:
+                tests.append(path)
+        return EngineeringWorkspace(provider='codex', scope=scope, editable_paths=editable[:200],
+            test_paths=tests[:200], truncated=len(editable) > 200 or len(tests) > 200).checked().model_dump()
+
     def _paths(self, record):
         if not valid_id(record['id']):
             raise ToolDenied('Invalid candidate identity')
@@ -226,6 +245,9 @@ class SelfEditService:
         self._tick('inspect_diff')
         editor = self._editor()
         current, changed = editor.validate()
+        if self.record.get('improvement', {}).get('scope') == 'documentation' and any(
+                not name.startswith('docs/') or Path(name).suffix not in {'.md', '.txt'} for name in changed):
+            raise ToolDenied('Documentation action cannot edit code')
         # Validate paths BEFORE Git can emit any protected contents.
         for path in changed:
             self._original(path)
@@ -259,7 +281,8 @@ class SelfEditService:
         if self.record.get('improvement') and self.model is model_request:
             from .candidate_provider import EngineeringProviders
             providers = EngineeringProviders.defaults(model_request)
-            provider = providers.reviewer if schema is Review else providers.implementer
+            provider = providers.reviewer if schema is Review else providers.select(
+                self.record['improvement']['implementation_provider'])
             result = provider.complete(payload, instructions, min(30, self._check()))
         else:
             result = self.model(payload, instructions, min(30, self._check()))
@@ -347,6 +370,10 @@ class SelfEditService:
                 payload.update(diff=self.record['diff'], tests=self.record['test_results'][-3:],
                                review=self.record['reviewer_result'])
             proposal = self._ask(payload, PROPOSE, Proposal)
+            if improvement.get('scope') == 'documentation' and any(
+                    not edit.path.startswith('docs/') or Path(edit.path).suffix not in {'.md', '.txt'}
+                    for edit in proposal.edits):
+                raise ToolDenied('Documentation action cannot edit code')
             self.record.update(state='needs_revision', tested_fingerprint=None, reviewer_result=None)
             self._tick('apply_edits')
             self._editor().apply([edit.model_dump() for edit in proposal.edits], self._original)
@@ -634,7 +661,12 @@ class SelfEditService:
             return self.store.get(record['id'])
         return self._operate(record['id'], 'start')
 
-    def engineer(self, goal, inspect_paths, targeted_tests, problem_detected, hypothesis, *, source_context=None):
+    def engineer(self, goal, inspect_paths, targeted_tests, problem_detected, hypothesis, *, source_context=None,
+                 engineering_action=None):
+        from .candidate_action import EngineeringAction
+        action = EngineeringAction.model_validate(engineering_action) if engineering_action else None
+        if action:
+            action.check(goal, source_context or action.model_dump())
         for value in (problem_detected, hypothesis):
             text_value(value, 2000)
             safe_text(value)
@@ -642,6 +674,9 @@ class SelfEditService:
             implementation_provider='codex', review_provider='openai', files_changed=[], tests_run=[],
             failures_revisions=[], baseline_comparison={'result': 'not_run'}, review_result=None,
             confidence='insufficient')
+        if action:
+            improvement.update(engineering_action=action.action, scope=action.scope,
+                               implementation_provider=action.provider)
         return self.start(goal, inspect_paths, targeted_tests, source_context=source_context, improvement=improvement)
 
     def inspect(self, candidate_id):

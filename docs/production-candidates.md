@@ -1,5 +1,43 @@
 # Production chat candidates
 
+## Brain engineering actions
+
+When JarvisBrain is enabled, it first selects `prepare_engineering` with an explicit
+`provider: codex`. The broker returns a bounded catalog of policy-filtered editable
+and test paths from configured dev, without creating a candidate. Only successful
+preparation exposes `engineer_candidate`; selected paths must come from that
+catalog. This prevents guesses and production/dev checkout drift from selecting
+nonexistent or protected inputs. This route supports code and documentation improvements without
+requiring a particular opening verb. Before creating a candidate, a separate
+semantic decision reads only the current user request. Questions, quoted examples,
+plan-only requests and requests forbidding changes do not authorize implementation.
+An unavailable decision provider fails closed.
+
+The host binds the resulting typed action to the task, conversation and request
+digest. It allows only the configured development workspace and stops after review.
+The private production mailbox carries that action to the broker, which validates
+its schema and identity binding instead of reinterpreting the wording. This is a
+capability within the existing trusted application/mailbox boundary, not a public
+API accepting user-supplied capabilities. Legacy candidate commands retain their
+existing grammar; apply and deployment retain their exact approval gates.
+
+Codex is selected through the engineering provider registry. It returns bounded
+edit proposals without shell or filesystem authority. Documentation-only actions
+permit edits only to approved Markdown/text files under `docs/`. The candidate
+service enforces protected paths, runs baseline and candidate sandbox tests, then
+uses a separate OpenAI reviewer. Provider errors never trigger an implementation
+fallback. Task activity records the selected action/provider/scope; candidate
+evidence records implementation attempts, revisions, tests and the review verdict.
+The workspace catalog includes allowed relative filenames, never absolute host
+paths, protected filenames, file contents, credentials or configuration.
+No hidden model reasoning is persisted in that metadata.
+
+The production image must contain this protocol before live chat can use it.
+A disposable production-mode release instance can exercise the same authenticated
+`/task` route and mailbox against the real broker/Codex/Docker workflow without
+switching production. Such a smoke test must be reported as a release-instance
+test, not as success on the currently deployed service.
+
 Every production agent turn advertises creation, inspection, test rerun, review
 and discard tools. Visibility is not action authorization or a broker-health claim.
 Requests such as `Build Phase 1 of JarvisBrain` authorize one candidate creation.

@@ -43,10 +43,18 @@ class Broker:
         request = Request.model_validate(raw).checked()
         context = dict(source='production_chat', task_id=request.task_id,
                        conversation_id=request.conversation_id, request_id=request.request_id)
+        if request.engineering_action:
+            context['engineering_action'] = request.engineering_action.model_dump()
         # Recheck current-message authority on the host, independent of the model.
         allowed = CandidateTools(request.goal, self.service.store.database, engineering=True)
+        if request.engineering_action is not None:
+            # The production Brain's closed action grants only bounded candidate
+            # work. Repository, execution, and approval authority remain here.
+            allowed.allowed = {'workspace', 'engineer', 'inspect', 'tests', 'review'}
         if request.action not in allowed.allowed:
             raise ToolDenied('Request lacks candidate authority')
+        if request.action == 'workspace':
+            return self.service.engineering_workspace(request.engineering_action.scope)
         if request.action in {'create', 'engineer'}:
             # Durable idempotency by source task, including crash/retry requests.
             with self.service.store.database.transaction() as db:
@@ -55,11 +63,17 @@ class Broker:
                 existing = json.loads(row['record'])
                 prior = existing.get('source_context', {})
                 if prior.get('source') == 'production_chat' and prior.get('task_id') == request.task_id:
+                    if existing.get('source_root') != str(self.source):
+                        raise ToolDenied('Candidate source mismatch')
                     if prior.get('conversation_id') != request.conversation_id:
                         raise ToolDenied('Source task mismatch')
+                    if prior.get('engineering_action') != context.get('engineering_action') or existing['goal'] != request.goal:
+                        raise ToolDenied('Source action mismatch')
                     return project(self.service.store.get(existing['id']))
             handler = self.service.engineer if request.action == 'engineer' else self.service.start
-            record = handler(request.goal, **request.arguments, source_context=context)
+            options = ({'engineering_action': request.engineering_action.model_dump()}
+                       if request.engineering_action else {})
+            record = handler(request.goal, **request.arguments, source_context=context, **options)
         else:
             identifier = request.arguments['candidate_id']
             existing = self.service.store.get(identifier, internal=True)

@@ -6,6 +6,8 @@ import os
 from models.openai_provider import OpenAIProvider
 from models.provider import ProviderRegistry, ProviderRequest, ProviderTurn
 from .task_context import TaskContext, assemble_context
+from .candidate_action import EngineeringIntent, EngineeringAction, INTENT_INSTRUCTIONS, goal_digest
+from tools.policy import ToolDenied
 
 
 @dataclass(frozen=True)
@@ -46,8 +48,30 @@ class JarvisBrain:
         session = _ProviderSession(provider, self.runner.model, task_store, task_id, enabled=self.settings.enabled)
         if not self.settings.enabled:
             return self.runner.run(goal, task_id=task_id, task_store=task_store, model=session.turn)
+
+        def authorize_engineering(selected_provider):
+            # Separate semantic decision sees only this host-supplied request,
+            # never repository text, recall, or author-generated instructions.
+            if provider is None or session.fallback_reason is not None or selected_provider != 'codex':
+                raise ToolDenied('Engineering decision provider unavailable')
+            try:
+                result = provider.complete(ProviderRequest(
+                    input=[{'role': 'user', 'content': goal}], tools=[],
+                    instructions=INTENT_INSTRUCTIONS, allow_tools=False))
+                if result.status != 'completed' or any(i.get('type') == 'function_call' for i in result.output):
+                    raise ValueError('Invalid intent response')
+                intent = EngineeringIntent.model_validate_json(result.text)
+                if not intent.authorized:
+                    raise ValueError('No engineering intent')
+            except Exception:
+                raise ToolDenied('Current task does not authorize engineering') from None
+            action = EngineeringAction(provider=selected_provider, scope=intent.scope,
+                task_id=task_id, conversation_id=task['conversation_id'], goal_digest=goal_digest(goal))
+            task_store.add_engineering_action(task_id, action)
+            return action
         return self.runner.run(goal, task_id=task_id, task_store=task_store,
-                               model=session.turn, context_builder=self.assemble_context, engineering=True)
+                               model=session.turn, context_builder=self.assemble_context, engineering=True,
+                               engineering_authorizer=authorize_engineering)
 
 
 class _ProviderSession:

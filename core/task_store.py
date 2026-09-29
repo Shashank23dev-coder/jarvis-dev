@@ -156,6 +156,20 @@ class TaskStore:
             'enabled': enabled, 'selected_provider': selected_provider,
         })
 
+    def add_engineering_action(self, task_id, action):
+        from .candidate_action import EngineeringAction
+        action = EngineeringAction.model_validate(action)
+        task = self.get_task(task_id)
+        if task is None:
+            raise ValueError('Unknown task')
+        action.check(task['goal'], {'task_id': task_id, 'conversation_id': task['conversation_id']})
+        return self._append_activity(task_id, {
+            'type': 'engineering_action', 'task_id': task_id, 'timestamp': self.timestamp(),
+            'message': 'Bounded engineering action selected.',
+            'action': action.action, 'provider': action.provider, 'scope': action.scope,
+            'workspace': action.workspace, 'stop_after': action.stop_after,
+        })
+
     def add_routing_activity(self, task_id, *, provider, reason, iteration, status):
         """Closed metadata schema: never persist prompts, outputs or reasoning."""
         from models.provider import PROVIDER_NAMES

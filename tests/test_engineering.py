@@ -127,7 +127,10 @@ def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(
     source, database, factory = setup
     store = TaskStore(database.path)
     task = store.create_task('Diagnose and fix the incorrect value')
-    provider = ScriptedProvider(call('engineer_candidate', ARGS), final('Deployed!'))
+    provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}),
+                                final('{"authorized":true,"scope":"code"}'),
+                                final('Prepared. Ask me again to implement.'),
+                                call('engineer_candidate', dict(ARGS, provider='codex'), 'implementation'), final('Deployed!'))
     runner = AgentRunner(ToolRegistry(RepositoryTools(source)),
                         candidate_service_factory=lambda db: factory(model=model, tester=run_checks))
     brain = JarvisBrain(runner, settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
@@ -135,7 +138,9 @@ def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(
     assert 'passed' in outcome.response and 'Deployed!' not in outcome.response
     assert 'separate human' in outcome.response and 'improved' in outcome.response
     names = {tool['name'] for tool in provider.requests[0].tools}
-    assert 'engineer_candidate' in names
+    assert 'prepare_engineering' in names and 'engineer_candidate' not in names
+    assert 'engineer_candidate' in {tool['name'] for tool in provider.requests[2].tools}
+    assert 'Do not ask for another user request' in provider.requests[3].input[-1]['content']
     assert not names & {'approve_and_apply_candidate', 'approve_and_deploy_commit'}
 
 
@@ -192,6 +197,7 @@ def test_production_brain_uses_bridge_without_local_authority(setup, tmp_path, m
     def invoke(client, action, arguments):
         raw = request(action, client.goal, arguments)
         raw.update(client.context)
+        raw['engineering_action'] = client.engineering_action.model_dump() if client.engineering_action else None
         with monkeypatch.context() as host:
             host.setenv('JARVIS_MODE', 'development')
             return broker.execute(raw)
@@ -199,7 +205,9 @@ def test_production_brain_uses_bridge_without_local_authority(setup, tmp_path, m
     monkeypatch.setenv('JARVIS_MODE', 'production')
     store = TaskStore(tmp_path / 'production.db')
     task = store.create_task('Fix the value')
-    provider = ScriptedProvider(call('engineer_candidate', ARGS), final('Applied!'))
+    provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}),
+                                final('{"authorized":true,"scope":"code"}'),
+                                call('engineer_candidate', dict(ARGS, provider='codex'), 'implementation'), final('Applied!'))
     brain = JarvisBrain(AgentRunner(candidate_service_factory=lambda db: pytest.fail('No local writes')),
                        settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
     outcome = brain.run(task['goal'], task_id=task['id'], task_store=store)

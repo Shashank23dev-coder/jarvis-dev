@@ -35,3 +35,8 @@ class EngineeringProviders:
     @classmethod
     def defaults(cls, transport):
         return cls(ProposalProvider('codex', transport), ProposalProvider('openai', transport))
+
+    def select(self, name):
+        if name != self.implementer.name:
+            raise ValueError('Engineering provider unavailable')
+        return self.implementer

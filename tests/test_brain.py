@@ -300,7 +300,9 @@ def test_memory_recall_and_experience_context_match_legacy(tmp_path, goal):
     assert old == new
     assert len(legacy.requests) == len(provider.requests)
     if legacy.requests:
-        assert provider.requests[0] == ProviderRequest(**legacy.requests[0])
+        # Brain exposes a semantic engineering action in addition to legacy tools.
+        assert provider.requests[0].input == legacy.requests[0]['input']
+        assert {t['name'] for t in provider.requests[0].tools} >= {t['name'] for t in legacy.requests[0]['tools']}
         if goal == 'Run parser tests':
             assert 'experience' in provider.requests[0].input[0]['content']
         if 'SQLite' in goal:
