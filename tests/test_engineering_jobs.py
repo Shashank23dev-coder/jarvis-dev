@@ -165,3 +165,62 @@ def test_broker_queue_and_conversation_scope(setup, monkeypatch):
         broker.execute(read)
     read['conversation_id'] = raw['conversation_id']
     assert broker.execute(read) == job
+
+
+@pytest.mark.parametrize('status', ['completed', 'blocked', 'failed', 'waiting_for_approval'])
+def test_production_read_only_inspection_states(setup, monkeypatch, status):
+    from core.candidate_broker import Broker
+    from core.candidate_bridge import CandidateClient
+    from core.candidate_tools import CandidateTools
+    from tools import ToolRegistry
+    from test_candidate_bridge import request
+    source, db, factory = setup
+    monkeypatch.setenv('JARVIS_MODE', 'development')
+    jobs = EngineeringJobs(db)
+    job = enqueue(db)
+    with db.transaction() as connection:
+        record = jobs._get(connection, job['id'])
+        record.update(status=status, current_stage=status, attempts=1,
+            candidate_id=str(uuid4()), error='PRIVATE /host/secret', block_reason='PRIVATE',
+            test_result=[dict(phase='full_python', returncode=0, stdout='PRIVATE')],
+            review_result=dict(verdict='passed', summary='PRIVATE'))
+        jobs._save(connection, record, 'execution_finished')
+    before = jobs.get(job['id'])
+    broker = Broker(factory(), source=source)
+    def transport(client, action, arguments):
+        with monkeypatch.context() as host:
+            host.setenv('JARVIS_MODE', 'development')
+            return project_job(broker.execute(request(action, client.goal, arguments) |
+                client.context))
+    monkeypatch.setattr(CandidateClient, 'invoke', transport)
+    monkeypatch.setenv('JARVIS_MODE', 'production')
+    tools = CandidateTools('What is the current status?', db, source_context=job['source'])
+    registry = tools.bind(ToolRegistry())
+    assert {'list_engineering_jobs', 'inspect_engineering_job'} <= registry.schemas().keys()
+    assert not {'pause_engineering_job', 'cancel_engineering_job', 'resume_engineering_job',
+                'approve_and_apply_candidate', 'approve_and_deploy_commit'} & registry.schemas().keys()
+    result = registry._definitions['inspect_engineering_job'].handler(job_id=job['id']).jobs[0]
+    assert result['status'] == status and result['attempts'] == 1
+    assert result['candidate_id'] == before['candidate_id']
+    assert result['test_result'][0]['returncode'] == 0
+    assert result['review_result']['verdict'] == 'passed'
+    assert result['lease'] == dict(active=False, expired=False)
+    assert result['recovery']['count'] == 0
+    assert 'PRIVATE' not in __import__('json').dumps(result)
+    assert project_job(result) == result
+    assert jobs.get(job['id']) == before
+    tools.source_context = dict(job['source'], conversation_id=str(uuid4()))
+    with pytest.raises(ToolDenied):
+        registry._definitions['inspect_engineering_job'].handler(job_id=job['id'])
+    with pytest.raises(ToolDenied):
+        registry._definitions['inspect_engineering_job'].handler(job_id=str(uuid4()))
+
+
+@pytest.mark.parametrize('field,value', [('current_stage', '/private'), ('candidate_id', '/secret'),
+    ('attempts', 'secret'), ('control', 'secret'), ('created_at', 'secret'),
+    ('test_result', [dict(phase='secret', returncode=0)]),
+    ('review_result', dict(verdict='secret'))])
+def test_job_projection_invalid_metadata_fails_closed(setup, field, value):
+    job = enqueue(setup[1])
+    with pytest.raises(ToolDenied):
+        project_job(job | {field: value})

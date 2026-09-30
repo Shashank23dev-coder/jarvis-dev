@@ -177,11 +177,60 @@ def project_job(job):
     """Closed production projection: no paths, model prose, logs or host config."""
     if not valid_id(job.get('id')) or job.get('status') not in STATES or job.get('provider') != 'codex':
         raise ToolDenied('Invalid engineering job result')
+    from datetime import datetime
+    stage = job.get('current_stage')
+    attempts = job.get('attempts')
+    candidate_id = job.get('candidate_id')
+    control = job.get('control')
+    if (stage not in STATES or type(attempts) is not int or not 0 <= attempts <= MAX_ATTEMPTS
+            or candidate_id is not None and not valid_id(candidate_id)
+            or control not in {None, 'pause', 'cancel'} or job.get('type') != 'engineering'):
+        raise ToolDenied('Invalid engineering job metadata')
+    for key in ('created_at', 'started_at', 'completed_at'):
+        value = job.get(key)
+        if value is not None:
+            try:
+                datetime.fromisoformat(value)
+            except (ValueError, TypeError):
+                raise ToolDenied('Invalid engineering job timestamp') from None
+    tests = []
+    for item in job.get('test_result', [])[-3:]:
+        if item.get('phase') not in {'targeted', 'full_python', 'full_ui'} or type(item.get('returncode')) is not int:
+            raise ToolDenied('Invalid engineering test evidence')
+        tests.append(dict(phase=item['phase'], returncode=item['returncode'],
+                          timed_out=bool(item.get('timed_out')), truncated=bool(item.get('truncated'))))
+    verdict = (job.get('review_result') or {}).get('verdict')
+    if verdict not in {None, 'passed', 'needs_revision', 'rejected'}:
+        raise ToolDenied('Invalid engineering review evidence')
+    history = []
+    for event in job.get('history', [])[-16:]:
+        if type(event.get('sequence')) is not int or event.get('status') not in STATES:
+            raise ToolDenied('Invalid engineering history')
+        try:
+            datetime.fromisoformat(event['timestamp'])
+        except (KeyError, ValueError, TypeError):
+            raise ToolDenied('Invalid engineering history timestamp') from None
+        history.append({key: event[key] for key in ('sequence', 'timestamp', 'status')})
+    # Reprojection on the production client preserves only closed metadata.
+    lease = job.get('lease')
+    recovery = job.get('recovery')
+    if lease is None:
+        lease = dict(active=bool(job.get('lease_owner')),
+                     expired=bool(job.get('lease_owner') and job.get('lease_until', 0) < time.time()))
+    if recovery is None:
+        recovery = dict(count=sum(e.get('event') == 'lease_recovered' for e in job.get('history', [])),
+                        retry_available=job['status'] in {'blocked', 'failed'} and control != 'cancel'
+                        and attempts < MAX_ATTEMPTS and not lease['active'])
+    if (set(lease) != {'active', 'expired'} or any(type(v) is not bool for v in lease.values())
+            or set(recovery) != {'count', 'retry_available'}
+            or type(recovery['count']) is not int or not 0 <= recovery['count'] <= MAX_ATTEMPTS
+            or type(recovery['retry_available']) is not bool):
+        raise ToolDenied('Invalid engineering recovery metadata')
     return {key: job.get(key) for key in ('id', 'type', 'status', 'provider', 'created_at',
         'started_at', 'completed_at', 'current_stage', 'attempts', 'candidate_id', 'control')} | {
         'error': 'Engineering job requires attention' if job.get('error') else None,
-        'history': [{key: event[key] for key in ('sequence', 'timestamp', 'status')}
-                    for event in job.get('history', [])[-16:]],
-        'test_result': [{key: item.get(key) for key in ('phase', 'returncode', 'timed_out', 'truncated')}
-                        for item in job.get('test_result', [])[-3:]],
-        'review_result': {'verdict': (job.get('review_result') or {}).get('verdict')}}
+        'blocker': control or ('retry_limit' if attempts >= MAX_ATTEMPTS and job['status'] == 'failed'
+            else 'execution_not_passed' if job['status'] in {'blocked', 'failed'}
+            else 'human_approval_required' if job['status'] == 'waiting_for_approval' else None),
+        'lease': lease, 'recovery': recovery, 'history': history,
+        'test_result': tests, 'review_result': {'verdict': verdict}}

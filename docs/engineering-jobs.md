@@ -25,6 +25,17 @@ the observed problem, hypothesis, baseline, proposal, implementation attempts,
 tests, review and candidate result. Detailed evidence remains private in dev;
 chat inspection returns a bounded status/history projection.
 
+Read tools are discoverable on every task with host-bound source metadata,
+including ordinary status questions without a special opening phrase. Inspection
+does not require creation authority or a new engineering action. The broker still
+checks the source conversation for every supplied job ID; an ID copied into a
+different conversation grants no access. Missing jobs, invalid metadata and an
+unavailable broker fail closed without a filesystem fallback. The projection
+validates closed stage, provider, attempt, candidate, test and review fields and
+reports a categorical blocker, lease active/expired flags, recovery count and
+retry availability. It excludes lease owner IDs, raw provider errors and paths.
+Controls are advertised only for an explicit current-message control request.
+
 A SQLite transaction claims a job with a 330-second lease. A permanent flock
 serializes workers, and the candidate subprocess inherits that lock. Lease expiry
 alone cannot start overlapping execution. After a crash, recovery waits for both

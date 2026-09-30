@@ -50,7 +50,8 @@ def test_chat_cannot_authorize_candidate_tools(setup, goal):
     run(setup, goal, model)
     assert {tool['name'] for tool in model.requests[0]['tools']} == {
         'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest', 'run_command',
-        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain'}
+        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain',
+        'list_engineering_jobs', 'inspect_engineering_job'}
     assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'unknown_tool'
 
 
@@ -131,7 +132,8 @@ def test_prior_conversation_does_not_carry_authorization(setup):
     runner.run(second['goal'], task_id=second['id'], task_store=store)
     assert {tool['name'] for tool in model.requests[0]['tools']} == {
         'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest', 'run_command',
-        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain'}
+        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain',
+        'list_engineering_jobs', 'inspect_engineering_job'}
     assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'unknown_tool'
 
 

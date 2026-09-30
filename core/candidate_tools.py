@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 from tools.policy import ToolDenied
-from tools.registry import ToolDefinition
+from tools.registry import ToolDefinition, ToolRegistry
 from tools.schemas import PathArgument, StrictModel
 from .candidate_action import EngineeringWorkspace
 
@@ -148,6 +148,16 @@ protected candidate infrastructure and deployment files are outside that scope.
 Present the queued job ID and current status; never claim tests or review finished
 at creation time. Job creation never authorizes applying or deploying a candidate.
 '''
+        if self.source_context:
+            self.instructions += '''
+For persistent engineering work, use list_engineering_jobs or inspect_engineering_job
+to read authoritative status, tests, review, blocker and lease/recovery metadata.
+Reads are limited to jobs created in this conversation. An ID from another
+conversation does not grant access; use the source conversation. Do not read
+protected databases or infer completion from the queued creation response.
+Queue controls require a separate explicit current-message request and never
+grant candidate apply or deployment approval.
+'''
 
     def _service(self):
         if self.production:
@@ -261,14 +271,23 @@ at creation time. Job creation never authorizes applying or deploying a candidat
         return self.apply_action('apply', candidate_id)
 
     def bind(self, registry):
-        job_tools = bool(self.source_context and (self.engineering_authorizer or 'engineering job' in self.goal.lower()))
+        if not isinstance(registry, ToolRegistry):
+            return registry
+        job_tools = bool(self.source_context)
         if not self.exposed and not job_tools:
             return registry
         scoped = copy.copy(registry)
         definitions = dict(registry._definitions)
         from .engineering_tools import JobArguments, JobEvidence, invoke
         if job_tools:
-            for operation in ('list', 'inspect', 'pause', 'cancel', 'resume'):
+            operations = ['list', 'inspect']
+            from .engineering_tools import control_authorized
+            from .database import valid_id
+            for operation in ('pause', 'cancel', 'resume'):
+                for identifier in re.findall(r'[0-9a-f-]{36}', self.goal):
+                    if valid_id(identifier) and control_authorized(self.goal, operation, identifier):
+                        operations.append(operation)
+            for operation in operations:
                 definitions[operation + '_engineering_job' + ('s' if operation == 'list' else '')] = ToolDefinition(
                     'Read engineering job status/history or explicitly control an inactive queue job. No execution, apply or deployment.',
                     StrictModel if operation == 'list' else JobArguments, JobEvidence,

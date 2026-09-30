@@ -21,7 +21,10 @@ def control_authorized(goal, operation, identifier):
 
 def invoke(tools, operation, job_id=None):
     from .engineering_jobs import EngineeringJobs, project_job
-    if not tools.source_context:
+    from .database import valid_id
+    if (operation not in {'list', 'inspect', 'pause', 'cancel', 'resume'}
+            or not tools.source_context
+            or not all(valid_id(tools.source_context.get(k)) for k in ('task_id', 'conversation_id'))):
         raise ToolDenied('Job source context required')
     if operation not in {'list', 'inspect'} and not control_authorized(tools.goal, operation, job_id):
         raise ToolDenied('Explicit engineering job control required')

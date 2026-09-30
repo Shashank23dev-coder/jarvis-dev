@@ -201,7 +201,8 @@ CANDIDATE_TOOLS = {'create_self_edit_candidate', 'inspect_self_edit_candidate',
                    'rerun_candidate_tests', 'review_self_edit_candidate', 'discard_self_edit_candidate'}
 READ_ONLY_TOOLS = {'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest',
                    'run_command', 'deployment_status', 'preview_deployment',
-                   'inspect_deployment', 'deployment_history', 'inspect_current_brain'}
+                   'inspect_deployment', 'deployment_history', 'inspect_current_brain',
+                   'list_engineering_jobs', 'inspect_engineering_job'}
 
 
 def test_fresh_production_http_turn_exposes_candidates_without_cached_authority(tmp_path, monkeypatch):
@@ -230,7 +231,8 @@ def test_fresh_production_http_turn_exposes_candidates_without_cached_authority(
             names = {t['name'] for t in model.requests[-1]['tools']}
             assert names == READ_ONLY_TOOLS | CANDIDATE_TOOLS
     assert set(runner.registry.schemas()) == READ_ONLY_TOOLS - {
-        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain'}
+        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain',
+        'list_engineering_jobs', 'inspect_engineering_job'}
 
 
 @pytest.mark.parametrize('tool,arguments', [
