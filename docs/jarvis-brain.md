@@ -179,15 +179,13 @@ evaluation; they are not Phase 1 behaviors.
 
 ## Engineering action
 
-With the Brain enabled, a current implementation/fix request (or a request starting
-with make, investigate, diagnose, resolve or repair) can expose `engineer_candidate`.
-The decision provider inspects the repository, decides whether code is needed,
-and supplies `problem_detected`, `hypothesis`, `inspect_paths`, and `targeted_tests`.
-It need not ask the user to say “create a candidate”. Ordinary questions and
-requests for plans, explanations or read-only diagnosis do not grant this action.
-The host checks the original current request; repository text and model claims
-cannot grant authority. A task can create only one candidate across both creation
-tools. UUID ownership and host broker idempotency remain enforced.
+The authenticated owner capability exposes development engineering tools with or
+without the Brain enabled. `prepare_engineering` discovers the configured-dev
+workspace; `create_engineering_job` queues the goal, `problem_detected`,
+`hypothesis`, `inspect_paths`, and `targeted_tests`. No wording parser or semantic
+authorization classifier is involved. The assistant follows the user's scope,
+including plan-only requests. Jobs and candidates are accessible across owner
+conversations. Task IDs retain submission idempotency, not access restrictions.
 
 The host exports a clean committed baseline to the existing private Git worktree.
 It runs targeted baseline tests before any edit, asks the implementation provider
@@ -195,10 +193,11 @@ for bounded replacement texts, validates every edit with `CandidateEditor`, runs
 targeted/full Python/UI tests, and obtains a fresh independent review. A test failure
 or `needs_revision` verdict can trigger a second implementation attempt with the
 current files, diff and failure/review evidence. Rejection stops the workflow.
-The existing 300-second, four-provider-turn, 64-tool-call, eight-file and 400-line
-ceilings are unchanged and apply cumulatively; exhaustion never earns approval.
-Rerunning tests invalidates review. Provider errors fail closed without a coding
-fallback, shell access, or changes to the source checkout.
+Asynchronous attempts have a 900-second ceiling, four provider turns, 64 internal
+operations, eight changed files and 400 changed lines. Exhaustion never earns approval.
+Rerunning tests invalidates review. Normalized provider failures preserve provider,
+stage, attempt, retryability and a safe recovery hint. They grant no shell access
+or changes to the source checkout.
 
 `core/candidate_provider.py` defines the separate `EngineeringProvider` contract
 and host-owned implementer/reviewer pair. The first implementer is Codex via the

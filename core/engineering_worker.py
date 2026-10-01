@@ -30,6 +30,7 @@ class EngineeringWorker:
             # Inherited by the candidate executor: a dead supervisor cannot
             # permit overlapping execution while its child still edits/tests.
             self.service.engineering_lock_fd = fd
+            self.jobs.heartbeat()
             owner = str(uuid4())
             job = self.jobs.claim(owner)
             if job is None:
@@ -42,12 +43,14 @@ class EngineeringWorker:
                         candidate = self.service.inspect(prior['id'])
                 if candidate is None or candidate['state'] != 'passed':
                     context = dict(job['source'], source='engineering_job', engineering_job_id=job['id'],
-                                   lease_owner=owner)
+                                   lease_owner=owner, attempt=job['attempts'])
                     candidate = self.service.engineer(job['goal'], **job['arguments'],
                         source_context=context, engineering_action=job['action'])
-            except Exception:
-                # Raw provider, sandbox and filesystem errors never cross chat.
-                pass
+            except Exception as exc:
+                from .candidate_provider import failure_evidence, execution_error_code
+                failure = failure_evidence(job['provider'], execution_error_code(exc),
+                                          'planning', job['attempts'])
+                return self.jobs.finish(job['id'], owner, candidate, failure=failure)
             return self.jobs.finish(job['id'], owner, candidate)
         finally:
             # Closing (rather than LOCK_UN) retains child-held flock on crashes.

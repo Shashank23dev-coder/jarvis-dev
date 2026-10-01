@@ -4,9 +4,11 @@ from uuid import uuid4
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("owner")
+
 from core.agent import AgentRunner
 from core.brain import BrainSettings, JarvisBrain
-from core.candidate_action import EngineeringAction, INTENT_INSTRUCTIONS, goal_digest
+from core.candidate_action import EngineeringAction, goal_digest
 from core.candidate_broker import Broker
 from core.candidate_bridge import Request
 from core.task_store import TaskStore
@@ -61,20 +63,15 @@ def test_action_binding_and_closed_authority(change):
         Request.model_validate(raw).checked()
 
 
-@pytest.mark.parametrize('decision', [final('{"authorized":false,"scope":"code"}'),
-    final('not JSON'), RuntimeError('PRIVATE_PROVIDER_FAILURE')])
-def test_semantic_denial_and_unavailable_classifier_fail_closed(tmp_path, decision):
-    store = TaskStore(tmp_path / 'tasks.db')
-    task = store.create_task('Explain candidate improvements without making changes')
-    provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}), decision, final('Stopped'))
-    brain = JarvisBrain(AgentRunner(candidate_service_factory=lambda db: pytest.fail('Must not create')),
-        settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
-    brain.run(task['goal'], task_id=task['id'], task_store=store)
-    assert provider.requests[1].instructions == INTENT_INSTRUCTIONS
-    assert provider.requests[1].input == [{'role': 'user', 'content': task['goal']}]
-    assert provider.requests[1].tools == []
-    assert json.loads(provider.requests[-1].input[-1]['output'])['error']['code'] == 'denied'
-    assert 'PRIVATE_PROVIDER_FAILURE' not in json.dumps(store.get_task(task['id']))
+def test_owner_preparation_needs_no_classifier(setup):
+    from core.candidate_tools import CandidateTools
+    from core.engineering_authority import OwnerDevAuthority
+    source, db, factory = setup
+    raw = request('workspace', 'Please investigate this and do what is needed.', {})
+    tools = CandidateTools(raw['goal'], db, lambda db: factory(),
+        authority=OwnerDevAuthority(), source_context={k: raw[k] for k in ('task_id', 'conversation_id')})
+    assert tools.prepare('codex').provider == 'codex'
+    assert tools.engineering_action.workspace == 'configured_dev'
 
 
 def test_documentation_scope_rejects_code_from_codex(setup):
@@ -124,7 +121,7 @@ def test_preparation_alone_cannot_finish_engineering_at_budget_limit(setup):
     store = TaskStore(database.path)
     task = store.create_task(EXACT)
     provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}),
-        final('{"authorized":true,"scope":"documentation"}'), final('Finished'), final('Finished'))
+        final('Finished'), final('Finished'))
     brain = JarvisBrain(AgentRunner(max_iterations=3, candidate_service_factory=lambda db: factory()),
         settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
     outcome = brain.run(task['goal'], task_id=task['id'], task_store=store)

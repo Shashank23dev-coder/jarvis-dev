@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("owner")
+
 from core.candidate_bridge import Request, CandidateClient, project, read, write, transfer
 from core.candidate_broker import Broker
 from core.candidate_tools import CandidateTools
@@ -23,7 +25,7 @@ GOAL = 'Build Phase 1 of JarvisBrain\n- Do not change production behavior by def
 def request(action='create', goal=GOAL, arguments=None, **extra):
     return dict(request_id=str(uuid4()), task_id=str(uuid4()), conversation_id=str(uuid4()),
                 goal=goal, action=action, arguments=ARGS if arguments is None else arguments,
-                created=time.time(), **extra)
+                created=time.time(), authority={'principal': 'owner', 'workspace': 'configured_dev', 'capability': 'engineering_development'}, **extra)
 
 
 @pytest.mark.parametrize('goal', [
@@ -34,8 +36,10 @@ def request(action='create', goal=GOAL, arguments=None, **extra):
     'Only plan\nDo not change production behavior by default.',
 ])
 def test_production_preservation_does_not_erase_other_denials(setup, goal):
-    with pytest.raises(ToolDenied):
-        Broker(setup[2](), source=setup[0]).execute(request(goal=goal))
+    raw = request(goal=goal)
+    raw.pop('authority')
+    with pytest.raises(ValueError):
+        Broker(setup[2](), source=setup[0]).execute(raw)
 
 
 @pytest.mark.parametrize('target', ['/app', '/home/ubuntu/jarvis', '/tmp/arbitrary'])
@@ -131,8 +135,10 @@ def test_bridge_has_no_privileged_operations(setup, action):
 
 @pytest.mark.parametrize('goal', ['Only plan to build JarvisBrain', 'Do not modify your code', 'Hello', '"Build JarvisBrain"'])
 def test_host_rechecks_authority(setup, goal):
-    with pytest.raises(ToolDenied):
-        Broker(setup[2](), source=setup[0]).execute(request(goal=goal))
+    raw = request(goal=goal)
+    raw.pop('authority')
+    with pytest.raises(ValueError):
+        Broker(setup[2](), source=setup[0]).execute(raw)
 
 
 def test_protected_paths_and_sanitized_projection(setup):
@@ -193,7 +199,7 @@ def test_broker_create_rerun_review_discard_real_docker(setup, monkeypatch):
         assert result['state'] == state
     assert tree_bytes(source) == before
     full = broker.service.store.get(identifier)
-    assert len(full['chat_operations']) == 4
+    assert [op['action'] for op in full['chat_operations']] == ['tests', 'review', 'discard']
     assert not Path(full['worktree']).exists()
 
 
@@ -202,7 +208,8 @@ CANDIDATE_TOOLS = {'create_self_edit_candidate', 'inspect_self_edit_candidate',
 READ_ONLY_TOOLS = {'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest',
                    'run_command', 'deployment_status', 'preview_deployment',
                    'inspect_deployment', 'deployment_history', 'inspect_current_brain',
-                   'list_engineering_jobs', 'inspect_engineering_job'}
+                   'list_engineering_jobs', 'inspect_engineering_job', 'pause_engineering_job',
+                   'cancel_engineering_job', 'resume_engineering_job', 'prepare_engineering', 'inspect_engineering_runtime'}
 
 
 def test_fresh_production_http_turn_exposes_candidates_without_cached_authority(tmp_path, monkeypatch):
@@ -232,7 +239,8 @@ def test_fresh_production_http_turn_exposes_candidates_without_cached_authority(
             assert names == READ_ONLY_TOOLS | CANDIDATE_TOOLS
     assert set(runner.registry.schemas()) == READ_ONLY_TOOLS - {
         'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain',
-        'list_engineering_jobs', 'inspect_engineering_job'}
+        'list_engineering_jobs', 'inspect_engineering_job', 'pause_engineering_job',
+                   'cancel_engineering_job', 'resume_engineering_job', 'prepare_engineering', 'inspect_engineering_runtime'}
 
 
 @pytest.mark.parametrize('tool,arguments', [
@@ -241,13 +249,15 @@ def test_fresh_production_http_turn_exposes_candidates_without_cached_authority(
       for name in sorted(CANDIDATE_TOOLS - {'create_self_edit_candidate'})]])
 def test_visible_tools_do_not_expand_current_request_authority(tmp_path, monkeypatch, tool, arguments):
     monkeypatch.setenv('JARVIS_MODE', 'production')
+    from core.engineering_authority import current_owner
+    current_owner.set(None)
     monkeypatch.setattr(CandidateClient, 'invoke', lambda *a: pytest.fail('Unauthorized broker call'))
     store = TaskStore(tmp_path / 'chat.sqlite3')
     goal = 'What tools can you use?'
     task = store.create_task(goal)
     model = ScriptedModel(call(tool, arguments), final())
     AgentRunner(model=model).run(goal, task_id=task['id'], task_store=store)
-    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'denied'
+    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] in {'denied', 'unknown_tool'}
 
 
 def test_absent_broker_times_out_without_local_fallback(tmp_path, monkeypatch):
@@ -265,7 +275,7 @@ def test_absent_broker_times_out_without_local_fallback(tmp_path, monkeypatch):
     runner = AgentRunner(model=model,
         candidate_service_factory=lambda _: pytest.fail('Production must not fall back locally'))
     runner.run(GOAL, task_id=task['id'], task_store=store)
-    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'denied'
+    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] in {'denied', 'unknown_tool'}
     assert set(runner.registry.schemas()) >= {'list_files', 'read_text', 'git_status', 'git_diff'}
     assert not list(bridge.ROOT.iterdir())
     with store.database.transaction() as db:

@@ -3,7 +3,7 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Depends, Query, APIRouter
+from fastapi import FastAPI, HTTPException, Depends, Query, APIRouter, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Annotated, Literal
@@ -302,10 +302,18 @@ class CandidateRequest(BaseModel):
     targeted_tests: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(min_length=1, max_length=8)
 
 
-def get_self_edit(store: TaskStore = Depends(get_store)):
-    if app.state.settings.mode == "production":
+def get_self_edit(request: Request, store: TaskStore = Depends(get_store)):
+    if request.app.state.settings.mode == "production":
         raise HTTPException(status_code=403, detail="Use chat candidate tools; local candidate execution is disabled")
-    return SelfEditService(store.database)
+    from core.engineering_authority import current_owner, require_owner
+    from core.candidate_broker import Broker
+    try:
+        require_owner(current_owner.get())
+        service = SelfEditService(store.database)
+        Broker(service).check_source()
+        return service
+    except ToolDenied:
+        raise HTTPException(status_code=403, detail="Authenticated owner development capability required") from None
 
 
 @router.post("/candidates")

@@ -39,6 +39,18 @@ class CandidatePolicy(ToolPolicy):
         return parts
 
 
+ASSIGNMENT = re.compile(r'''(?i)((?:api[_-]?key|password|secret|access[_-]?token)\s*[:=]\s*)(["'])([^"']{8,})(["'])''')
+
+
+def inspection_text(content):
+    """Read approved source without forwarding credential-like fixture literals.
+
+    Edit validation still rejects these literals. Redaction is for inspection,
+    never a permission to write credentials or access protected files.
+    """
+    return safe_text(ASSIGNMENT.sub(lambda m: m[1] + m[2] + 'OMITTED' + m[4], content))
+
+
 def safe_text(content):
     if not isinstance(content, str) or len(content.encode('utf-8')) > 256_000:
         raise ToolDenied('Invalid edit size or encoding')
@@ -47,7 +59,7 @@ def safe_text(content):
     # Defense in depth, not a claim to recognize arbitrary secrets in source.
     if re.search(r'-----BEGIN .*PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9_-]{16,}|AKIA[A-Z0-9]{16})\b', content):
         raise ToolDenied('Credential-like content is blocked')
-    if re.search(r'''(?i)(?:api[_-]?key|password|secret|access[_-]?token)\s*[:=]\s*["'][^"']{8,}["']''', content):
+    if ASSIGNMENT.search(content):
         raise ToolDenied('Credential-like assignment is blocked')
     return content
 

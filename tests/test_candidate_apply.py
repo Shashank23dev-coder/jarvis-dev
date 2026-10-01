@@ -8,6 +8,8 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 import pytest
 
+pytestmark = pytest.mark.usefixtures("owner")
+
 import main
 from core.candidate_apply import CandidateApply, approved_id
 from core.candidate_tools import CandidateTools

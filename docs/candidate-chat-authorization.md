@@ -1,43 +1,43 @@
-# Production candidate authorization
+# Owner development capabilities
 
-Production advertises five candidate tools, but discovery grants no authority.
-The current user goal must authorize the action. The chat adapter binds the task
-and conversation UUIDs; the broker rechecks the goal and action independently.
-Requests contain UUIDs, goal, action, relative inspection/test paths and creation
-time. There is no request field for a repository, workspace, command or credentials.
+The single-owner authenticated HTTP perimeter issues a structured
+`OwnerDevAuthority` for `engineering_development` in `configured_dev`. Development
+HTTP requests need a configured owner token too; unauthenticated local HTTP does
+not grant engineering authority. Trusted operator code can issue the same bounded
+capability explicitly. It is never a model tool argument or inferred from text.
 
-The host broker runs in development mode and pins its service to the configured
-`/home/ubuntu/jarvis-dev` checkout. It checks that source on every operation,
-rejecting mismatched roots, symlink aliases, traversal and unavailable checkouts.
-The trusted constructor's source override exists for isolated fixture repositories;
-the executable broker always uses the fixed development source. Production has no
-host checkout mount or Docker authority. Candidate edits live in private host
-candidate worktrees, never in the source checkout or production filesystem.
+Candidate creation, inspection, tests, review, discard and job controls depend on
+that capability. Owner conversations can inspect and manage all configured-dev
+jobs and candidates by ID. Conversation/task IDs remain audit and idempotency
+metadata. There is no natural-language authorization parser or intent classifier.
+The assistant still follows user scope and plan-only instructions.
 
-## Diagnosing a denied creation
+The private broker mailbox accepts only typed requests from the trusted adapter;
+it is not a public endpoint. The adapter checks the in-process authenticated owner
+before writing. The host authenticates the fixed docker-exec/private-UID mailbox
+channel separately from request fields; serialized owner fields grant no authority.
+Direct broker calls require a trusted in-process owner context. The broker pins
+every operation to `/home/ubuntu/jarvis-dev`. No request can name a different root,
+shell command, executable, credential location, production target or Docker image.
+Missing authority, invalid metadata or unavailable broker fails closed.
+The daemon fills authority audit metadata after receiving through its private
+channel, allowing the previous production protocol to continue during a dev-only
+broker upgrade. Public model/tool arguments still cannot issue that context.
 
-The registry's `Repository policy denied the operation` message covers any
-`ToolDenied`, including intent authorization. It does not identify a path denial.
-At commit `4c49d641fb07a605e25d841e6c93d42f074cae03`, the negative-intent expression
-matched `Do not change` inside the constraint `Do not change production behavior
-by default.`. This emptied the allowed-action set and `CandidateTools.create`
-raised `One candidate per explicit request` before creating a mailbox request.
-The broker, repository allowlist and path normalization were not reached.
+Engineering providers return structured proposals with no tools. Protected root,
+security and workflow implementation files remain outside candidate editing scope.
+Production files, production env, SSH/AWS/deployment credentials and trading risk
+controls remain inaccessible. Proposed secret-like content is rejected. Inspection
+redacts credential-like fixture assignments instead of rejecting otherwise approved
+source; this does not relax edit validation or protected-path checks.
 
-The complete standalone production-default constraint is now excluded from that
-negative-intent scan. An affirmative creation/build request is still required.
-Other negative instructions, including an additional prohibition on creating or
-editing, still deny the request. This is a narrow grammar exception, not general
-natural-language authorization. Equivalent unfamiliar wording can fail closed.
+Tests run in the hardened Docker sandbox. Worktree fingerprints bind tests and
+independent review to the actual diff. Worker leases, a process-inherited flock,
+bounded attempts and revision budgets prevent overlapping execution. Owner
+candidate management shares that lock and refreshes job evidence.
 
-Protected paths, secret exclusions, clean-source requirements, candidate budgets,
-sandbox tests and independent review remain unchanged. Apply and deployment retain
-their separate exact-message approval gates. Missing/misconfigured brokers never
-fall back to local production editing. A successful tool call can still return a
-rejected candidate; inspect its state and evidence before claiming success.
-
-The intent fix runs in both the chat adapter and host broker. Updating or restarting
-only the host broker cannot fix the old production adapter. Until an approved
-deployment, `Preserve production behavior by default.` avoids the old false match
-while expressing the same constraint. Live tests using that wording verify the
-production HTTP/chat/mailbox/broker path, not installation of the new adapter.
+Candidate apply and production deployment retain their existing separate exact
+human approval contracts. Development capabilities grant neither. Production has
+no host checkout mount, Docker socket or arbitrary shell. Nothing deploys
+automatically. New code becomes available to production chat only after an
+approved release; restarting the dev broker does not update a production image.

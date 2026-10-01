@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("owner")
+
 from core.agent import AgentRunner
 from core.brain import BrainSettings, JarvisBrain
 from core.candidate_bridge import project
@@ -116,7 +118,10 @@ def test_engineering_budget_and_shared_one_candidate_limit(setup):
     service = factory(model=model, tester=run_checks, limits=Limits(iterations=1))
     candidate = service.engineer('Fix the value', **ARGS)
     assert candidate['state'] != 'passed' and candidate['iterations'] == 0
-    tools = CandidateTools('Fix the value', database, lambda db: factory(model=model, tester=run_checks), engineering=True)
+    from uuid import uuid4
+    tools = CandidateTools('Fix the value', database, lambda db: factory(model=model, tester=run_checks),
+        source_context=dict(task_id=str(uuid4()), conversation_id=str(uuid4())))
+    tools.prepare('codex')
     tools.engineer(**ARGS)
     from tools import ToolDenied
     with pytest.raises(ToolDenied):
@@ -128,7 +133,6 @@ def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(
     store = TaskStore(database.path)
     task = store.create_task('Diagnose and fix the incorrect value')
     provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}),
-                                final('{"authorized":true,"scope":"code"}'),
                                 final('Prepared. Ask me again to implement.'),
                                 call('engineer_candidate', dict(ARGS, provider='codex'), 'implementation'), final('Deployed!'))
     runner = AgentRunner(ToolRegistry(RepositoryTools(source)),
@@ -146,7 +150,7 @@ def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(
     names = {tool['name'] for tool in provider.requests[0].tools}
     assert 'prepare_engineering' in names and 'engineer_candidate' not in names
     assert 'engineer_candidate' in {tool['name'] for tool in provider.requests[2].tools}
-    assert 'Do not ask for another user request' in provider.requests[3].input[-1]['content']
+    assert 'Do not ask for another user request' in provider.requests[2].input[-1]['content']
     assert not names & {'approve_and_apply_candidate', 'approve_and_deploy_commit'}
 
 
@@ -184,10 +188,10 @@ def test_engineering_broker_rechecks_authority_and_is_idempotent(setup):
     record = broker.execute(raw)
     assert record['state'] == 'passed'
     assert broker.execute(raw) == record
-    with pytest.raises(ToolDenied):
-        broker.execute(request('engineer', 'Hello', ARGS))
-    with pytest.raises(ToolDenied):
-        broker.execute(request('engineer', 'Fix the value but only diagnose', ARGS))
+    unauthenticated = request('engineer', 'Fix the value', ARGS)
+    unauthenticated.pop('authority')
+    with pytest.raises(ValueError):
+        broker.execute(unauthenticated)
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         broker.execute(request('engineer', 'Fix the value', dict(ARGS, provider='claude_code')))
@@ -212,7 +216,6 @@ def test_production_brain_uses_bridge_without_local_authority(setup, tmp_path, m
     store = TaskStore(tmp_path / 'production.db')
     task = store.create_task('Fix the value')
     provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}),
-                                final('{"authorized":true,"scope":"code"}'),
                                 call('engineer_candidate', dict(ARGS, provider='codex'), 'implementation'), final('Applied!'))
     brain = JarvisBrain(AgentRunner(candidate_service_factory=lambda db: pytest.fail('No local writes')),
                        settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
@@ -237,7 +240,7 @@ def test_codex_worker_pins_model_and_disables_tools(monkeypatch, capsys):
     candidate_model.main()
     assert calls[0]['model'] == 'gpt-5.3-codex'
     assert calls[0]['tools'] == [] and calls[0]['allow_tools'] is False
-    assert json.loads(capsys.readouterr().out) == {'edits': []}
+    assert json.loads(capsys.readouterr().out) == {'ok': True, 'text': '{"edits":[]}'}
     monkeypatch.setattr(candidate_model.sys, 'stdin', io.StringIO(json.dumps(
         dict(input={}, instructions='', provider='uninstalled'))))
     with pytest.raises(ValueError):

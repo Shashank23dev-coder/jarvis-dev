@@ -214,9 +214,9 @@ def test_production_candidate_and_approval_gates_are_preserved(tmp_path, monkeyp
     provider = ScriptedProvider(call('create_self_edit_candidate', {
         'inspect_paths': ['main.py'], 'targeted_tests': ['tests']}), final())
     execute(tmp_path, provider)
-    assert json.loads(provider.requests[1].input[-1]['output'])['error']['code'] == 'denied'
+    assert json.loads(provider.requests[1].input[-1]['output'])['error']['code'] == 'unknown_tool'
     names = {tool['name'] for tool in provider.requests[0].tools}
-    assert 'create_self_edit_candidate' in names
+    assert 'create_self_edit_candidate' not in names
     assert not names & {'approve_and_apply_candidate', 'approve_and_deploy_commit'}
 
 

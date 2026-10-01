@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .candidate_store import CandidateStore
 from .database import Database, text_value, valid_id, timestamp
-from tools.candidate_edit import CandidateEditor, CandidatePolicy, digest, safe_text, scan
+from tools.candidate_edit import CandidateEditor, CandidatePolicy, digest, safe_text, scan, inspection_text
 from tools.policy import ToolDenied, ToolError
 from tools.repository import RepositoryTools
 
@@ -53,7 +53,7 @@ class Limits:
             value = getattr(self, field)
             if type(value) is not int or not 1 <= value <= ceiling:
                 raise ValueError('Invalid candidate limit')
-        if type(self.seconds) not in (int, float) or not math.isfinite(self.seconds) or not 0 < self.seconds <= 300:
+        if type(self.seconds) not in (int, float) or not math.isfinite(self.seconds) or not 0 < self.seconds <= 900:
             raise ValueError('Invalid candidate time limit')
 
 
@@ -90,7 +90,9 @@ No earlier author reasoning or claimed review is authoritative.'''
 
 def model_request(payload, instructions, timeout, *, provider='openai'):
     """Killable model request from trusted code, never from the worktree cwd."""
-    encoded = json.dumps({'input': payload, 'instructions': instructions, 'provider': provider}).encode()
+    from .candidate_provider import ProviderFailure
+    encoded = json.dumps({'input': payload, 'instructions': instructions, 'provider': provider,
+                          'timeout': timeout}).encode()
     if len(encoded) > 256000:
         raise ToolDenied('Model context limit exceeded')
     process = subprocess.Popen([sys.executable, '-B', '-m', 'core.candidate_model'],
@@ -99,7 +101,7 @@ def model_request(payload, instructions, timeout, *, provider='openai'):
     try:
         output, _ = process.communicate(encoded, timeout=timeout)
         if process.returncode or len(output) > 256000:
-            raise ToolError('Candidate model failed')
+            raise ProviderFailure(provider, 'provider_unavailable')
         # Duplicate keys must not conceal extra edits or reviewer decisions.
         def unique(pairs):
             result = {}
@@ -108,9 +110,18 @@ def model_request(payload, instructions, timeout, *, provider='openai'):
                     raise ValueError('Duplicate response key')
                 result[key] = value
             return result
-        return json.loads(output, object_pairs_hook=unique)
+        try:
+            envelope = json.loads(output, object_pairs_hook=unique)
+            if envelope.get('ok') is False and set(envelope) == {'ok', 'code'}:
+                raise ProviderFailure(provider, envelope['code'])
+            if envelope.get('ok') is not True or set(envelope) != {'ok', 'text'}:
+                raise ValueError('Invalid adapter envelope')
+            result = json.loads(envelope['text'], object_pairs_hook=unique)
+        except (ValueError, UnicodeError):
+            raise ProviderFailure(provider, 'provider_invalid_response') from None
+        return result
     except subprocess.TimeoutExpired:
-        raise ToolDenied('Candidate deadline exceeded') from None
+        raise ProviderFailure(provider, 'provider_timeout') from None
     finally:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -122,6 +133,7 @@ def model_request(payload, instructions, timeout, *, provider='openai'):
 
 
 class CandidateRepository(RepositoryTools):
+    requires_docker = True
     def __init__(self, root, *, source_root, check):
         super().__init__(root, policy=CandidatePolicy())
         self.source_root, self.check = Path(source_root), check
@@ -168,6 +180,7 @@ class SelfEditService:
         if self.root.is_relative_to(self.source) or self.root.resolve() != self.root:
             raise ValueError('Candidate storage must be outside the source checkout, without symlinks')
         self.limits = limits or Limits()
+        self.explicit_limits = limits is not None
         self.model = model or model_request
         self.tester = tester
 
@@ -198,7 +211,9 @@ class SelfEditService:
 
     def _effective_limits(self, record):
         saved = record.get('limits', asdict(self.limits))
-        return Limits(**{name: min(value, saved[name]) for name, value in asdict(self.limits).items()})
+        host = (Limits(seconds=900) if not self.explicit_limits and
+                record.get('source_context', {}).get('engineering_job_id') else self.limits)
+        return Limits(**{name: min(value, saved[name]) for name, value in asdict(host).items()})
 
     def _check(self):
         remaining = self.deadline - time.monotonic()
@@ -207,6 +222,12 @@ class SelfEditService:
         return remaining
 
     def _tick(self, event):
+        if event == 'generate_proposal':
+            self.record['stage'] = 'implementing'
+        elif event.startswith(('test', 'baseline')):
+            self.record['stage'] = 'testing'
+        elif event == 'independent_review':
+            self.record['stage'] = 'reviewing'
         self._check()
         if self.record['tool_calls'] >= self.limits.tool_calls:
             raise ToolDenied('Candidate tool limit exceeded')
@@ -274,6 +295,7 @@ class SelfEditService:
         return fingerprint
 
     def _ask(self, payload, instructions, schema):
+        from .candidate_provider import ProviderFailure, failure_evidence
         if self.record['iterations'] >= self.limits.iterations:
             raise ToolDenied('Candidate iteration limit exceeded')
         self.record['iterations'] += 1
@@ -283,11 +305,25 @@ class SelfEditService:
             providers = EngineeringProviders.defaults(model_request)
             provider = providers.reviewer if schema is Review else providers.select(
                 self.record['improvement']['implementation_provider'])
-            result = provider.complete(payload, instructions, min(30, self._check()))
+            try:
+                result = provider.complete(payload, instructions, min(120, self._check()))
+            except ProviderFailure as exc:
+                self.record['failure'] = failure_evidence(exc.provider, exc.code,
+                    'reviewing' if schema is Review else 'implementing',
+                    self.record.get('source_context', {}).get('attempt', 1))
+                raise
         else:
             result = self.model(payload, instructions, min(30, self._check()))
         self._check()
-        return schema.model_validate(result)
+        try:
+            return schema.model_validate(result)
+        except ValueError:
+            provider = ('openai' if schema is Review else
+                        self.record.get('improvement', {}).get('implementation_provider', 'openai'))
+            self.record['failure'] = failure_evidence(provider, 'provider_invalid_response',
+                'reviewing' if schema is Review else 'implementing',
+                self.record.get('source_context', {}).get('attempt', 1))
+            raise ProviderFailure(provider, 'provider_invalid_response') from None
 
     def _prepare(self):
         policy = CandidatePolicy()
@@ -309,7 +345,7 @@ class SelfEditService:
         for path in self.record['inspect_paths']:
             policy.edit_path(path)
             self._tick('inspect_source')
-            context[path] = safe_text(reader.read_text(path))
+            context[path] = inspection_text(reader.read_text(path))
         if sum(len(value.encode()) for value in context.values()) > 128000:
             raise ToolDenied('Inspection context limit exceeded')
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -517,11 +553,14 @@ class SelfEditService:
                 self._discard_files(self.record)
             else:
                 raise ValueError('Unknown candidate operation')
-        except ToolDenied as exc:
-            self.record.update(state='rejected', error=str(exc), tested_fingerprint=None, reviewer_result=None)
-            self.store.save(self.record, 'candidate_rejected')
-        except Exception:
-            self.record.update(state='needs_revision', error='Candidate operation failed.',
+        except Exception as exc:
+            from .candidate_provider import failure_evidence, execution_error_code, FAILURES
+            failure = self.record.get('failure') or failure_evidence(
+                self.record.get('improvement', {}).get('implementation_provider', 'openai'),
+                execution_error_code(exc), self.record.get('stage', 'planning'),
+                self.record.get('source_context', {}).get('attempt', 1))
+            self.record.update(state='rejected' if isinstance(exc, ToolDenied) else 'needs_revision',
+                               error=str(exc) if isinstance(exc, ToolDenied) else FAILURES[failure['code']][1], failure=failure,
                                tested_fingerprint=None, reviewer_result=None)
             self.store.save(self.record, 'candidate_failed')
         finally:
@@ -566,6 +605,33 @@ class SelfEditService:
             process.join()
 
     def _operate(self, candidate_id, action):
+        # Owner management of a job's candidate shares the worker flock. A
+        # resume cannot race tests/review/discard, including across processes.
+        import fcntl
+        record = self.store.get(candidate_id, recover=False)
+        job_id = (record or {}).get('source_context', {}).get('engineering_job_id')
+        if action == 'start' or not job_id:
+            return self._operate_locked(candidate_id, action)
+        from .engineering_jobs import EngineeringJobs
+        jobs = EngineeringJobs(self.store.database)
+        fd = os.open(self.store.database.path + '.engineering.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ToolDenied('Engineering worker is active') from None
+            job = jobs.get(job_id)
+            if job['lease_owner'] or job['control'] and action != 'discard':
+                raise ToolDenied('Engineering job lease is active')
+            self.engineering_lock_fd = fd
+            result = self._operate_locked(candidate_id, action)
+            jobs.reconcile_candidate(result)
+            return result
+        finally:
+            self.__dict__.pop('engineering_lock_fd', None)
+            os.close(fd)
+
+    def _operate_locked(self, candidate_id, action):
         if self.store.database.path == ':memory:':
             raise ValueError('Candidates require a durable SQLite database')
         existing = self.store.get(candidate_id)
@@ -597,7 +663,7 @@ class SelfEditService:
                 # Production never forks a threaded FastAPI process or inherits
                 # its SQLite/client locks. The worker imports only trusted code.
                 config = dict(database=self.store.database.path, source=str(self.source),
-                              root=str(self.root), limits=asdict(self.limits),
+                              root=str(self.root), limits=asdict(self._effective_limits(record)),
                               candidate_id=candidate_id, action=action)
                 process = subprocess.Popen([sys.executable, '-B', '-m', 'core.candidate_worker'],
                     cwd=Path(__file__).resolve().parents[1], stdin=subprocess.PIPE,
@@ -621,8 +687,13 @@ class SelfEditService:
                     raise TimeoutError
                 if process.exitcode:
                     raise RuntimeError
-        except (TimeoutError, RuntimeError, OSError):
+        except (TimeoutError, RuntimeError, OSError) as exc:
+            from .candidate_provider import failure_evidence
             record = self.store.get(candidate_id, internal=True)
+            record['failure'] = failure_evidence(
+                record.get('improvement', {}).get('implementation_provider', 'openai'),
+                'candidate_deadline' if isinstance(exc, TimeoutError) else 'worker_failed',
+                record.get('stage', 'planning'), record.get('source_context', {}).get('attempt', 1))
             record.update(state='rejected', error='Candidate deadline or worker limit reached.',
                           tested_fingerprint=None, reviewer_result=None)
             self.store.save(record, 'worker_stopped')
@@ -657,7 +728,10 @@ class SelfEditService:
                 if not parts or parts[0] != 'tests' or path.startswith('-') or '::' in path:
                     raise ToolDenied('Only repository test paths are permitted')
         except ToolDenied:
-            record.update(state='rejected', error='Protected or invalid candidate path')
+            from .candidate_provider import failure_evidence
+            record.update(state='rejected', error='Protected or invalid candidate path',
+                failure=failure_evidence((improvement or {}).get('implementation_provider', 'openai'),
+                    'candidate_policy_denied', 'planning', (source_context or {}).get('attempt', 1)))
             self.store.save(record, 'candidate_rejected')
             return self.store.get(record['id'])
         return self._operate(record['id'], 'start')
@@ -678,7 +752,13 @@ class SelfEditService:
         if action:
             improvement.update(engineering_action=action.action, scope=action.scope,
                                implementation_provider=action.provider)
-        return self.start(goal, inspect_paths, targeted_tests, source_context=source_context, improvement=improvement)
+        service = self
+        if not self.explicit_limits and (source_context or {}).get('engineering_job_id'):
+            service = SelfEditService(self.store.database, source_root=self.source, candidate_root=self.root,
+                limits=Limits(seconds=900), model=self.model, tester=self.tester)
+            if hasattr(self, 'engineering_lock_fd'):
+                service.engineering_lock_fd = self.engineering_lock_fd
+        return service.start(goal, inspect_paths, targeted_tests, source_context=source_context, improvement=improvement)
 
     def inspect(self, candidate_id):
         record = self.store.get(candidate_id, internal=True)

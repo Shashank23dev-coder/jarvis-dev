@@ -513,7 +513,7 @@ def test_tool_budget_cannot_be_reset_by_restart(setup):
 
 
 @pytest.mark.parametrize('options', [{'iterations': 5}, {'files': 9}, {'lines': 401},
-    {'tool_calls': 65}, {'seconds': 301}, {'seconds': float('inf')}, {'files': True}])
+    {'tool_calls': 65}, {'seconds': 901}, {'seconds': float('inf')}, {'files': True}])
 def test_host_cannot_raise_absolute_limit_ceilings(options):
     with pytest.raises(ValueError):
         Limits(**options)

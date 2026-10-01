@@ -3,6 +3,7 @@
 import json
 import sys
 from models.openai_client import request_agent_turn
+from .candidate_provider import ProviderFailure, provider_error_code
 
 
 def main():
@@ -11,13 +12,21 @@ def main():
     if provider not in {'codex', 'openai'}:
         raise ValueError('Unavailable engineering provider')
     options = {'model': 'gpt-5.3-codex'} if provider == 'codex' else {}
-    turn = request_agent_turn(input=[{'role': 'user', 'content': json.dumps(request['input'])}],
-                              tools=[], instructions=request['instructions'], allow_tools=False, **options)
-    if turn.status != 'completed' or any(item.get('type') == 'function_call' for item in turn.output):
-        raise ValueError('Invalid model response')
-    if len(turn.text.encode('utf-8')) > 256000:
-        raise ValueError('Model output limit')
-    print(turn.text)
+    try:
+        turn = request_agent_turn(input=[{'role': 'user', 'content': json.dumps(request['input'])}],
+            tools=[], instructions=request['instructions'], allow_tools=False,
+            timeout=request.get('timeout', 120), max_output_tokens=24000, **options)
+        if turn.status != 'completed':
+            raise ProviderFailure(provider, 'provider_output_limit' if turn.status == 'incomplete' else 'provider_unavailable')
+        if any(item.get('type') == 'function_call' for item in turn.output):
+            raise ProviderFailure(provider, 'provider_invalid_response')
+        if len(turn.text.encode('utf-8')) > 256000:
+            raise ProviderFailure(provider, 'provider_output_limit')
+        # The envelope is emitted by trusted adapter code; provider text is
+        # always nested, so it cannot impersonate adapter failure metadata.
+        print(json.dumps({'ok': True, 'text': turn.text}))
+    except Exception as exc:
+        print(json.dumps({'ok': False, 'code': exc.code if isinstance(exc, ProviderFailure) else provider_error_code(exc)}))
 
 
 if __name__ == '__main__':

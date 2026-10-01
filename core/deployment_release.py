@@ -27,7 +27,7 @@ TERMINAL = {'deployed', 'rolled_back', 'failed', 'rollback_failed'}
 # This exception applies only to the private-key marker check below; all other
 # context restrictions and application secret detectors remain in force.
 SYNTHETIC_KEY_FIXTURES = {
-    'tests/test_self_edit.py': 'd618a3160078060cab7ee8bf07e11074e208ae3fb54061c305e754668c03478d',
+    'tests/test_self_edit.py': '0362fac81b25155c17d0626eed1e8f86dbe9adc45823da3e6f2010887fabc3f5',
     'tests/test_recall.py': 'f9bb6152a50086a2551a69e10836fbece689dc182b61c6a129efaa9b9081a5d4',
 }
 

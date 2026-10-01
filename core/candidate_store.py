@@ -73,12 +73,12 @@ class CandidateStore:
                     from .engineering_jobs import EngineeringJobs
                     jobs = EngineeringJobs(self.database)
                     job = jobs._get(db, job_id)
-                    if job['lease_owner'] != record['source_context'].get('lease_owner'):
+                    if job['lease_owner'] and job['lease_owner'] != record['source_context'].get('lease_owner'):
                         raise ValueError('Engineering lease mismatch')
                     stage = ('testing' if event.startswith(('test', 'baseline')) else
                              'reviewing' if event.startswith('review') or event == 'independent_review' else
                              'implementing' if event in {'generate_proposal', 'apply_edits'} else None)
-                    if stage:
+                    if stage and job['lease_owner']:
                         job.update(status=stage, current_stage=stage)
                         jobs._save(db, job, event)
 

@@ -8,7 +8,6 @@ import time
 
 from tools.policy import ToolDenied
 from .candidate_bridge import Request, project, MAX_BYTES
-from .candidate_tools import CandidateTools
 from .database import Database
 from .self_edit import SelfEditService
 
@@ -38,9 +37,14 @@ class Broker:
                 or (self.source / '.git').is_symlink()):
             raise ToolDenied('Broker requires the configured development checkout')
 
-    def execute(self, raw):
+    def execute(self, raw, *, authority=None):
+        from .engineering_authority import current_owner, require_owner
+        require_owner(authority if authority is not None else current_owner.get())
         self.check_source()
         request = Request.model_validate(raw).checked()
+        if request.action == 'runtime':
+            from .engineering_jobs import EngineeringJobs
+            return EngineeringJobs(self.service.store.database).runtime()
         if request.action.startswith('job_'):
             from .engineering_jobs import EngineeringJobs, project_job
             jobs = EngineeringJobs(self.service.store.database)
@@ -48,29 +52,18 @@ class Broker:
                 return project_job(jobs.create(request.goal, request.engineering_action.model_dump(),
                     request.arguments, request.model_dump()))
             if request.action == 'job_list':
-                return [project_job(j) for j in jobs.recent(request.conversation_id)]
+                return [project_job(j) for j in jobs.recent(before=request.arguments.get('before'))]
             job = jobs.get(request.arguments['job_id'])
-            if job['source']['conversation_id'] != request.conversation_id:
-                raise ToolDenied('Engineering job outside conversation')
             operation = request.action.removeprefix('job_')
             if operation != 'inspect':
-                from .engineering_tools import control_authorized
-                if not control_authorized(request.goal, operation, job['id']):
-                    raise ToolDenied('Explicit engineering job control required')
                 job = jobs.control(job['id'], operation)
             return project_job(job)
         context = dict(source='production_chat', task_id=request.task_id,
                        conversation_id=request.conversation_id, request_id=request.request_id)
         if request.engineering_action:
             context['engineering_action'] = request.engineering_action.model_dump()
-        # Recheck current-message authority on the host, independent of the model.
-        allowed = CandidateTools(request.goal, self.service.store.database, engineering=True)
-        if request.engineering_action is not None:
-            # The production Brain's closed action grants only bounded candidate
-            # work. Repository, execution, and approval authority remain here.
-            allowed.allowed = {'workspace', 'engineer', 'inspect', 'tests', 'review'}
-        if request.action not in allowed.allowed:
-            raise ToolDenied('Request lacks candidate authority')
+        # The caller authenticates the channel separately from request data.
+        # Text and conversation identity are audit metadata, never authority.
         if request.action == 'workspace':
             return self.service.engineering_workspace(request.engineering_action.scope)
         if request.action in {'create', 'engineer'}:
@@ -95,12 +88,12 @@ class Broker:
         else:
             identifier = request.arguments['candidate_id']
             existing = self.service.store.get(identifier, internal=True)
-            if not existing or existing.get('source_context', {}).get('source') != 'production_chat':
-                raise ToolDenied('Candidate is not owned by production chat')
-            if identifier not in allowed.ids and existing['source_context'].get('task_id') != request.task_id:
-                raise ToolDenied('Candidate outside request scope')
+            if not existing:
+                raise ToolDenied('Candidate unavailable')
             if existing.get('source_root') != str(self.service.source):
                 raise ToolDenied('Candidate source mismatch')
+            if request.action == 'inspect':
+                return project(self.service.inspect(identifier))
             operations = existing.setdefault('chat_operations', [])
             if any(item['request_id'] == request.request_id for item in operations):
                 return project(existing)
@@ -145,7 +138,15 @@ def main():
             raw = transport('receive')
             if raw:
                 try:
-                    record = broker.execute(raw)
+                    from .engineering_authority import OwnerDevAuthority
+                    # Fixed docker-exec into the configured application, whose
+                    # mailbox is private to its UID. Candidate/test containers
+                    # have neither this mailbox nor the Docker socket mounted.
+                    authority = OwnerDevAuthority()
+                    # The currently deployed protocol predates authority audit
+                    # fields. Issue them from this authenticated private channel
+                    # so a dev broker upgrade needs no production deployment.
+                    record = broker.execute(dict(raw, authority=authority.model_dump()), authority=authority)
                     response = dict(request_id=raw['request_id'], ok=True, record=record)
                 except Exception:
                     response = dict(request_id=raw['request_id'], ok=False)

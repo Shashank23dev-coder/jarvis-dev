@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("owner")
+
 from core.candidate_action import EngineeringAction, goal_digest
 from core.database import Database
 from core.engineering_jobs import EngineeringJobs, project_job
@@ -65,7 +67,7 @@ def test_lease_recovery_and_stale_owner_fenced(setup):
     assert jobs.claim('duplicate', now=1) is None
     db.close()
     jobs = EngineeringJobs(Database(db.path))
-    recovered = jobs.claim('new', now=331)
+    recovered = jobs.claim('new', now=931)
     assert recovered['attempts'] == 2
     with pytest.raises(ToolDenied):
         jobs.finish(job['id'], 'old')
@@ -161,8 +163,7 @@ def test_broker_queue_and_conversation_scope(setup, monkeypatch):
     with db.transaction() as connection:
         assert connection.execute('SELECT COUNT(*) FROM candidates').fetchone()[0] == 0
     read = request('job_inspect', 'Show status', {'job_id': job['id']})
-    with pytest.raises(ToolDenied):
-        broker.execute(read)
+    assert broker.execute(read) == job
     read['conversation_id'] = raw['conversation_id']
     assert broker.execute(read) == job
 
@@ -197,8 +198,8 @@ def test_production_read_only_inspection_states(setup, monkeypatch, status):
     tools = CandidateTools('What is the current status?', db, source_context=job['source'])
     registry = tools.bind(ToolRegistry())
     assert {'list_engineering_jobs', 'inspect_engineering_job'} <= registry.schemas().keys()
-    assert not {'pause_engineering_job', 'cancel_engineering_job', 'resume_engineering_job',
-                'approve_and_apply_candidate', 'approve_and_deploy_commit'} & registry.schemas().keys()
+    assert {'pause_engineering_job', 'cancel_engineering_job', 'resume_engineering_job'} <= registry.schemas().keys()
+    assert not {'approve_and_apply_candidate', 'approve_and_deploy_commit'} & registry.schemas().keys()
     result = registry._definitions['inspect_engineering_job'].handler(job_id=job['id']).jobs[0]
     assert result['status'] == status and result['attempts'] == 1
     assert result['candidate_id'] == before['candidate_id']
@@ -210,8 +211,7 @@ def test_production_read_only_inspection_states(setup, monkeypatch, status):
     assert project_job(result) == result
     assert jobs.get(job['id']) == before
     tools.source_context = dict(job['source'], conversation_id=str(uuid4()))
-    with pytest.raises(ToolDenied):
-        registry._definitions['inspect_engineering_job'].handler(job_id=job['id'])
+    assert registry._definitions['inspect_engineering_job'].handler(job_id=job['id']).jobs[0] == result
     with pytest.raises(ToolDenied):
         registry._definitions['inspect_engineering_job'].handler(job_id=str(uuid4()))
 

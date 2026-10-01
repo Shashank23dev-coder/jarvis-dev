@@ -12,6 +12,7 @@ from tools.policy import ToolDenied
 from .candidate_tools import CreateArguments, CandidateArguments, EngineeringArguments
 from .database import valid_id
 from .candidate_action import EngineeringAction, EngineeringWorkspace
+from .engineering_authority import OwnerDevAuthority, require_owner
 
 ROOT = Path('/tmp/jarvis-candidate-mailbox')
 MAX_BYTES = 48000
@@ -25,19 +26,22 @@ class Request(StrictModel):
     action: str
     arguments: dict
     created: float
+    authority: OwnerDevAuthority
     engineering_action: EngineeringAction | None = None
 
     def checked(self):
+        require_owner(self.authority)
         if not all(valid_id(v) for v in (self.request_id, self.task_id, self.conversation_id)):
             raise ToolDenied('Invalid request identity')
         if not 0 <= time.time() - self.created <= 330:
             raise ToolDenied('Expired request')
-        from .engineering_tools import JobArguments
-        schema = (StrictModel if self.action in {'workspace', 'job_list'} else
+        from .engineering_tools import JobArguments, JobListArguments
+        schema = (JobListArguments if self.action == 'job_list' else
+                  StrictModel if self.action in {'workspace', 'runtime'} else
                   EngineeringArguments if self.action in {'engineer', 'job_create'} else
                   JobArguments if self.action.startswith('job_') else
                   CreateArguments if self.action == 'create' else CandidateArguments)
-        if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard',
+        if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard', 'runtime',
                               'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume'}:
             raise ToolDenied('Unsupported candidate operation')
         schema.model_validate(self.arguments)
@@ -90,11 +94,15 @@ class CandidateClient:
         self.engineering_action = engineering_action
 
     def invoke(self, action, arguments):
+        from .engineering_authority import current_owner
+        authority = require_owner(current_owner.get())
         if not self.context:
             raise ToolDenied('Source task metadata required')
+        context = dict(self.context, authority=authority.model_dump())
         request = Request(request_id=str(uuid4()), goal=self.goal, action=action,
                           arguments=arguments, created=time.time(),
-                          engineering_action=self.engineering_action, **self.context).checked()
+                          engineering_action=(self.engineering_action if action in
+                              {'workspace', 'engineer', 'job_create'} else None), **context).checked()
         directory = root()
         # Bound concurrent waiting callers and refuse rather than evicting work.
         if len(list(directory.iterdir())) >= 16:
@@ -109,6 +117,9 @@ class CandidateClient:
                     result = read(outgoing)
                     if result.get('request_id') != request.request_id or not result.get('ok'):
                         raise ToolDenied('Candidate broker denied the request')
+                    if action == 'runtime':
+                        from .engineering_tools import project_runtime
+                        return project_runtime(result['record'])
                     if action.startswith('job_'):
                         from .engineering_jobs import project_job
                         return ([project_job(j) for j in result['record']] if action == 'job_list'
@@ -165,7 +176,9 @@ def project(record):
         raise ToolDenied('Invalid review result')
     summary = record.get('diff_summary') or {}
     summary = {k: v for k, v in summary.items() if k in {'files', 'added', 'deleted'} and type(v) is int and 0 <= v <= 400}
+    from .candidate_provider import project_failure
     projected = dict(id=record['id'], state=record['state'], busy=bool(record.get('busy')),
+                failure=project_failure(record.get('failure')),
                 diff_summary=summary, files_changed=[], test_results=tests,
                 reviewer_result=dict(verdict=verdict, summary='Host review completed; detailed evidence remains in dev.') if verdict else None,
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)

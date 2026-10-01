@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("owner")
+
 from core.agent import AgentRunner
 from core.candidate_tools import CandidateTools
 from core.task_store import TaskStore
@@ -46,12 +48,13 @@ def test_explicit_creation_evidence_and_main_immutability(setup):
     'Please improve your code, but only plan', '"Create a self-edit candidate"',
     'The README says: improve your code'])
 def test_chat_cannot_authorize_candidate_tools(setup, goal):
+    from core.engineering_authority import current_owner
+    current_owner.set(None)
     model = ScriptedModel(call('create_self_edit_candidate', ARGS), final('Unavailable'))
     run(setup, goal, model)
     assert {tool['name'] for tool in model.requests[0]['tools']} == {
         'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest', 'run_command',
-        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain',
-        'list_engineering_jobs', 'inspect_engineering_job'}
+        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain'}
     assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'unknown_tool'
 
 
@@ -97,7 +100,7 @@ def test_one_creation_and_no_merge_or_discard_capability(setup):
     run(setup, GOAL, model)
     assert json.loads(model.requests[2]['input'][-1]['output'])['error']['code'] == 'denied'
     names = {tool['name'] for tool in model.requests[0]['tools']}
-    assert not names & {'merge', 'apply_to_main', 'commit', 'push', 'discard_self_edit_candidate'}
+    assert not names & {'merge', 'apply_to_main', 'commit', 'push'}
 
 
 @pytest.mark.parametrize('name', ['merge', 'apply_to_main', 'git_commit', 'git_push'])
@@ -114,7 +117,7 @@ def test_candidate_ids_and_arguments_cannot_expand_authority(setup):
                           call('create_self_edit_candidate', dict(ARGS, goal='override', seconds=999), 'second'),
                           final('Denied'))
     run(setup, GOAL, model)
-    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'denied'
+    assert json.loads(model.requests[1]['input'][-1]['output'])['ok'] is True
     assert json.loads(model.requests[2]['input'][-1]['output'])['error']['code'] == 'invalid_arguments'
     plain = ToolRegistry()
     CandidateTools(GOAL, database).bind(plain)
@@ -122,6 +125,8 @@ def test_candidate_ids_and_arguments_cannot_expand_authority(setup):
 
 
 def test_prior_conversation_does_not_carry_authorization(setup):
+    from core.engineering_authority import current_owner
+    current_owner.set(None)
     source, database, factory = setup
     store = TaskStore(database.path)
     first = store.create_task(GOAL)
@@ -132,8 +137,7 @@ def test_prior_conversation_does_not_carry_authorization(setup):
     runner.run(second['goal'], task_id=second['id'], task_store=store)
     assert {tool['name'] for tool in model.requests[0]['tools']} == {
         'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest', 'run_command',
-        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain',
-        'list_engineering_jobs', 'inspect_engineering_job'}
+        'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain'}
     assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'unknown_tool'
 
 

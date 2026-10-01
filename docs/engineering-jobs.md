@@ -1,60 +1,65 @@
 # Persistent engineering jobs
 
-JarvisBrain authorizes a typed engineering action bound to the current task,
-conversation and goal. `create_engineering_job` (also available through the
-existing `engineer_candidate` tool) queues that action and returns its durable ID.
-Production uses the bounded broker mailbox; acceptance means the host SQLite
-transaction has committed. A lost response can be retried with the same task;
-different content for that task is rejected. Browser and production restarts do
-not erase accepted jobs. An unavailable broker fails closed: no acceptance is
-reported and no local production editing fallback exists.
+Authenticated owners use `prepare_engineering(provider="codex", scope="code")`
+(or documentation scope) to obtain the configured-dev editable/test catalog, then
+`create_engineering_job` to queue the current goal, problem, hypothesis, inspection
+paths and targeted tests. The compatibility name is `engineer_candidate`.
+The host action binds submission content for integrity and idempotency; it does
+not restrict later inspection or control to the originating conversation.
 
-The separate `core.engineering_worker` process uses the broker's private database
-outside the checkout. The supplied systemd unit is an operator installation
-artifact, not installed or activated by chat. Its only source is configured
-`/home/ubuntu/jarvis-dev`. Production receives no host mount, Docker socket, shell,
-secrets, or writable source tree. Codex returns structured edits without tools;
-the existing candidate policy, isolated worktree, Docker test sandbox and separate
-review provider enforce execution boundaries. Production env files are never read.
+The broker commits jobs to private host SQLite storage outside the checkout.
+Production has no editing fallback or writable host mount. The separate worker
+implements in a real isolated candidate rooted in the fixed jarvis-dev source,
+runs baseline and targeted tests, the complete Python suite and UI suite in
+Docker, and requests independent review. Codex is primary; OpenAI is the separate
+review provider. Provider adapters return data and gain no filesystem authority.
+The provider contract and failure schema also support a future Claude adapter
+without changing owner authorization. Provider installation/routing is host-owned.
 
 States are queued, planning, implementing, testing, reviewing,
-waiting_for_approval, completed, blocked and failed. This version stops at
-waiting_for_approval; it never marks a job completed by applying or deploying.
-Every transition and candidate identity is persisted. Improvement evidence records
-the observed problem, hypothesis, baseline, proposal, implementation attempts,
-tests, review and candidate result. Detailed evidence remains private in dev;
-chat inspection returns a bounded status/history projection.
+waiting_for_approval, completed, blocked and failed. Success stops at
+waiting_for_approval. Candidate apply and deployment are separate human gates.
+Three explicit worker attempts are allowed. Each asynchronous job attempt has a
+900-second ceiling, at most two implementation proposals, four total provider
+turns, eight changed files, 400 changed lines and 64 internal operations. A
+930-second lease and inherited flock prevent overlap, including after crashes.
+Legacy synchronous candidate creation retains its 300-second default.
 
-Read tools are discoverable on every task with host-bound source metadata,
-including ordinary status questions without a special opening phrase. Inspection
-does not require creation authority or a new engineering action. The broker still
-checks the source conversation for every supplied job ID; an ID copied into a
-different conversation grants no access. Missing jobs, invalid metadata and an
-unavailable broker fail closed without a filesystem fallback. The projection
-validates closed stage, provider, attempt, candidate, test and review fields and
-reports a categorical blocker, lease active/expired flags, recovery count and
-retry availability. It excludes lease owner IDs, raw provider errors and paths.
-Controls are advertised only for an explicit current-message control request.
+`list_engineering_jobs`, `inspect_engineering_job`, `inspect_self_edit_candidate`,
+`pause_engineering_job`, `cancel_engineering_job` and `resume_engineering_job` work
+from any authenticated owner conversation. Control arguments are structured UUIDs;
+no exact phrasing is required. Active jobs/candidates cannot be controlled in a
+way that races execution. Cancel is terminal; pause is resumable. Failed attempts
+require explicit resumption. Retrying creates a fresh candidate for the same job
+and preserves previous candidate identities and evidence. Trusted owner recovery
+can call `EngineeringJobs.revise_inputs(..., authority=...)` for an inactive blocked
+job when old inspection paths become obsolete. Inputs are revalidated and audited;
+the job ID, objective, original source and submission action stay unchanged.
+Listings return five jobs per page and `next_before`; pass that cursor as `before`
+to inspect older jobs. The bounded mailbox never materializes the full history.
 
-A SQLite transaction claims a job with a 330-second lease. A permanent flock
-serializes workers, and the candidate subprocess inherits that lock. Lease expiry
-alone cannot start overlapping execution. After a crash, recovery waits for both
-lock release and lease expiry. A fully reviewed candidate is re-inspected and
-reconciled; interrupted candidates are retained for audit and a fresh isolated
-candidate is created. At most three worker attempts are allowed, each with the
-existing 300-second candidate budget and two implementation revisions. There is
-no automatic retry of a known failed outcome: explicit resume is required.
+Inspection projects only closed status, provider, stage, attempt count, tests,
+review verdict and sanitized failure evidence. Failures carry provider, normalized
+code, retryability, stage, attempt and a fixed sanitized reason/recovery hint. Authentication,
+quota, rate limiting, timeout, invalid response and provider availability are
+distinct. Raw errors, paths, logs, credentials and reasoning never cross chat.
+Failure history survives resumption and subsequent success.
 
-`list_engineering_jobs` and `inspect_engineering_job` are read-only and scoped to
-the source conversation. Controls require the current message `Pause engineering
-job <UUID>`, `Cancel engineering job <UUID>` or `Resume engineering job <UUID>`.
-Pause/cancel are accepted only while inactive, so they cannot race ongoing edits.
-Cancellation is terminal (blocked with cancel reason); pause is resumable.
-Exhausted retries cannot resume. Queue controls grant no candidate apply or
-deployment permission. Existing exact approval gates are unchanged.
+`inspect_engineering_runtime` is a read-only tool returning `worker` (active,
+inactive or unknown), `observed_at` (Unix time or null), `supported` and up to five
+projected recent `jobs`. A current heartbeat or a live execution lease supports
+active status; observations expire. It never probes a provider or starts work.
+`core.engineering_tools.runtime(candidate_tools)` returns this same typed result
+for trusted runtime integration. An unavailable broker means unknown, never an
+invented inactive worker or missing feature. A previous provider success/failure
+is timestamped evidence about that attempt, not proof of current quota or access.
 
-Back up the private job/candidate database and candidate storage together. Use
-one configured database per checkout; do not replace its lock file while a worker
-is alive. The host operator remains trusted. The deployment preview and worker
-installation are separate operations; deploying the web image alone does not
-activate this dev worker.
+For runtime capability awareness, use the actual bound tool registry names,
+`core.brain_status.read_current_brain(store, task_id)` for the current Brain flag
+and provider route, and `core.deployment_status.configured_inspector().status()`
+for the sanitized production observation. Production revision is the controller's
+last observed revision. Do not infer capabilities from old chats or file names.
+
+Back up the private job database and candidate storage together. The executable
+worker and broker always pin the configured jarvis-dev checkout. Installation and
+restart of these dev services are separate from production deployment.

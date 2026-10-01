@@ -16,12 +16,13 @@ def get_client():
 
 
 def request_agent_turn(*, input: list[dict], tools: list[dict],
-                       instructions: str, allow_tools: bool, model: str = MODEL) -> AgentTurn:
+                       instructions: str, allow_tools: bool, model: str = MODEL,
+                       timeout: float = 30.0, max_output_tokens: int = 4096) -> AgentTurn:
     """One bounded Responses request; execution is always handled locally."""
-    response = get_client().with_options(timeout=30.0, max_retries=0).responses.create(
+    response = get_client().with_options(timeout=timeout, max_retries=0).responses.create(
         model=model, input=input, instructions=instructions, tools=tools,
         tool_choice="auto" if allow_tools else "none", parallel_tool_calls=False,
-        max_output_tokens=4096, store=False, include=["reasoning.encrypted_content"],
+        max_output_tokens=max_output_tokens, store=False, include=["reasoning.encrypted_content"],
     )
     output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
     text = response.output_text

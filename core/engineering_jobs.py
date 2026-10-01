@@ -1,6 +1,9 @@
 """Durable, bounded engineering queue. No execution or approval authority here."""
 import json
 import time
+import os
+import fcntl
+from contextlib import contextmanager
 from uuid import uuid4
 from pydantic import Field
 
@@ -13,6 +16,21 @@ STATES = {'queued', 'planning', 'implementing', 'testing', 'reviewing',
           'waiting_for_approval', 'completed', 'blocked', 'failed'}
 ACTIVE = {'planning', 'implementing', 'testing', 'reviewing'}
 MAX_ATTEMPTS = 3
+JOB_PAGE_SIZE = 5
+
+
+@contextmanager
+def management_lock(database):
+    """Queue controls and candidate management share the worker's fence."""
+    fd = os.open(database.path + '.engineering.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ToolDenied('Engineering worker or candidate management is active') from None
+        yield
+    finally:
+        os.close(fd)
 
 
 class ImprovementMetadata(StrictModel):
@@ -39,6 +57,22 @@ class EngineeringJobs:
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id TEXT NOT NULL REFERENCES engineering_jobs(id),
                 timestamp TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL)''')
+            db.execute('CREATE TABLE IF NOT EXISTS engineering_worker_status (id INTEGER PRIMARY KEY, observed REAL NOT NULL)')
+
+    def heartbeat(self):
+        with self.database.transaction() as db:
+            db.execute('INSERT OR REPLACE INTO engineering_worker_status VALUES (1, ?)', (time.time(),))
+
+    def runtime(self):
+        """Timestamped observation, never a claim that providers will stay usable."""
+        with self.database.transaction() as db:
+            row = db.execute('SELECT observed FROM engineering_worker_status WHERE id=1').fetchone()
+            active = db.execute("SELECT COUNT(*) FROM engineering_jobs WHERE json_extract(record, '$.lease_until') > ?",
+                                (time.time(),)).fetchone()[0]
+        observed = row[0] if row else None
+        return dict(worker='active' if observed and (time.time() - observed < 20 or active) else
+                    'inactive' if observed else 'unknown', observed_at=observed,
+                    jobs=[project_job(j) for j in self.recent()], supported=True)
 
     def _save(self, db, job, event):
         db.execute('UPDATE engineering_jobs SET record=? WHERE id=?',
@@ -103,29 +137,97 @@ class EngineeringJobs:
                 (identifier,))]
             return job
 
-    def recent(self, conversation_id=None):
+    def recent(self, conversation_id=None, *, before=None):
         with self.database.transaction() as db:
+            cursor = self._get(db, before) if before else None
             rows = db.execute('''SELECT id FROM engineering_jobs
                 WHERE (? IS NULL OR json_extract(record, '$.source.conversation_id') = ?)
-                ORDER BY created_at DESC LIMIT 10''', (conversation_id, conversation_id)).fetchall()
+                AND (? IS NULL OR (created_at,id) < (?,?))
+                ORDER BY created_at DESC,id DESC LIMIT ?''',
+                (conversation_id, conversation_id, before,
+                 cursor['created_at'] if cursor else None, before, JOB_PAGE_SIZE)).fetchall()
             return [j for row in rows if (j := self.get(row[0])) and
                     (conversation_id is None or j['source']['conversation_id'] == conversation_id)]
 
     def control(self, identifier, operation):
+        with management_lock(self.database):
+            return self._control_locked(identifier, operation)
+
+    def _control_locked(self, identifier, operation):
         with self.database.transaction() as db:
             job = self._get(db, identifier)
-            if job['lease_owner'] or job['status'] in ACTIVE:
+            if job['control'] == 'cancel':
+                raise ToolDenied('Cancelled engineering jobs are terminal')
+            busy = db.execute('SELECT busy FROM candidates WHERE id=?', (job.get('candidate_id'),)).fetchone()
+            if job['lease_owner'] or job['status'] in ACTIVE or busy and busy[0]:
                 raise ToolDenied('Active job cannot be controlled safely')
             if operation in {'pause', 'cancel'} and job['status'] in {'queued', 'blocked', 'failed'}:
                 job.update(status='blocked', control=operation, block_reason=operation)
             elif (operation == 'resume' and job['status'] in {'blocked', 'failed'}
                   and job['control'] != 'cancel' and job['attempts'] < MAX_ATTEMPTS):
+                if not job.get('failure') and job.get('candidate_id'):
+                    # Migrate known safe legacy denials when recovering an old
+                    # job. No provider text is copied into the projection.
+                    from .candidate_provider import execution_error_code, failure_evidence
+                    row = db.execute('SELECT record FROM candidates WHERE id=?', (job['candidate_id'],)).fetchone()
+                    if row:
+                        candidate = json.loads(row[0])
+                        code = execution_error_code(ToolDenied(candidate.get('error') or ''))
+                        job['failure'] = candidate.get('failure') or failure_evidence(
+                            job['provider'], code, candidate.get('stage', 'planning'), max(1, job['attempts']))
+                        job.setdefault('failures', []).append(job['failure'])
                 job.update(status='queued', control=None, block_reason=None, error=None, completed_at=None)
             else:
                 raise ToolDenied('Engineering job transition denied')
             job['current_stage'] = job['status']
             self._save(db, job, operation)
         return self.get(identifier)
+
+    def revise_inputs(self, identifier, arguments, *, authority):
+        """Owner recovery of obsolete inspection/test inputs; objective stays bound."""
+        with management_lock(self.database):
+            return self._revise_inputs_locked(identifier, arguments, authority=authority)
+
+    def _revise_inputs_locked(self, identifier, arguments, *, authority):
+        from .engineering_authority import require_owner
+        from .candidate_tools import EngineeringArguments
+        from tools.candidate_edit import CandidatePolicy, safe_text
+        require_owner(authority)
+        args = EngineeringArguments.model_validate(arguments).model_dump()
+        policy = CandidatePolicy()
+        for path in args['inspect_paths']:
+            policy.edit_path(path)
+        for path in args['targeted_tests']:
+            parts = policy.check(path)
+            if not parts or parts[0] != 'tests' or '/'.join(parts) != path or '::' in path:
+                raise ToolDenied('Invalid job test path')
+        for key in ('problem_detected', 'hypothesis'):
+            safe_text(args[key])
+        with self.database.transaction() as db:
+            job = self._get(db, identifier)
+            busy = db.execute('SELECT busy FROM candidates WHERE id=?', (job.get('candidate_id'),)).fetchone()
+            if job['status'] not in {'blocked', 'failed'} or job['lease_owner'] or busy and busy[0]:
+                raise ToolDenied('Only inactive blocked job inputs may be revised')
+            if job['action']['scope'] == 'documentation' and any(
+                    not p.startswith('docs/') for p in args['inspect_paths']):
+                raise ToolDenied('Documentation scope mismatch')
+            job.setdefault('input_revisions', []).append(dict(timestamp=timestamp(), arguments=job['arguments']))
+            job['arguments'] = args
+            self._save(db, job, 'inputs_revised')
+        return self.get(identifier)
+
+    def reconcile_candidate(self, candidate):
+        """Refresh evidence after owner test/review/discard under the worker lock."""
+        identifier = candidate.get('source_context', {}).get('engineering_job_id')
+        if identifier is None:
+            return
+        with self.database.transaction() as db:
+            job = self._get(db, identifier)
+            if job['candidate_id'] != candidate['id'] or job['lease_owner'] or job['control']:
+                return
+            # Database.transaction joins nested calls under its reentrant lock;
+            # keeping this transaction open prevents a concurrent cancel race.
+            self.finish(identifier, None, candidate)
 
     def claim(self, owner, *, now=None):
         """Caller must hold the worker flock, including during lease recovery."""
@@ -143,13 +245,13 @@ class EngineeringJobs:
                     self._save(db, job, 'retry_limit')
                     continue
                 job.update(status='planning', current_stage='planning', attempts=job['attempts'] + 1,
-                           lease_owner=owner, lease_until=now + 330,
+                           lease_owner=owner, lease_until=now + 930,
                            started_at=job['started_at'] or timestamp())
                 self._save(db, job, 'claimed')
                 return job
         return None
 
-    def finish(self, identifier, owner, candidate=None):
+    def finish(self, identifier, owner, candidate=None, *, failure=None):
         with self.database.transaction() as db:
             job = self._get(db, identifier)
             if job['lease_owner'] != owner:
@@ -169,13 +271,25 @@ class EngineeringJobs:
                     implementation_attempts=improvement.get('failures_revisions', []),
                     test_evidence=candidate['test_results'], review_evidence=candidate['reviewer_result'],
                     candidate_result=candidate['state'])
+            from .candidate_provider import failure_evidence
+            if not passed:
+                failure = failure or (candidate or {}).get('failure')
+                if failure is None:
+                    failure = failure_evidence(job['provider'],
+                        'review_failed' if candidate and candidate.get('reviewer_result') else
+                        'tests_failed' if candidate and candidate.get('test_results') else 'worker_failed',
+                        job['current_stage'] if job['current_stage'] in ACTIVE else
+                        (candidate or {}).get('stage', 'planning'), job['attempts'])
+                job.setdefault('failures', []).append(failure)
+            job['failure'] = failure if not passed else None
             self._save(db, job, 'execution_finished')
         return self.get(identifier)
 
 
 def project_job(job):
     """Closed production projection: no paths, model prose, logs or host config."""
-    if not valid_id(job.get('id')) or job.get('status') not in STATES or job.get('provider') != 'codex':
+    from .candidate_provider import PROVIDERS, project_failure
+    if not valid_id(job.get('id')) or job.get('status') not in STATES or job.get('provider') not in PROVIDERS:
         raise ToolDenied('Invalid engineering job result')
     from datetime import datetime
     stage = job.get('current_stage')
@@ -229,7 +343,10 @@ def project_job(job):
     return {key: job.get(key) for key in ('id', 'type', 'status', 'provider', 'created_at',
         'started_at', 'completed_at', 'current_stage', 'attempts', 'candidate_id', 'control')} | {
         'error': 'Engineering job requires attention' if job.get('error') else None,
-        'blocker': control or ('retry_limit' if attempts >= MAX_ATTEMPTS and job['status'] == 'failed'
+        'failure': project_failure(job.get('failure')),
+        'failures': [project_failure(item) for item in job.get('failures', [])[-MAX_ATTEMPTS:]],
+        'blocker': control or ((job.get('failure') or {}).get('code') if job.get('failure') and job['status'] in {'blocked', 'failed'} else
+            'retry_limit' if attempts >= MAX_ATTEMPTS and job['status'] == 'failed'
             else 'execution_not_passed' if job['status'] in {'blocked', 'failed'}
             else 'human_approval_required' if job['status'] == 'waiting_for_approval' else None),
         'lease': lease, 'recovery': recovery, 'history': history,

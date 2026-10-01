@@ -91,7 +91,7 @@ def docker_execute(repo, snapshot, image, command, seconds):
 
 def select_backend(repo, snapshot):
     reasons = []
-    if Path(repo._bwrap).is_file():
+    if not getattr(repo, 'requires_docker', False) and Path(repo._bwrap).is_file():
         try:
             probe = repo._execute(bwrap_command(repo, snapshot) + ['/usr/bin/true'], timeout=5)
             if not (probe.returncode or probe.timed_out or probe.truncated):

@@ -29,6 +29,11 @@ class Settings:
     auth_token: str = field(default='', repr=False)
     public_origin: str = ''
 
+    def __post_init__(self):
+        if self.auth_token and (not 32 <= len(self.auth_token) <= 512 or
+                any(not 33 <= ord(c) <= 126 for c in self.auth_token)):
+            raise ValueError('Owner authentication requires a random ASCII token of at least 32 characters')
+
     @classmethod
     def from_env(cls, env=None, *, database_path=None):
         env = os.environ if env is None else env
@@ -145,10 +150,10 @@ class DeploymentMiddleware:
             await send(message)
 
         try:
-            if self.settings.mode == 'production' and scope['path'] != '/health':
+            if (self.settings.mode == 'production' or self.settings.auth_token) and scope['path'] != '/health':
                 headers = dict(scope['headers'])
                 expected_host = urlsplit(self.settings.public_origin).netloc.lower().encode()
-                if headers.get(b'host', b'').lower() != expected_host:
+                if self.settings.public_origin and headers.get(b'host', b'').lower() != expected_host:
                     return await JSONResponse({'detail': 'Invalid host'}, status_code=400)(scope, receive, logged_send)
                 supplied = ''
                 auth = headers.get(b'authorization', b'').decode('latin1')
@@ -168,16 +173,25 @@ class DeploymentMiddleware:
                     return await JSONResponse({'detail': 'Authentication required'}, status_code=401,
                         headers={'WWW-Authenticate': 'Basic realm="Jarvis", charset="UTF-8"'})(scope, receive, logged_send)
                 origin = headers.get(b'origin')
+                expected_origin = self.settings.public_origin or (
+                    scope['scheme'] + '://' + headers.get(b'host', b'').decode('latin1'))
                 # External links may carry cross-site metadata after the Basic
                 # challenge. Permit only top-level reads of the UI document;
                 # never extend this exception to API routes or mutations.
                 ui_navigation = (scope['path'] == '/' and scope['method'] in {'GET', 'HEAD'} and
                                  headers.get(b'sec-fetch-mode') == b'navigate' and
                                  headers.get(b'sec-fetch-dest') == b'document')
-                if ((origin is not None and origin.decode('latin1') != self.settings.public_origin) or
+                if ((origin is not None and origin.decode('latin1') != expected_origin) or
                         (headers.get(b'sec-fetch-site') == b'cross-site' and not ui_navigation)):
                     return await JSONResponse({'detail': 'Cross-origin request denied'}, status_code=403)(scope, receive, logged_send)
-            await self.app(scope, receive, logged_send)
+            from .engineering_authority import OwnerDevAuthority, current_owner
+            authority = (OwnerDevAuthority() if self.settings.auth_token
+                         and scope['path'] != '/health' else None)
+            binding = current_owner.set(authority)
+            try:
+                await self.app(scope, receive, logged_send)
+            finally:
+                current_owner.reset(binding)
         finally:
             route = scope.get('route')
             logging.getLogger('jarvis.http').info('request_completed', extra={
