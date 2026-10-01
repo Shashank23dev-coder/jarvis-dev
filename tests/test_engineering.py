@@ -18,7 +18,7 @@ from models.provider import ProviderRegistry
 from tools import CommandResult, RepositoryTools, ToolRegistry
 from test_agent import call, final
 from test_brain import ScriptedProvider
-from test_self_edit import setup, tree_bytes
+from test_self_edit import setup, tree_bytes, git
 
 
 ARGS = dict(inspect_paths=['src/app.py'], targeted_tests=['tests/test_app.py'],
@@ -80,13 +80,72 @@ def test_failed_candidate_is_revised_with_evidence(setup, failure):
             if failure == 'review':
                 assert payload['review']['verdict'] == 'needs_revision'
         value = 3 if failure == 'tests' and len(attempts) == 1 else 2
-        return dict(edits=[dict(path='src/app.py', content=f'value = {value}\n')])
-    candidate = factory(model=author, tester=run_checks).engineer('Fix the value', **ARGS)
+        content = f'value = {value}\n'
+        if failure == 'review' and len(attempts) == 2:
+            content += '# Corrected constant documented after review.\n'
+        return dict(edits=[dict(path='src/app.py', content=content)])
+    def checks(repository, phase, paths):
+        value = repository.read_text('src/app.py').splitlines()[0]
+        return CommandResult(('pytest',), 0 if value == 'value = 2' else 1, 'Assertion result')
+    candidate = factory(model=author, tester=checks).engineer('Fix the value', **ARGS)
     assert candidate['state'] == 'passed', candidate
     assert candidate['iterations'] <= 4 and candidate['tool_calls'] <= 64
     attempts = candidate['improvement']['failures_revisions']
     assert [item['state'] for item in attempts] == ['needs_revision', 'passed']
     assert tree_bytes(source) == before
+
+
+@pytest.mark.parametrize('always_noop', [False, True])
+def test_noop_proposals_receive_bounded_revision_and_durable_evidence(setup, always_noop):
+    source, _, factory = setup
+    calls = []
+    original = (source / 'src/app.py').read_text()
+    def author(payload, instructions, timeout):
+        if instructions == REVIEW:
+            return dict(verdict='passed', summary='Reviewed current change')
+        calls.append(payload)
+        if len(calls) == 2:
+            assert payload['previous_failure']['code'] == 'provider_no_changes'
+        return dict(edits=[dict(path='src/app.py', content=original if len(calls) == 1 or always_noop else 'value = 2\n')])
+    candidate = factory(model=author, tester=run_checks).engineer('Fix value', **ARGS)
+    results = candidate['provider_results']
+    assert results[0]['status'] == 'no_changes'
+    assert len(results) <= 4
+    assert candidate['state'] == ('needs_revision' if always_noop else 'passed')
+    if always_noop:
+        assert candidate['failure']['code'] == 'provider_no_changes'
+        assert candidate['failure']['retryable'] is True
+        assert candidate['iterations'] == 2
+    else:
+        assert candidate['failure'] is None
+        assert results[1]['status'] == 'applied'
+        assert results[-1]['provider'] == 'openai'
+    assert project(candidate)['provider_results'] == results
+
+
+@pytest.mark.parametrize('repeat_failed_proposal', [False, True])
+def test_revisions_keep_inspection_redacted_and_detect_unchanged_failed_diff(setup, repeat_failed_proposal):
+    source, _, factory = setup
+    (source / 'tests/test_fixture.py').write_text("value = dict(OPENAI_API_KEY='synthetic-provider-fixture')\n")
+    git(source, 'add', '.')
+    git(source, 'commit', '-m', 'Synthetic inspection fixture')
+    calls = []
+    def author(payload, instructions, timeout):
+        assert 'synthetic-provider-fixture' not in json.dumps(payload)
+        if instructions == REVIEW:
+            return dict(verdict='passed', summary='Reviewed')
+        assert 'OMITTED' in payload['files']['tests/test_fixture.py']
+        calls.append(payload)
+        value = 3 if len(calls) == 1 or repeat_failed_proposal else 2
+        return dict(edits=[dict(path='src/app.py', content=f'value = {value}\n')])
+    candidate = factory(model=author, tester=run_checks).engineer('Fix value',
+        **(ARGS | {'inspect_paths': ['src/app.py', 'tests/test_fixture.py']}))
+    assert sum(r['stage'] == 'implementing' for r in candidate['provider_results']) == 2
+    assert candidate['state'] == ('needs_revision' if repeat_failed_proposal else 'passed')
+    if repeat_failed_proposal:
+        assert candidate['failure']['code'] == 'provider_no_changes'
+        assert len(candidate['test_results']) == 1
+        assert candidate['provider_results'][-1]['status'] == 'no_changes'
 
 
 @pytest.mark.parametrize('kind', ['protected', 'provider', 'review_rejected', 'baseline_timeout', 'baseline_error'])

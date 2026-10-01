@@ -17,6 +17,7 @@ FAILURES = {
     'provider_unavailable': (True, 'Check provider availability, then resume.'),
     'provider_timeout': (True, 'Resume with a fresh bounded provider budget.'),
     'provider_invalid_response': (True, 'Retry the structured proposal or review.'),
+    'provider_no_changes': (True, 'The proposal made no changes; request a concrete implementation.'),
     'provider_output_limit': (True, 'Reduce response size or increase the bounded output budget.'),
     'provider_request_rejected': (False, 'Check the configured model and request parameters.'),
     'source_not_clean': (True, 'Commit development changes before resuming.'),
@@ -65,6 +66,20 @@ class ProviderFailure(RuntimeError):
         super().__init__(self.code)
 
 
+class ProviderResult(StrictModel):
+    provider: Literal['codex', 'openai', 'claude_code']
+    stage: Literal['implementing', 'reviewing']
+    attempt: int = Field(ge=1)
+    iteration: int = Field(ge=1, le=4)
+    status: Literal['received', 'no_changes', 'applied']
+    response_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
+def project_provider_results(values):
+    return [ProviderResult.model_validate({k: item[k] for k in ProviderResult.model_fields}).model_dump()
+            for item in values[-4:]]
+
+
 def provider_error_code(exc):
     """Only SDK types/status/closed codes; never persist exception prose/body."""
     code = getattr(exc, 'code', None)
@@ -86,6 +101,8 @@ def execution_error_code(exc):
     from tools.policy import ToolDenied
     if isinstance(exc, ToolDenied):
         value = str(exc)
+        if value == 'Proposal made no changes':
+            return 'provider_no_changes'
         if value == 'Source must be clean before starting a candidate':
             return 'source_not_clean'
         if value.startswith('Credential-like'):

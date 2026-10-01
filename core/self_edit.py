@@ -316,7 +316,7 @@ class SelfEditService:
             result = self.model(payload, instructions, min(30, self._check()))
         self._check()
         try:
-            return schema.model_validate(result)
+            parsed = schema.model_validate(result)
         except ValueError:
             provider = ('openai' if schema is Review else
                         self.record.get('improvement', {}).get('implementation_provider', 'openai'))
@@ -324,6 +324,16 @@ class SelfEditService:
                 'reviewing' if schema is Review else 'implementing',
                 self.record.get('source_context', {}).get('attempt', 1))
             raise ProviderFailure(provider, 'provider_invalid_response') from None
+        # Closed response evidence, never raw model text or rejected content.
+        provider = ('openai' if schema is Review else
+                    self.record.get('improvement', {}).get('implementation_provider', 'openai'))
+        self.record.setdefault('provider_results', []).append(dict(
+            provider=provider, stage='reviewing' if schema is Review else 'implementing',
+            attempt=self.record.get('source_context', {}).get('attempt', 1),
+            iteration=self.record['iterations'], status='received',
+            response_sha256=digest(parsed.model_dump_json().encode())))
+        self.store.save(self.record, 'provider_response_received')
+        return parsed
 
     def _prepare(self):
         policy = CandidatePolicy()
@@ -404,18 +414,28 @@ class SelfEditService:
                            baseline=baseline)
             if attempt:
                 payload.update(diff=self.record['diff'], tests=self.record['test_results'][-3:],
-                               review=self.record['reviewer_result'])
+                               review=self.record['reviewer_result'], previous_failure=self.record.get('failure'))
+            previous_fingerprint = self.record.get('fingerprint') or digest(
+                json.dumps(self.record['manifest'], sort_keys=True).encode())
             proposal = self._ask(payload, PROPOSE, Proposal)
             if improvement.get('scope') == 'documentation' and any(
                     not edit.path.startswith('docs/') or Path(edit.path).suffix not in {'.md', '.txt'}
                     for edit in proposal.edits):
                 raise ToolDenied('Documentation action cannot edit code')
-            self.record.update(state='needs_revision', tested_fingerprint=None, reviewer_result=None)
+            self.record.update(state='needs_revision', tested_fingerprint=None, reviewer_result=None,
+                               failure=None, error=None)
             self._tick('apply_edits')
             self._editor().apply([edit.model_dump() for edit in proposal.edits], self._original)
             self._diff()
-            if not self.record['files_changed']:
-                raise ToolDenied('Proposal made no changes')
+            if not self.record['files_changed'] or self.record['fingerprint'] == previous_fingerprint:
+                from .candidate_provider import failure_evidence
+                self.record['failure'] = failure_evidence(improvement['implementation_provider'],
+                    'provider_no_changes', 'implementing', self.record.get('source_context', {}).get('attempt', 1))
+                self.record['provider_results'][-1]['status'] = 'no_changes'
+                improvement['failures_revisions'].append(dict(attempt=attempt + 1, state='needs_revision'))
+                self.store.save(self.record, 'proposal_no_changes')
+                continue
+            self.record['provider_results'][-1]['status'] = 'applied'
             self._tests()
             self._compare_baseline()
             self._review()
@@ -428,7 +448,7 @@ class SelfEditService:
             self.store.save(self.record, 'engineering_attempt_finished')
             if self.record['state'] in {'passed', 'rejected'}:
                 break
-            context = {path: self._editor().reader.read_text(path)
+            context = {path: inspection_text(self._editor().reader.read_text(path))
                        for path in set(context) | set(self.record['files_changed'])}
 
     def _compare_baseline(self):

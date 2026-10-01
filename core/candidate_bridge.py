@@ -176,9 +176,10 @@ def project(record):
         raise ToolDenied('Invalid review result')
     summary = record.get('diff_summary') or {}
     summary = {k: v for k, v in summary.items() if k in {'files', 'added', 'deleted'} and type(v) is int and 0 <= v <= 400}
-    from .candidate_provider import project_failure
+    from .candidate_provider import project_failure, project_provider_results
     projected = dict(id=record['id'], state=record['state'], busy=bool(record.get('busy')),
                 failure=project_failure(record.get('failure')),
+                provider_results=project_provider_results(record.get('provider_results', [])),
                 diff_summary=summary, files_changed=[], test_results=tests,
                 reviewer_result=dict(verdict=verdict, summary='Host review completed; detailed evidence remains in dev.') if verdict else None,
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)
