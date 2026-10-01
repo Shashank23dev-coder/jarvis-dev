@@ -17,6 +17,7 @@ STATES = {'queued', 'planning', 'implementing', 'testing', 'reviewing',
 ACTIVE = {'planning', 'implementing', 'testing', 'reviewing'}
 MAX_ATTEMPTS = 3
 JOB_PAGE_SIZE = 5
+FAILURE_PROJECTION_LIMIT = 16
 
 
 @contextmanager
@@ -149,22 +150,33 @@ class EngineeringJobs:
             return [j for row in rows if (j := self.get(row[0])) and
                     (conversation_id is None or j['source']['conversation_id'] == conversation_id)]
 
-    def control(self, identifier, operation):
+    def control(self, identifier, operation, *, authority=None):
         with management_lock(self.database):
-            return self._control_locked(identifier, operation)
+            return self._control_locked(identifier, operation, authority=authority)
 
-    def _control_locked(self, identifier, operation):
+    def _control_locked(self, identifier, operation, *, authority=None):
         with self.database.transaction() as db:
             job = self._get(db, identifier)
             if job['control'] == 'cancel':
                 raise ToolDenied('Cancelled engineering jobs are terminal')
-            busy = db.execute('SELECT busy FROM candidates WHERE id=?', (job.get('candidate_id'),)).fetchone()
-            if job['lease_owner'] or job['status'] in ACTIVE or busy and busy[0]:
+            if job['lease_owner'] or job['status'] in ACTIVE:
+                raise ToolDenied('Active job cannot be controlled safely')
+            # The management flock fences the worker and its descendants. An
+            # expired candidate lease left by a crash must not block recovery.
+            from .candidate_store import CandidateStore
+            candidate = CandidateStore(self.database).get(job.get('candidate_id'), internal=True)
+            if candidate and candidate['busy']:
                 raise ToolDenied('Active job cannot be controlled safely')
             if operation in {'pause', 'cancel'} and job['status'] in {'queued', 'blocked', 'failed'}:
                 job.update(status='blocked', control=operation, block_reason=operation)
-            elif (operation == 'resume' and job['status'] in {'blocked', 'failed'}
-                  and job['control'] != 'cancel' and job['attempts'] < MAX_ATTEMPTS):
+            elif operation == 'resume' and job['status'] in {'blocked', 'failed'}:
+                if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS):
+                    # Explicit owner recovery grants one more bounded execution;
+                    # crash recovery cannot renew its own budget or erase history.
+                    from .engineering_authority import require_owner
+                    require_owner(authority)
+                    job['attempt_limit'] = job['attempts'] + 1
+                    self._save(db, job, 'owner_retry_authorized')
                 if not job.get('failure') and job.get('candidate_id'):
                     # Migrate known safe legacy denials when recovering an old
                     # job. No provider text is copied into the projection.
@@ -236,12 +248,24 @@ class EngineeringJobs:
             for row in db.execute('SELECT record FROM engineering_jobs ORDER BY created_at').fetchall():
                 job = json.loads(row[0])
                 if job['status'] in ACTIVE and job['lease_until'] < now:
-                    job.update(status='queued', lease_owner=None, lease_until=0)
+                    from .candidate_store import CandidateStore
+                    from .candidate_provider import failure_evidence
+                    candidate = CandidateStore(self.database).get(job.get('candidate_id'), internal=True)
+                    if candidate and candidate['busy']:
+                        continue
+                    if candidate:
+                        self._merge_candidate_failures(job, candidate)
+                    failure = failure_evidence(job['provider'], 'worker_failed',
+                        job['current_stage'] if job['current_stage'] in ACTIVE else 'planning', job['attempts'])
+                    if failure not in job.setdefault('failures', []):
+                        job['failures'].append(failure)
+                    job.update(status='queued', current_stage='queued', lease_owner=None, lease_until=0,
+                               failure=failure, error='Engineering worker was interrupted')
                     self._save(db, job, 'lease_recovered')
                 if job['status'] != 'queued':
                     continue
-                if job['attempts'] >= MAX_ATTEMPTS:
-                    job.update(status='failed', error='Retry limit reached', completed_at=timestamp())
+                if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS):
+                    job.update(status='failed', current_stage='failed', error='Retry limit reached', completed_at=timestamp())
                     self._save(db, job, 'retry_limit')
                     continue
                 job.update(status='planning', current_stage='planning', attempts=job['attempts'] + 1,
@@ -251,6 +275,13 @@ class EngineeringJobs:
                 return job
         return None
 
+    @staticmethod
+    def _merge_candidate_failures(job, candidate):
+        offsets = job.setdefault('candidate_failure_offsets', {})
+        prior_failures = candidate.get('failures', [])
+        job.setdefault('failures', []).extend(prior_failures[offsets.get(candidate['id'], 0):])
+        offsets[candidate['id']] = len(prior_failures)
+
     def finish(self, identifier, owner, candidate=None, *, failure=None):
         with self.database.transaction() as db:
             job = self._get(db, identifier)
@@ -259,12 +290,13 @@ class EngineeringJobs:
             passed = bool(candidate and candidate['state'] == 'passed' and not candidate.get('busy')
                           and candidate.get('tested_fingerprint') == candidate.get('reviewed_fingerprint')
                           and (candidate.get('reviewer_result') or {}).get('verdict') == 'passed')
-            status = 'waiting_for_approval' if passed else ('failed' if job['attempts'] >= MAX_ATTEMPTS else 'blocked')
+            status = 'waiting_for_approval' if passed else ('failed' if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS) else 'blocked')
             job.update(status=status, current_stage=status, lease_owner=None, lease_until=0,
                        error=None if passed else 'Candidate execution did not pass tests and review',
                        block_reason=None if passed else 'Explicit retry required',
                        completed_at=timestamp() if status == 'failed' else None)
             if candidate:
+                self._merge_candidate_failures(job, candidate)
                 improvement = candidate.get('improvement', {})
                 job.update(test_result=candidate['test_results'], review_result=candidate['reviewer_result'])
                 job['improvement'].update(baseline_evidence=improvement.get('baseline_comparison'),
@@ -280,7 +312,8 @@ class EngineeringJobs:
                         'tests_failed' if candidate and candidate.get('test_results') else 'worker_failed',
                         job['current_stage'] if job['current_stage'] in ACTIVE else
                         (candidate or {}).get('stage', 'planning'), job['attempts'])
-                job.setdefault('failures', []).append(failure)
+                if failure not in job.setdefault('failures', []):
+                    job['failures'].append(failure)
             job['failure'] = failure if not passed else None
             self._save(db, job, 'execution_finished')
         return self.get(identifier)
@@ -289,6 +322,11 @@ class EngineeringJobs:
 def project_job(job):
     """Closed production projection: no paths, model prose, logs or host config."""
     from .candidate_provider import PROVIDERS, project_failure
+    failures = job.get('failures', [])
+    failure_count = job.get('failure_count', len(failures))
+    if type(failure_count) is not int or failure_count < len(failures):
+        raise ToolDenied('Invalid engineering failure count')
+    failures = [project_failure(item) for item in failures[-FAILURE_PROJECTION_LIMIT:]]
     if not valid_id(job.get('id')) or job.get('status') not in STATES or job.get('provider') not in PROVIDERS:
         raise ToolDenied('Invalid engineering job result')
     from datetime import datetime
@@ -296,7 +334,7 @@ def project_job(job):
     attempts = job.get('attempts')
     candidate_id = job.get('candidate_id')
     control = job.get('control')
-    if (stage not in STATES or type(attempts) is not int or not 0 <= attempts <= MAX_ATTEMPTS
+    if (stage not in STATES or type(attempts) is not int or attempts < 0
             or candidate_id is not None and not valid_id(candidate_id)
             or control not in {None, 'pause', 'cancel'} or job.get('type') != 'engineering'):
         raise ToolDenied('Invalid engineering job metadata')
@@ -334,17 +372,18 @@ def project_job(job):
     if recovery is None:
         recovery = dict(count=sum(e.get('event') == 'lease_recovered' for e in job.get('history', [])),
                         retry_available=job['status'] in {'blocked', 'failed'} and control != 'cancel'
-                        and attempts < MAX_ATTEMPTS and not lease['active'])
+                        and not lease['active'])
     if (set(lease) != {'active', 'expired'} or any(type(v) is not bool for v in lease.values())
             or set(recovery) != {'count', 'retry_available'}
-            or type(recovery['count']) is not int or not 0 <= recovery['count'] <= MAX_ATTEMPTS
+            or type(recovery['count']) is not int or recovery['count'] < 0
             or type(recovery['retry_available']) is not bool):
         raise ToolDenied('Invalid engineering recovery metadata')
     return {key: job.get(key) for key in ('id', 'type', 'status', 'provider', 'created_at',
         'started_at', 'completed_at', 'current_stage', 'attempts', 'candidate_id', 'control')} | {
         'error': 'Engineering job requires attention' if job.get('error') else None,
         'failure': project_failure(job.get('failure')),
-        'failures': [project_failure(item) for item in job.get('failures', [])[-MAX_ATTEMPTS:]],
+        'failures': failures, 'failure_count': failure_count,
+        'failures_truncated': failure_count > len(failures),
         'blocker': control or ((job.get('failure') or {}).get('code') if job.get('failure') and job['status'] in {'blocked', 'failed'} else
             'retry_limit' if attempts >= MAX_ATTEMPTS and job['status'] == 'failed'
             else 'execution_not_passed' if job['status'] in {'blocked', 'failed'}

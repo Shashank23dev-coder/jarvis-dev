@@ -179,6 +179,7 @@ def project(record):
     from .candidate_provider import project_failure, project_provider_results
     projected = dict(id=record['id'], state=record['state'], busy=bool(record.get('busy')),
                 failure=project_failure(record.get('failure')),
+                failures=[project_failure(item) for item in record.get('failures', [])[-8:]],
                 provider_results=project_provider_results(record.get('provider_results', [])),
                 diff_summary=summary, files_changed=[], test_results=tests,
                 reviewer_result=dict(verdict=verdict, summary='Host review completed; detailed evidence remains in dev.') if verdict else None,

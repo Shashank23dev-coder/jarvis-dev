@@ -19,7 +19,10 @@ without changing owner authorization. Provider installation/routing is host-owne
 States are queued, planning, implementing, testing, reviewing,
 waiting_for_approval, completed, blocked and failed. Success stops at
 waiting_for_approval. Candidate apply and deployment are separate human gates.
-Three explicit worker attempts are allowed. Each asynchronous job attempt has a
+Three worker attempts are initially allowed. After exhaustion, an authenticated
+owner resume grants exactly one additional bounded attempt, recorded as
+`owner_retry_authorized`. Total attempts and prior evidence are never reset;
+lease recovery cannot renew its own budget. Each asynchronous job attempt has a
 900-second ceiling, at most two implementation proposals, four total provider
 turns, eight changed files, 400 changed lines and 64 internal operations. A
 930-second lease and inherited flock prevent overlap, including after crashes.
@@ -44,6 +47,9 @@ code, retryability, stage, attempt and a fixed sanitized reason/recovery hint. A
 quota, rate limiting, timeout, invalid response and provider availability are
 distinct. Raw errors, paths, logs, credentials and reasoning never cross chat.
 Failure history survives resumption and subsequent success.
+The job projection includes the latest 16 failures, independent of attempt
+budgets, with `failure_count` and `failures_truncated`. Complete history remains
+in the owner-inspectable development database.
 
 `inspect_engineering_runtime` is a read-only tool returning `worker` (active,
 inactive or unknown), `observed_at` (Unix time or null), `supported` and up to five
@@ -59,6 +65,19 @@ For runtime capability awareness, use the actual bound tool registry names,
 and provider route, and `core.deployment_status.configured_inspector().status()`
 for the sanitized production observation. Production revision is the controller's
 last observed revision. Do not infer capabilities from old chats or file names.
+The revision is `status()['current']['revision']`, with `observed_at` identifying
+the observation. Runtime job entries use `id`, `candidate_id`, `status`, `failure`
+and timestamped `history`, not `job_id`. `runtime(candidate_tools)` returns a
+Pydantic result; call `.model_dump()` for a mapping. It requires owner authority;
+without it the self-state layer must report unavailable job/worker observations.
+Provider configuration and availability are distinct: the current-turn Brain
+marker records the selected route, and provider failures describe past attempts.
+No failures does not prove availability. Unknown must remain unknown.
+
+Existing candidate edit targets must be present in the supplied inspection
+context. A traceback is not permission to replace an unseen file. New files in
+approved existing directories remain allowed. Failed tests and failed reviews
+persist normalized failure metadata on both candidate and job records.
 
 Back up the private job database and candidate storage together. The executable
 worker and broker always pin the configured jarvis-dev checkout. Installation and

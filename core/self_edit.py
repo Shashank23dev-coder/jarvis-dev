@@ -374,6 +374,7 @@ class SelfEditService:
             self._engineering(context)
             return
         proposal = self._ask({'goal': self.record['goal'], 'files': context}, PROPOSE, Proposal)
+        self._validate_proposal_scope(proposal, context)
         self._tick('apply_edits')
         self._editor().apply([edit.model_dump() for edit in proposal.edits], self._original)
         self.record['state'] = 'needs_revision'
@@ -382,6 +383,13 @@ class SelfEditService:
             raise ToolDenied('Proposal made no changes')
         self._tests()
         self._review()
+
+    def _validate_proposal_scope(self, proposal, context):
+        # A replacement requires the complete inspected file, not a guess based
+        # on a traceback. Newly created approved paths are still permitted.
+        for edit in proposal.edits:
+            if edit.path in self.record['manifest'] and edit.path not in context:
+                raise ToolDenied('Existing edit target was not inspected')
 
     def _engineering(self, context):
         """Baseline and at most two proposals; all execution uses existing gates."""
@@ -401,8 +409,12 @@ class SelfEditService:
             raise ToolDenied('Baseline changed during tests')
         self.store.save(self.record, 'baseline_finished')
         if result.returncode not in (0, 1) or result.timed_out or result.truncated:
+            from .candidate_provider import failure_evidence
             improvement['baseline_comparison']['result'] = 'inconclusive'
             self.record['error'] = 'Baseline tests did not complete; comparison unavailable.'
+            self.record['failure'] = failure_evidence(improvement['implementation_provider'],
+                'tests_failed', 'testing', self.record.get('source_context', {}).get('attempt', 1))
+            self.store.save(self.record, 'tests_failed')
             return
         for attempt in range(2):
             # Reserve a provider turn for independent review of the final diff.
@@ -418,6 +430,7 @@ class SelfEditService:
             previous_fingerprint = self.record.get('fingerprint') or digest(
                 json.dumps(self.record['manifest'], sort_keys=True).encode())
             proposal = self._ask(payload, PROPOSE, Proposal)
+            self._validate_proposal_scope(proposal, context)
             if improvement.get('scope') == 'documentation' and any(
                     not edit.path.startswith('docs/') or Path(edit.path).suffix not in {'.md', '.txt'}
                     for edit in proposal.edits):
@@ -512,10 +525,16 @@ class SelfEditService:
             self.record['test_results'].append(evidence)
             self.store.save(self.record, 'test_finished')
             if result.returncode or result.timed_out or evidence['truncated']:
+                from .candidate_provider import failure_evidence
+                self.record['failure'] = failure_evidence(
+                    self.record.get('improvement', {}).get('implementation_provider', 'openai'),
+                    'tests_failed', 'testing', self.record.get('source_context', {}).get('attempt', 1))
+                self.store.save(self.record, 'tests_failed')
                 return
         if fingerprint != self._diff():
             raise ToolDenied('Candidate changed during tests')
         self.record['tested_fingerprint'] = fingerprint
+        self.record['failure'] = None
         self.store.save(self.record, 'tests_passed')
 
     def _review(self):
@@ -539,7 +558,10 @@ class SelfEditService:
             self._compare_baseline()
             candidate['baseline_comparison'] = self.record['improvement']['baseline_comparison']
             if candidate['baseline_comparison']['result'] in {'not_run', 'not_compared', 'inconclusive', 'regressed'}:
-                self.record.update(state='needs_revision', reviewer_result=None)
+                from .candidate_provider import failure_evidence
+                self.record.update(state='needs_revision', reviewer_result=None, stage='reviewing',
+                    failure=failure_evidence('openai', 'review_failed', 'reviewing',
+                        self.record.get('source_context', {}).get('attempt', 1)))
                 self.store.save(self.record, 'review_requires_baseline_comparison')
                 return
         review = self._ask({'candidate': candidate,
@@ -553,6 +575,9 @@ class SelfEditService:
         self.record.update(state=review.verdict, reviewer_result=review.model_dump(),
                            reviewed_at=timestamp(), reviewed_fingerprint=fingerprint,
                            reviewed_diff_hash=digest(self.record['diff'].encode()))
+        from .candidate_provider import failure_evidence
+        self.record['failure'] = None if review.verdict == 'passed' else failure_evidence(
+            'openai', 'review_failed', 'reviewing', self.record.get('source_context', {}).get('attempt', 1))
         self.store.save(self.record, 'review_finished')
 
     def _work(self, candidate_id, action):
@@ -574,8 +599,8 @@ class SelfEditService:
             else:
                 raise ValueError('Unknown candidate operation')
         except Exception as exc:
-            from .candidate_provider import failure_evidence, execution_error_code, FAILURES
-            failure = self.record.get('failure') or failure_evidence(
+            from .candidate_provider import ProviderFailure, failure_evidence, execution_error_code, FAILURES
+            failure = (self.record.get('failure') if isinstance(exc, ProviderFailure) else None) or failure_evidence(
                 self.record.get('improvement', {}).get('implementation_provider', 'openai'),
                 execution_error_code(exc), self.record.get('stage', 'planning'),
                 self.record.get('source_context', {}).get('attempt', 1))

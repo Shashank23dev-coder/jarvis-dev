@@ -37,6 +37,44 @@ def model(payload, instructions, timeout):
     return dict(edits=[dict(path='src/app.py', content='value = 2\n')])
 
 
+@pytest.mark.parametrize('engineering', [False, True])
+def test_proposal_cannot_replace_uninspected_existing_test(setup, engineering):
+    source, _, factory = setup
+    original = (source / 'tests/test_app.py').read_text()
+    def author(*args):
+        return dict(edits=[dict(path='tests/test_app.py', content='def test_fake(): pass\n')])
+    service = factory(model=author, tester=run_checks)
+    candidate = (service.engineer('Fix value', **ARGS) if engineering else
+                 service.start('Fix value', ARGS['inspect_paths'], ARGS['targeted_tests']))
+    assert candidate['state'] == 'rejected'
+    assert candidate['error'] == 'Existing edit target was not inspected'
+    assert candidate['failure']['code'] == 'candidate_policy_denied'
+    assert Path(candidate['worktree'], 'tests/test_app.py').read_text() == original
+    assert (source / 'tests/test_app.py').read_text() == original
+
+
+@pytest.mark.parametrize('phase', ['tests', 'review'])
+def test_unsuccessful_evidence_has_normalized_stage_and_provider(setup, phase):
+    _, _, factory = setup
+    count = 0
+    def author(payload, instructions, timeout):
+        nonlocal count
+        if instructions == REVIEW:
+            return dict(verdict='needs_revision', summary='Missing required behavior.')
+        count += 1
+        return dict(edits=[dict(path='src/app.py', content=f'value = 2\n# attempt {count}\n')])
+    def checks(*args):
+        return CommandResult(('pytest',), 1 if phase == 'tests' else 0, 'Assertion result')
+    candidate = factory(model=author, tester=checks).engineer('Fix value', **ARGS)
+    failure = candidate['failure']
+    assert failure['code'] == ('tests_failed' if phase == 'tests' else 'review_failed')
+    assert failure['stage'] == ('testing' if phase == 'tests' else 'reviewing')
+    assert failure['provider'] == ('codex' if phase == 'tests' else 'openai')
+    assert failure['retryable'] is True and failure['attempt'] == 1
+    assert len(candidate['failures']) == 2
+    assert candidate['failures'][0] == candidate['failures'][1]
+
+
 def test_engineering_isolated_baseline_and_durable_metadata(setup):
     source, database, factory = setup
     before = tree_bytes(source)
@@ -89,6 +127,9 @@ def test_failed_candidate_is_revised_with_evidence(setup, failure):
         return CommandResult(('pytest',), 0 if value == 'value = 2' else 1, 'Assertion result')
     candidate = factory(model=author, tester=checks).engineer('Fix the value', **ARGS)
     assert candidate['state'] == 'passed', candidate
+    assert candidate['failure'] is None
+    assert candidate['failures'][0]['code'] == ('tests_failed' if failure == 'tests' else 'review_failed')
+    assert project(project(candidate))['failures'][0]['code'] == candidate['failures'][0]['code']
     assert candidate['iterations'] <= 4 and candidate['tool_calls'] <= 64
     attempts = candidate['improvement']['failures_revisions']
     assert [item['state'] for item in attempts] == ['needs_revision', 'passed']
@@ -148,7 +189,7 @@ def test_revisions_keep_inspection_redacted_and_detect_unchanged_failed_diff(set
         assert candidate['provider_results'][-1]['status'] == 'no_changes'
 
 
-@pytest.mark.parametrize('kind', ['protected', 'provider', 'review_rejected', 'baseline_timeout', 'baseline_error'])
+@pytest.mark.parametrize('kind', ['protected', 'provider', 'review_rejected', 'baseline_timeout', 'baseline_error', 'baseline_truncated'])
 def test_engineering_failures_never_earn_approval(setup, kind):
     source, _, factory = setup
     before = tree_bytes(source)
@@ -163,13 +204,17 @@ def test_engineering_failures_never_earn_approval(setup, kind):
     def tests(repository, phase, paths):
         if phase == 'baseline' and kind.startswith('baseline_'):
             return CommandResult(('pytest',), 2 if kind == 'baseline_error' else 0, '',
-                                 timed_out=kind == 'baseline_timeout')
+                                 timed_out=kind == 'baseline_timeout', truncated=kind == 'baseline_truncated')
         return run_checks(repository, phase, paths)
     candidate = factory(model=author, tester=tests).engineer('Fix the value', **ARGS)
     assert candidate['state'] != 'passed'
     assert candidate['improvement']['confidence'] == 'insufficient'
     assert 'PRIVATE_PROVIDER_EXCEPTION' not in json.dumps(candidate)
     assert tree_bytes(source) == before
+    if kind.startswith('baseline_'):
+        assert candidate['failure']['code'] == 'tests_failed'
+        assert candidate['failure']['stage'] == 'testing'
+        assert candidate['failures'] == [candidate['failure']]
 
 
 def test_engineering_budget_and_shared_one_candidate_limit(setup):
@@ -335,6 +380,21 @@ def test_rerun_and_tamper_invalidate_improvement_review(setup):
     assert inspected['state'] == 'needs_revision'
     assert inspected['improvement']['review_result'] is None
     assert inspected['improvement']['confidence'] == 'insufficient'
+
+
+def test_review_gate_failure_is_distinct_from_passing_tests(setup):
+    _, _, factory = setup
+    service = factory(model=model, tester=run_checks)
+    candidate = service.engineer('Fix value', **ARGS)
+    record = service.store.get(candidate['id'], internal=True)
+    record['improvement']['baseline_comparison']['baseline']['timed_out'] = True
+    service.store.save(record)
+    reviewed = service.review(candidate['id'])
+    assert reviewed['state'] == 'needs_revision'
+    assert reviewed['tested_fingerprint'] == reviewed['fingerprint']
+    assert reviewed['failure']['code'] == 'review_failed'
+    assert reviewed['failure']['stage'] == 'reviewing'
+    assert reviewed['reviewer_result'] is None
 
 
 @pytest.mark.skipif(os.environ.get('JARVIS_DOCKER_TESTS') != '1', reason='Opt-in Docker integration')

@@ -39,7 +39,7 @@ class Broker:
 
     def execute(self, raw, *, authority=None):
         from .engineering_authority import current_owner, require_owner
-        require_owner(authority if authority is not None else current_owner.get())
+        authority = require_owner(authority if authority is not None else current_owner.get())
         self.check_source()
         request = Request.model_validate(raw).checked()
         if request.action == 'runtime':
@@ -56,7 +56,7 @@ class Broker:
             job = jobs.get(request.arguments['job_id'])
             operation = request.action.removeprefix('job_')
             if operation != 'inspect':
-                job = jobs.control(job['id'], operation)
+                job = jobs.control(job['id'], operation, authority=authority)
             return project_job(job)
         context = dict(source='production_chat', task_id=request.task_id,
                        conversation_id=request.conversation_id, request_id=request.request_id)

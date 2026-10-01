@@ -44,10 +44,17 @@ class CandidateStore:
                 return None
             record = json.loads(row['record'])
             if recover and row['busy'] and record.get('lease_until', float('inf')) < time.time():
+                from .candidate_provider import failure_evidence
+                # Older records may predate the durable failure-history field.
+                self.save(record)
                 record.update(state='rejected', error='Previous worker was interrupted.',
-                              tested_fingerprint=None, reviewer_result=None)
-                db.execute('UPDATE candidates SET busy=0,state=?,record=? WHERE id=?',
-                           (record['state'], json.dumps(record), candidate_id))
+                              tested_fingerprint=None, reviewer_result=None,
+                              failure=failure_evidence(
+                                  record.get('improvement', {}).get('implementation_provider', 'openai'),
+                                  'worker_failed', record.get('stage', 'planning'),
+                                  record.get('source_context', {}).get('attempt', 1)))
+                db.execute('UPDATE candidates SET busy=0 WHERE id=?', (candidate_id,))
+                self.save(record, 'candidate_interrupted')
                 row = {'busy': 0}
             record['busy'] = bool(row['busy'])
             if record.get('improvement'):
@@ -61,6 +68,14 @@ class CandidateStore:
             return record
 
     def save(self, record, event=None):
+        if record.get('failure'):
+            from .candidate_provider import FailureEvidence, project_failure
+            normalized = project_failure(record['failure'])
+            failure = {key: normalized[key] for key in FailureEvidence.model_fields}
+            failures = record.setdefault('failures', [])
+            if event in {'tests_failed', 'review_finished', 'candidate_failed', 'proposal_no_changes',
+                         'worker_stopped', 'candidate_rejected', 'candidate_interrupted'} or failure not in failures:
+                failures.append(failure)
         data = {key: value for key, value in record.items() if key not in {'busy', 'events'}}
         with self.database.transaction() as db:
             db.execute('UPDATE candidates SET state=?,record=? WHERE id=?',
@@ -76,7 +91,8 @@ class CandidateStore:
                     if job['lease_owner'] and job['lease_owner'] != record['source_context'].get('lease_owner'):
                         raise ValueError('Engineering lease mismatch')
                     stage = ('testing' if event.startswith(('test', 'baseline')) else
-                             'reviewing' if event.startswith('review') or event == 'independent_review' else
+                             'reviewing' if event in {'review_finished', 'independent_review',
+                                                     'review_requires_baseline_comparison'} else
                              'implementing' if event in {'generate_proposal', 'apply_edits'} else None)
                     if stage and job['lease_owner']:
                         job.update(status=stage, current_stage=stage)
@@ -89,14 +105,8 @@ class CandidateStore:
 
     def claim(self, candidate_id):
         with self.database.transaction() as db:
+            self.get(candidate_id, internal=True)
             row = db.execute('SELECT record,busy FROM candidates WHERE id=?', (candidate_id,)).fetchone()
-            if row and row['busy']:
-                record = json.loads(row['record'])
-                if record.get('lease_until', float('inf')) < time.time():
-                    record.update(state='rejected', error='Previous worker was interrupted.',
-                                  tested_fingerprint=None, reviewer_result=None)
-                    db.execute('UPDATE candidates SET busy=0,state=?,record=? WHERE id=?',
-                               (record['state'], json.dumps(record), candidate_id))
             if row:
                 record = json.loads(db.execute('SELECT record FROM candidates WHERE id=?', (candidate_id,)).fetchone()[0])
                 record['lease_until'] = time.time() + 301

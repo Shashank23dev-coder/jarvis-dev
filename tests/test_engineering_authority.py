@@ -20,6 +20,107 @@ from test_candidate_bridge import request
 pytestmark = pytest.mark.usefixtures('owner')
 
 
+def test_owner_resume_renews_only_one_attempt_without_resetting_job(setup):
+    source, db, factory = setup
+    jobs = EngineeringJobs(db)
+    job = enqueue(db)
+    for attempt in range(3):
+        jobs.claim('worker')
+        jobs.finish(job['id'], 'worker')
+        if attempt < 2:
+            jobs.control(job['id'], 'resume')
+    before = jobs.get(job['id'])
+    for fake in (None, OwnerDevAuthority().model_dump()):
+        with pytest.raises(ToolDenied):
+            jobs.control(job['id'], 'resume', authority=fake)
+    assert jobs.get(job['id']) == before
+    assert project_job(before)['recovery']['retry_available'] is True
+    resumed = Broker(factory(), source=source).execute(
+        request('job_resume', 'Continue this objective', dict(job_id=job['id'])))
+    assert resumed['status'] == 'queued' and resumed['attempts'] == 3
+    saved = jobs.get(job['id'])
+    assert saved['attempt_limit'] == 4
+    assert saved['goal'] == job['goal'] and saved['source'] == job['source']
+    assert any(e['event'] == 'owner_retry_authorized' for e in saved['history'])
+    claimed = jobs.claim('fourth', now=0)
+    assert claimed['attempts'] == 4
+    assert project_job(project_job(jobs.get(job['id'])))['attempts'] == 4
+    # A crashed fourth attempt cannot authorize a fifth attempt for itself.
+    assert jobs.claim('crash-recovery', now=931) is None
+    assert jobs.get(job['id'])['status'] == 'failed'
+    assert jobs.get(job['id'])['attempts'] == 4
+
+
+def test_successful_job_preserves_revised_candidate_failure_history(setup):
+    from core.engineering_worker import EngineeringWorker
+    from core.self_edit import REVIEW
+    from test_engineering import run_checks
+    source, db, factory = setup
+    enqueue(db)
+    turns = []
+    def author(payload, instructions, timeout):
+        if instructions == REVIEW:
+            return dict(verdict='passed', summary='Independent review passed.')
+        turns.append(payload)
+        return dict(edits=[dict(path='src/app.py', content='value = 3\n' if len(turns) == 1 else 'value = 2\n')])
+    result = EngineeringWorker(factory(model=author, tester=run_checks), source=source).once()
+    assert result['status'] == 'waiting_for_approval' and result['failure'] is None
+    assert result['failures'][0]['code'] == 'tests_failed'
+    assert project_job(result)['failures'][0]['stage'] == 'testing'
+
+
+def test_failure_projection_is_independent_of_retry_budget_and_reports_truncation(setup):
+    job = enqueue(setup[1])
+    job['attempts'] = 20
+    job['failures'] = [failure_evidence('codex', 'tests_failed', 'testing', i) for i in range(1, 21)]
+    projected = project_job(job)
+    assert projected['failure_count'] == 20 and projected['failures_truncated']
+    assert len(projected['failures']) == 16
+    assert projected['failures'][0]['attempt'] == 5 and projected['failures'][-1]['attempt'] == 20
+    assert project_job(projected) == projected
+    job['failures'] = job['failures'][:4]
+    projected = project_job(job)
+    assert projected['failure_count'] == 4 and not projected['failures_truncated']
+    assert len(projected['failures']) == 4
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_owner_recovers_exhausted_job_with_expired_candidate_lease(setup, legacy):
+    import time
+    from core.candidate_store import CandidateStore
+    _, db, factory = setup
+    jobs = EngineeringJobs(db)
+    job = enqueue(db)
+    for _ in range(3):
+        claimed = jobs.claim('worker', now=0)
+        if claimed['attempts'] < 3:
+            jobs.finish(job['id'], 'worker')
+            jobs.control(job['id'], 'resume')
+    candidates = CandidateStore(db)
+    candidate = candidates.create(job['goal'], [], [], source_context=dict(
+        engineering_job_id=job['id'], lease_owner='worker', attempt=3))
+    candidates.claim(candidate['id'])
+    record = candidates.get(candidate['id'], internal=True)
+    record['lease_until'] = time.time() - 1
+    record['stage'] = 'testing'
+    record['failure'] = failure_evidence('codex', 'tests_failed', 'testing', 3)
+    candidates.save(record)
+    if legacy:
+        with db.transaction() as connection:
+            connection.execute("UPDATE candidates SET record=json_remove(record,'$.failures') WHERE id=?", (candidate['id'],))
+    assert jobs.claim('recovery', now=931) is None
+    recovered = jobs.get(job['id'])
+    assert recovered['status'] == recovered['current_stage'] == 'failed'
+    assert recovered['failure']['code'] == 'worker_failed'
+    assert any(f['code'] == 'tests_failed' and f['attempt'] == 3 for f in recovered['failures'])
+    candidate = candidates.get(candidate['id'])
+    assert candidate['failure']['code'] == 'worker_failed' and candidate['failure']['attempt'] == 3
+    assert any(e['event'] == 'candidate_interrupted' for e in candidate['events'])
+    assert jobs.control(job['id'], 'resume', authority=OwnerDevAuthority())['status'] == 'queued'
+    assert not candidates.get(candidate['id'])['busy']
+    assert jobs.claim('new')['attempts'] == 4
+
+
 @pytest.mark.parametrize('value', ['short', ' ' * 40, 'a' * 513, 'a' * 31 + '\x00'])
 def test_development_owner_tokens_require_production_strength(value):
     from core.deployment import Settings
