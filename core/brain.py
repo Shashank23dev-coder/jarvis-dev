@@ -43,19 +43,21 @@ class JarvisBrain:
         task_store.add_brain_runtime(task_id, enabled=self.settings.enabled,
                                     selected_provider=(provider.name if provider else None)
                                     if self.settings.enabled else 'legacy')
-        session = _ProviderSession(provider, self.runner.model, task_store, task_id, enabled=self.settings.enabled)
+        session = _ProviderSession(provider, self.runner.model, task_store, task_id, enabled=self.settings.enabled,
+                                   configured=tuple(self.providers.providers), route=self.settings.provider)
         if not self.settings.enabled:
-            return self.runner.run(goal, task_id=task_id, task_store=task_store, model=session.turn)
+            return self.runner.run(goal, task_id=task_id, task_store=task_store, model=session.turn, runtime_session=session)
 
         return self.runner.run(goal, task_id=task_id, task_store=task_store,
-                               model=session.turn, context_builder=self.assemble_context, engineering=True)
+                               model=session.turn, context_builder=self.assemble_context, engineering=True, runtime_session=session)
 
 
 class _ProviderSession:
     """Task-local routing/fallback state. Never restart or replay the agent loop."""
-    def __init__(self, provider, legacy, store, task_id, *, enabled=True):
+    def __init__(self, provider, legacy, store, task_id, *, enabled=True, configured=(), route=None):
         self.provider, self.legacy = provider, legacy
         self.enabled = enabled
+        self.configured, self.route, self.self_state = configured, route, None
         self.store, self.task_id = store, task_id
         self.iteration = 0
         self.fallback_reason = ('brain_disabled' if not enabled else
@@ -74,7 +76,8 @@ class _ProviderSession:
             try:
                 # A failed adapter cannot corrupt the transcript or tool schemas
                 # subsequently passed to the legacy transport.
-                result = self.provider.complete(ProviderRequest(**deepcopy(kwargs)))
+                request = self.self_state.enrich(kwargs) if self.self_state else kwargs
+                result = self.provider.complete(ProviderRequest(**deepcopy(request)))
                 if not isinstance(result, ProviderTurn):
                     raise ValueError('Invalid provider result')
             except Exception:
@@ -98,6 +101,8 @@ class _ProviderSession:
             legacy_kwargs['input'] = [item for index, item in enumerate(legacy_kwargs['input'])
                                       if index >= self.foreign_prefix_length or item.get('type') != 'reasoning']
         try:
+            if self.self_state:
+                legacy_kwargs = self.self_state.enrich(legacy_kwargs)
             result = self.legacy(**legacy_kwargs)
         except Exception:
             self.record('legacy', reason, 'failed')

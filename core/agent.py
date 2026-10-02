@@ -75,7 +75,7 @@ class AgentRunner:
 
     def run(self, goal: str, *, task_id: str, task_store: TaskStore,
             model=None, context_builder=assemble_context, engineering=False,
-            engineering_authorizer=None) -> AgentOutcome:
+            engineering_authorizer=None, runtime_session=None) -> AgentOutcome:
         if task_store.get_task(task_id) is None:
             raise ValueError("Agent execution requires an existing task")
         task_store.set_status(task_id, "running")
@@ -96,6 +96,12 @@ class AgentRunner:
         from .brain_status import BrainStatusTools
         brain_status = BrainStatusTools(task_store, task_id)
         registry = brain_status.bind(registry)
+        from .self_state import SelfState
+        awareness = SelfState(task_store, task_id, candidates,
+                              configured=runtime_session.configured if runtime_session else None,
+                              route=runtime_session.route if runtime_session else None)
+        if runtime_session is not None:
+            runtime_session.self_state = awareness
         seen_calls = set()
         calls = iterations = 0
         reflection = TaskReflection()
@@ -133,8 +139,9 @@ class AgentRunner:
                 if experiences and experiences['results'] and not retrieval_tracked:
                     attempt_capture(lambda: task_store.experiences.evaluation.track(task_id, experiences['results']))
                     retrieval_tracked = True
-                turn = request_turn(input=history.copy(), tools=registry.model_tools(),
-                                  instructions=instructions, allow_tools=allow_tools)
+                request = dict(input=history.copy(), tools=registry.model_tools(),
+                               instructions=instructions, allow_tools=allow_tools)
+                turn = request_turn(**(awareness.enrich(request) if runtime_session is None else request))
                 if turn.status != "completed":
                     return finish("failed", "The model did not complete its response.", "model_incomplete")
                 if not isinstance(turn.output, list) or len(turn.output) > 32:
