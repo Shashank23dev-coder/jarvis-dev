@@ -125,7 +125,8 @@ def model_request(payload, instructions, timeout, *, provider='openai'):
     finally:
         # CLI providers can start their own process groups. Kill descendants as
         # well as the transport worker when the outer request budget expires.
-        SelfEditService._kill_worker(process)
+        if process.returncode is None:
+            SelfEditService._kill_worker(process)
         process.wait()
         process.stdin.close()
         process.stdout.close()

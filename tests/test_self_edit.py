@@ -428,13 +428,16 @@ def test_supervisor_kills_detached_test_descendants(setup, tmp_path):
     def tester(*args):
         import sys
         subprocess.Popen([sys.executable, '-c',
-                          "import time,pathlib; time.sleep(1.5); pathlib.Path(" + repr(str(marker)) + ").write_text('late')"],
+                          "import time,pathlib; time.sleep(4); pathlib.Path(" + repr(str(marker)) + ").write_text('late')"],
                          start_new_session=True)
         time.sleep(10)
-    candidate = start(factory(tester=tester, limits=Limits(seconds=0.7)))
+    # Leave enough time for Git/worktree setup under full-suite load. The child
+    # write remains later than the entire workflow deadline, even if started
+    # immediately, and the final wait covers the latest possible child launch.
+    candidate = start(factory(tester=tester, limits=Limits(seconds=3)))
     assert any(event['event'] == 'test_targeted' for event in candidate['events']), candidate
     assert candidate['state'] == 'rejected'
-    time.sleep(1)
+    time.sleep(4.25)
     assert not marker.exists()
 
 

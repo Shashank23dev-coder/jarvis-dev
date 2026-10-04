@@ -304,3 +304,16 @@ def test_evidence_with_timezone_offset_uses_utc_age(tmp_path):
     now[0] = '2026-10-04T00:01:00+00:00'
     assert r.state('codex').current_usability == 'available'
     assert r.snapshot()['last_successful_route']['stage'] == 'implementing'
+
+
+def test_completed_transport_is_reaped_without_signalling_exited_pid(monkeypatch):
+    from core import self_edit
+    import sys
+    original = self_edit.subprocess.Popen
+    def transport_process(arguments, **kwargs):
+        return original([sys.executable, '-c',
+            'import json; print(json.dumps({"ok": True, "text": "{}"}))'], **kwargs)
+    monkeypatch.setattr(self_edit.subprocess, 'Popen', transport_process)
+    monkeypatch.setattr(self_edit.SelfEditService, '_kill_worker',
+                       lambda _: pytest.fail('Completed transport must not receive process signals'))
+    assert self_edit.model_request({}, '', 2, provider='claude_code') == {}
