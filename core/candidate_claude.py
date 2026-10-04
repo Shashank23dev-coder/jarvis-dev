@@ -1,0 +1,121 @@
+"""Claude Code is a data-only provider, never an editor or shell executor."""
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import tempfile
+
+from .candidate_provider import ProviderFailure
+
+
+def claude_executable():
+    # User installs may be absent from a service's PATH.
+    found = shutil.which('claude')
+    user_install = Path.home() / '.local/bin/claude'
+    return found or (str(user_install) if user_install.is_file() and os.access(user_install, os.X_OK) else None)
+
+
+def run_claude(arguments, *, timeout, prompt=None):
+    executable = claude_executable()
+    if not executable:
+        raise ProviderFailure('claude_code', 'provider_unavailable')
+    # No source cwd, project settings, CLI transcripts, stderr or raw auth data
+    # are retained. Stdout spools to disk so an oversized response cannot fill RAM.
+    with tempfile.TemporaryDirectory(prefix='jarvis-claude-') as directory, tempfile.TemporaryFile() as output:
+        process = None
+        try:
+            process = subprocess.Popen([executable, *arguments], cwd=directory,
+                stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
+                stdout=output, stderr=subprocess.DEVNULL, start_new_session=True)
+            process.communicate(prompt.encode() if prompt is not None else None, timeout=timeout)
+            output.seek(0)
+            data = output.read(256001)
+            if len(data) > 256000:
+                raise ProviderFailure('claude_code', 'provider_output_limit')
+            return process.returncode, data
+        except subprocess.TimeoutExpired:
+            raise ProviderFailure('claude_code', 'provider_timeout') from None
+        except OSError:
+            raise ProviderFailure('claude_code', 'provider_unavailable') from None
+        finally:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+                if process.stdin:
+                    process.stdin.close()
+
+
+def probe_claude(timeout=5):
+    if not claude_executable():
+        return 'unavailable'
+    try:
+        code, data = run_claude(['auth', 'status'], timeout=timeout)
+        status = json.loads(data)
+        if isinstance(status, dict) and status.get('loggedIn') is False:
+            return 'not_authenticated'
+        # Unsupported auth status, malformed output, and successful login all
+        # leave remote usability unknown. Never infer authentication from code 1.
+        return 'unknown'
+    except ProviderFailure as exc:
+        return 'unavailable' if exc.code == 'provider_unavailable' else 'unknown'
+    except (ValueError, UnicodeError):
+        return 'unknown'
+
+
+def claude_failure_code(value):
+    """Classify CLI error output in memory; only closed codes cross the boundary."""
+    text = str(value).lower()[:256000]
+    if any(term in text for term in ('not logged in', 'not authenticated', 'authentication_error',
+                                    'invalid api key', 'please run /login', 'login required')):
+        return 'provider_authentication'
+    if any(term in text for term in ('rate_limit', 'rate limit', 'usage limit', 'quota',
+                                    'hit your limit', 'credit balance', 'insufficient credits')):
+        return 'provider_quota'
+    return 'provider_invocation_failed'
+
+
+def claude_request(payload, instructions, timeout):
+    # Authentication is checked per invocation, including after a stale success.
+    import time
+    deadline = time.monotonic() + timeout
+    state = probe_claude(min(5, timeout))
+    if state in {'not_authenticated', 'unavailable'}:
+        raise ProviderFailure('claude_code', 'provider_authentication' if state == 'not_authenticated' else 'provider_unavailable')
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ProviderFailure('claude_code', 'provider_timeout')
+    arguments = ['-p', '--output-format', 'json', '--tools', '',
+        '--permission-mode', 'default', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+        '--disallowedTools', 'mcp__*', '--setting-sources', '',
+        '--settings', '{"disableAllHooks":true}', '--disable-slash-commands',
+        '--no-session-persistence', '--max-turns', '1', '--system-prompt', instructions]
+    code, data = run_claude(arguments, timeout=remaining, prompt=json.dumps(payload))
+    try:
+        envelope = json.loads(data)
+    except (ValueError, UnicodeError):
+        raise ProviderFailure('claude_code', claude_failure_code(data) if code else 'provider_invalid_response') from None
+    if not isinstance(envelope, dict):
+        raise ProviderFailure('claude_code', 'provider_invalid_response')
+    if code or envelope.get('is_error'):
+        raise ProviderFailure('claude_code', claude_failure_code(envelope))
+    if envelope.get('type') != 'result' or not isinstance(envelope.get('result'), str):
+        raise ProviderFailure('claude_code', 'provider_invalid_response')
+    return envelope['result']
+
+
+class ClaudeCodeProvider:
+    name = 'claude_code'
+
+    def __init__(self, transport):
+        self.transport = transport
+
+    def probe(self, timeout):
+        return probe_claude(timeout)
+
+    def complete(self, payload, instructions, timeout):
+        return self.transport(payload, instructions, timeout, provider=self.name)

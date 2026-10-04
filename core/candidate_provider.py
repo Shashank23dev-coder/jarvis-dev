@@ -1,7 +1,6 @@
 """Trusted engineering adapters. Providers return data, never execute edits.
 
-Keep this module under the candidate protected-path boundary. A future Claude
-Code adapter must implement this contract without acquiring filesystem authority.
+Keep adapters under the candidate protected-path boundary, without filesystem authority.
 """
 from dataclasses import dataclass
 from typing import Protocol
@@ -15,6 +14,7 @@ FAILURES = {
     'provider_quota': (False, 'Restore provider quota, then resume the job.'),
     'provider_rate_limit': (True, 'Wait for the rate limit to clear, then resume.'),
     'provider_unavailable': (True, 'Check provider availability, then resume.'),
+    'provider_invocation_failed': (True, 'Check the provider invocation, then resume.'),
     'provider_timeout': (True, 'Resume with a fresh bounded provider budget.'),
     'provider_invalid_response': (True, 'Retry the structured proposal or review.'),
     'provider_no_changes': (True, 'The proposal made no changes; request a concrete implementation.'),
