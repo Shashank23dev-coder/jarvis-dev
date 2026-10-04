@@ -123,10 +123,9 @@ def model_request(payload, instructions, timeout, *, provider='openai'):
     except subprocess.TimeoutExpired:
         raise ProviderFailure(provider, 'provider_timeout') from None
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        # CLI providers can start their own process groups. Kill descendants as
+        # well as the transport worker when the outer request budget expires.
+        SelfEditService._kill_worker(process)
         process.wait()
         process.stdin.close()
         process.stdout.close()
@@ -300,35 +299,41 @@ class SelfEditService:
             raise ToolDenied('Candidate iteration limit exceeded')
         self.record['iterations'] += 1
         self._tick('independent_review' if schema is Review else 'generate_proposal')
+        stage = 'reviewing' if schema is Review else 'implementing'
+        provider = ('openai' if schema is Review else
+                    self.record.get('improvement', {}).get('implementation_provider', 'openai'))
+        origin = 'operator_assisted' if self.model is not model_request else 'provider'
         if self.record.get('improvement') and self.model is model_request:
-            from .candidate_provider import EngineeringProviders
-            providers = EngineeringProviders.defaults(model_request)
-            provider = providers.reviewer if schema is Review else providers.select(
-                self.record['improvement']['implementation_provider'])
+            from .engineering_providers import EngineeringRegistry, RoutingBlocked
+            providers = EngineeringRegistry.defaults(self.store.database, model_request)
+            authors = {r['provider'] for r in self.record.get('provider_results', [])
+                       if r['stage'] == 'implementing' and r['status'] == 'applied'}
             try:
-                result = provider.complete(payload, instructions, min(120, self._check()))
+                result, provider = providers.complete(payload, instructions, min(120, self._check()),
+                    stage=stage, task_type=self.record['improvement'].get('scope', 'code'),
+                    exclude=authors if schema is Review else (), validate=schema.model_validate)
             except ProviderFailure as exc:
+                if isinstance(exc, RoutingBlocked):
+                    self.record['provider_blocker'] = exc.blocker
                 self.record['failure'] = failure_evidence(exc.provider, exc.code,
-                    'reviewing' if schema is Review else 'implementing',
+                    stage,
                     self.record.get('source_context', {}).get('attempt', 1))
                 raise
+            self.record['provider_blocker'] = None
+            self.record['improvement']['review_provider' if schema is Review else 'implementation_provider'] = provider
         else:
             result = self.model(payload, instructions, min(30, self._check()))
         self._check()
         try:
             parsed = schema.model_validate(result)
         except ValueError:
-            provider = ('openai' if schema is Review else
-                        self.record.get('improvement', {}).get('implementation_provider', 'openai'))
             self.record['failure'] = failure_evidence(provider, 'provider_invalid_response',
                 'reviewing' if schema is Review else 'implementing',
                 self.record.get('source_context', {}).get('attempt', 1))
             raise ProviderFailure(provider, 'provider_invalid_response') from None
         # Closed response evidence, never raw model text or rejected content.
-        provider = ('openai' if schema is Review else
-                    self.record.get('improvement', {}).get('implementation_provider', 'openai'))
         self.record.setdefault('provider_results', []).append(dict(
-            provider=provider, stage='reviewing' if schema is Review else 'implementing',
+            provider=provider, stage=stage, execution_origin=origin,
             attempt=self.record.get('source_context', {}).get('attempt', 1),
             iteration=self.record['iterations'], status='received',
             response_sha256=digest(parsed.model_dump_json().encode())))
@@ -577,7 +582,8 @@ class SelfEditService:
                            reviewed_diff_hash=digest(self.record['diff'].encode()))
         from .candidate_provider import failure_evidence
         self.record['failure'] = None if review.verdict == 'passed' else failure_evidence(
-            'openai', 'review_failed', 'reviewing', self.record.get('source_context', {}).get('attempt', 1))
+            self.record.get('improvement', {}).get('review_provider', 'openai'),
+            'review_failed', 'reviewing', self.record.get('source_context', {}).get('attempt', 1))
         self.store.save(self.record, 'review_finished')
 
     def _work(self, candidate_id, action):
@@ -588,6 +594,11 @@ class SelfEditService:
         self.originals = {}
         try:
             self._check()
+            if action in {'tests', 'review'}:
+                prior_fingerprint = self.record.get('fingerprint')
+                if prior_fingerprint and self._diff() != prior_fingerprint:
+                    self.record['execution_origin'] = 'operator_assisted'
+                    self.store.save(self.record, 'operator_worktree_change')
             if action == 'start':
                 self._prepare()
             elif action == 'tests':
@@ -760,7 +771,8 @@ class SelfEditService:
         if any(not isinstance(path, str) or not 1 <= len(path) <= 4096 for path in inspect_paths + targeted_tests):
             raise ValueError('Invalid candidate path length or type')
         record = self.store.create(goal, inspect_paths, targeted_tests, source_context=source_context)
-        record.update(source_root=str(self.source), limits=asdict(self.limits))
+        record.update(source_root=str(self.source), limits=asdict(self.limits),
+                      execution_origin='provider' if self.model is model_request else 'operator_assisted')
         if improvement is not None:
             record['improvement'] = improvement
         self.store.save(record)
@@ -823,6 +835,7 @@ class SelfEditService:
                                              max_files=self._effective_limits(record).files).validate()
                 if digest(json.dumps(current, sort_keys=True).encode()) != record['fingerprint']:
                     record.update(state='needs_revision', tested_fingerprint=None, reviewer_result=None,
+                                  execution_origin='operator_assisted',
                                   error='Worktree changed; tests and review must be repeated.')
                     self.store.save(record)
             except (ToolError, OSError):

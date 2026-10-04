@@ -22,6 +22,13 @@ ARGS = dict(inspect_paths=['src/app.py'], targeted_tests=['tests/test_app.py'])
 GOAL = 'Build Phase 1 of JarvisBrain\n- Do not change production behavior by default.\nDo not apply. Do not deploy.'
 
 
+@pytest.fixture(autouse=True)
+def isolated_runtime_reads(monkeypatch):
+    # These fixtures script candidate transport, including its clock. Background
+    # self-state reads are exercised separately in test_self_state.py.
+    monkeypatch.setattr('core.self_state.SelfState.engineering_runtime', lambda _: None)
+
+
 def request(action='create', goal=GOAL, arguments=None, **extra):
     return dict(request_id=str(uuid4()), task_id=str(uuid4()), conversation_id=str(uuid4()),
                 goal=goal, action=action, arguments=ARGS if arguments is None else arguments,
@@ -122,7 +129,8 @@ def test_ordinary_production_chat_routes_to_dev_and_audits(setup, tmp_path, monk
     assert tree_bytes(source) == before and tree_bytes(production) == untouched
     with monkeypatch.context() as host:
         host.setenv('JARVIS_MODE', 'development')
-        assert broker.execute(requests[0])['id'] == record['id']
+        creation = next(raw for raw in requests if raw['action'] == 'create')
+        assert broker.execute(creation)['id'] == record['id']
     assert 'PRIVATE SENTINEL' not in json.dumps(data)
     assert 'worktree' not in project(record)
 

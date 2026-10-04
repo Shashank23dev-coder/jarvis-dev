@@ -17,20 +17,26 @@ FAILURE_STATES = {'provider_authentication': 'not_authenticated',
                   'provider_unavailable': 'unavailable'}
 
 
+def utc_time(value):
+    parsed = datetime.fromisoformat(value)
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 class Observation(StrictModel):
     state: State
     observed_at: str
     source: Literal['configuration', 'claude_auth_status', 'provider_response', 'provider_failure']
     scope: Literal['local_configuration', 'local_authentication', 'engineering_request']
+    stage: Literal['implementing', 'reviewing'] | None = None
     code: Literal['provider_authentication', 'provider_quota', 'provider_rate_limit',
                   'provider_unavailable', 'provider_timeout', 'provider_invalid_response',
-                  'provider_output_limit', 'provider_request_rejected', 'provider_invocation_failed'] | None = None
+                  'provider_output_limit', 'provider_request_rejected', 'provider_invocation_failed',
+                  'provider_no_changes'] | None = None
 
     @field_validator('observed_at')
     @classmethod
     def valid_timestamp(cls, value):
-        datetime.fromisoformat(value)
-        return value
+        return utc_time(value).replace(tzinfo=None).isoformat()
 
 
 class ProviderState(StrictModel):
@@ -52,11 +58,14 @@ class ProviderBlocker(StrictModel):
     code: Literal['engineering_providers_blocked'] = 'engineering_providers_blocked'
     stage: Literal['implementing', 'reviewing']
     reasons: list[ProviderState]
+    excluded_providers: list[Literal['codex', 'openai', 'claude_code']] = Field(default_factory=list)
+    budget_exhausted: bool = False
 
 
 class RoutingBlocked(ProviderFailure):
-    def __init__(self, stage, reasons):
-        self.blocker = ProviderBlocker(stage=stage, reasons=reasons).model_dump()
+    def __init__(self, stage, reasons, *, exclude=(), budget_exhausted=False):
+        self.blocker = ProviderBlocker(stage=stage, reasons=reasons,
+            excluded_providers=sorted(exclude), budget_exhausted=budget_exhausted).model_dump()
         super().__init__(reasons[0].provider_id if reasons else 'codex', 'provider_unavailable')
 
 
@@ -102,11 +111,11 @@ class EngineeringRegistry:
             Registration(ClaudeCodeProvider(transport), 'cli', bool(claude_executable())),
             Registration(ProposalProvider('openai', transport), 'api', configured)])
 
-    def observe(self, provider, state, source, scope, code=None):
+    def observe(self, provider, state, source, scope, code=None, *, stage=None):
         if provider not in self.registrations:
             raise ValueError('Unregistered engineering provider')
         observation = Observation(state=state, observed_at=self.clock(), source=source,
-                                  scope=scope, code=code).model_dump()
+                                  scope=scope, code=code, stage=stage).model_dump()
         with self.database.transaction() as db:
             row = db.execute('SELECT record FROM engineering_provider_state WHERE provider=?', (provider,)).fetchone()
             value = json.loads(row[0]) if row else {}
@@ -129,13 +138,14 @@ class EngineeringRegistry:
         state, usability = 'unknown', 'unknown'
         if result.observation:
             state = result.observation.state
-            def utc(value):
-                return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
-            age = (utc(self.clock()) - utc(result.observation.observed_at)).total_seconds()
+            age = (utc_time(self.clock()) - utc_time(result.observation.observed_at)).total_seconds()
             if 0 <= age < self.ttl_seconds:
                 usability = state
         if not r.enabled or not r.configured:
-            usability = 'unavailable'
+            state = usability = 'unavailable'
+            result = result.model_copy(update=dict(observation=Observation(state=state,
+                observed_at=self.clock(), source='configuration', scope='local_configuration',
+                code='provider_unavailable')))
         return result.model_copy(update=dict(state=state, current_usability=usability))
 
     def refresh_claude(self, timeout=5, *, force=True):
@@ -143,13 +153,13 @@ class EngineeringRegistry:
         if r and r.enabled and r.configured:
             current = self.state('claude_code')
             if not force and current.observation:
-                age = (datetime.fromisoformat(self.clock()) - datetime.fromisoformat(current.observation.observed_at)).total_seconds()
+                age = (utc_time(self.clock()) - utc_time(current.observation.observed_at)).total_seconds()
                 if 0 <= age < self.ttl_seconds:
                     return
             state = r.adapter.probe(timeout)
             # A login says nothing about remote quota/service availability.
             # Preserve a recent execution failure/success until it expires.
-            if state != 'unknown' or current.current_usability == 'unknown':
+            if state != 'unknown' or current.current_usability == 'unknown' or current.state == 'not_authenticated':
                 self.observe('claude_code', state, 'claude_auth_status', 'local_authentication',
                     'provider_authentication' if state == 'not_authenticated' else
                     'provider_unavailable' if state == 'unavailable' else None)
@@ -169,38 +179,33 @@ class EngineeringRegistry:
             if state.current_usability not in {'available', 'unknown'}:
                 reasons.append(state)
                 continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RoutingBlocked(stage, reasons + [state], exclude=exclude, budget_exhausted=True)
             try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ProviderFailure(name, 'provider_timeout')
                 result = r.adapter.complete(payload, instructions, remaining)
                 try:
                     validate(result)
                 except ValueError:
                     raise ProviderFailure(name, 'provider_invalid_response') from None
             except ProviderFailure as exc:
+                code = exc.code if exc.code.startswith('provider_') else 'provider_invocation_failed'
                 self.observe(name, FAILURE_STATES.get(exc.code, 'invocation_failed'),
-                             'provider_failure', 'engineering_request', exc.code)
+                             'provider_failure', 'engineering_request', code, stage=stage)
                 reasons.append(self.state(name))
                 continue
             except Exception:
                 # Never reflect arbitrary adapter exception text.
                 self.observe(name, 'invocation_failed', 'provider_failure',
-                             'engineering_request', 'provider_invocation_failed')
+                             'engineering_request', 'provider_invocation_failed', stage=stage)
                 reasons.append(self.state(name))
                 continue
-            self.observe(name, 'available', 'provider_response', 'engineering_request')
+            self.observe(name, 'available', 'provider_response', 'engineering_request', stage=stage)
             return result, name
-        raise RoutingBlocked(stage, reasons)
+        raise RoutingBlocked(stage, reasons, exclude=exclude)
 
     def snapshot(self):
-        states = [self.state(name) for name in self.registrations]
-        successes = [(s.last_success.observed_at, s.provider_id) for s in states if s.last_success]
-        last = max(successes, default=None)
-        return dict(providers=[s.model_dump() for s in states],
-            last_successful_route=dict(provider=last[1], observed_at=last[0]) if last else None,
-            routing=dict(implementation=['codex', 'claude_code'], review=['openai', 'claude_code', 'codex'],
-                         exclude_authors_from_review=True, unknown='bounded_attempt', evidence_ttl_seconds=self.ttl_seconds))
+        return project_registry(dict(providers=[self.state(name).model_dump() for name in self.registrations]))
 
 
 def project_registry(value):
@@ -208,8 +213,9 @@ def project_registry(value):
         return None
     states = [ProviderState.model_validate(v).model_dump() for v in value['providers'][:16]]
     # Policy is host-owned, never provider-supplied prose.
-    last = max(((s['last_success']['observed_at'], s['provider_id']) for s in states if s['last_success']), default=None)
+    last = max(((s['last_success']['observed_at'], s['provider_id'], s['last_success']['stage'])
+                for s in states if s['last_success']), default=None)
     return dict(providers=states,
-        last_successful_route=dict(provider=last[1], observed_at=last[0]) if last else None,
+        last_successful_route=dict(provider=last[1], observed_at=last[0], stage=last[2]) if last else None,
         routing=dict(implementation=['codex', 'claude_code'], review=['openai', 'claude_code', 'codex'],
                      exclude_authors_from_review=True, unknown='bounded_attempt', evidence_ttl_seconds=300))

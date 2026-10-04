@@ -68,6 +68,8 @@ class CandidateStore:
             return record
 
     def save(self, record, event=None):
+        from .candidate_provider import work_attribution
+        record['attribution'] = work_attribution(record)
         if record.get('failure'):
             from .candidate_provider import FailureEvidence, project_failure
             normalized = project_failure(record['failure'])

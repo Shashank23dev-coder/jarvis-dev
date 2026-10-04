@@ -12,9 +12,21 @@ from .candidate_provider import ProviderFailure
 
 def claude_executable():
     # User installs may be absent from a service's PATH.
+    configured = os.getenv('JARVIS_CLAUDE_EXECUTABLE')
+    if configured:
+        path = Path(configured)
+        return str(path) if path.is_absolute() and path.is_file() and os.access(path, os.X_OK) else None
     found = shutil.which('claude')
     user_install = Path.home() / '.local/bin/claude'
-    return found or (str(user_install) if user_install.is_file() and os.access(user_install, os.X_OK) else None)
+    if found:
+        return found
+    if user_install.is_file() and os.access(user_install, os.X_OK):
+        return str(user_install)
+    # A single user-level npm/nvm installation is unambiguous. Multiple versions
+    # require PATH or an explicit trusted host setting; never source shell files.
+    installs = [p for p in (Path.home() / '.nvm/versions/node').glob('*/bin/claude')
+                if p.is_file() and os.access(p, os.X_OK)]
+    return str(installs[0]) if len(installs) == 1 else None
 
 
 def run_claude(arguments, *, timeout, prompt=None):
@@ -28,7 +40,8 @@ def run_claude(arguments, *, timeout, prompt=None):
         try:
             process = subprocess.Popen([executable, *arguments], cwd=directory,
                 stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
-                stdout=output, stderr=subprocess.DEVNULL, start_new_session=True)
+                stdout=output, stderr=subprocess.DEVNULL, start_new_session=True,
+                env=dict(os.environ, PATH=str(Path(executable).parent) + os.pathsep + os.environ.get('PATH', '')))
             process.communicate(prompt.encode() if prompt is not None else None, timeout=timeout)
             output.seek(0)
             data = output.read(256001)
@@ -71,7 +84,9 @@ def claude_failure_code(value):
     """Classify CLI error output in memory; only closed codes cross the boundary."""
     text = str(value).lower()[:256000]
     if any(term in text for term in ('not logged in', 'not authenticated', 'authentication_error',
-                                    'invalid api key', 'please run /login', 'login required')):
+                                    'invalid api key', 'please run /login', 'login required',
+                                    'oauth token has expired', 'authentication failed',
+                                    'invalid authentication credentials', 'token has been revoked')):
         return 'provider_authentication'
     if any(term in text for term in ('rate_limit', 'rate limit', 'usage limit', 'quota',
                                     'hit your limit', 'credit balance', 'insufficient credits')):
@@ -90,7 +105,8 @@ def claude_request(payload, instructions, timeout):
     if remaining <= 0:
         raise ProviderFailure('claude_code', 'provider_timeout')
     arguments = ['-p', '--output-format', 'json', '--tools', '',
-        '--permission-mode', 'default', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+        '--permission-mode', 'plan', '--restricted', '--safe-mode',
+        '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
         '--disallowedTools', 'mcp__*', '--setting-sources', '',
         '--settings', '{"disableAllHooks":true}', '--disable-slash-commands',
         '--no-session-persistence', '--max-turns', '1', '--system-prompt', instructions]

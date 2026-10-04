@@ -160,3 +160,20 @@ def test_authenticated_chat_schemas_are_strict_without_weakening_host_contract(s
     page = next(t for t in sent if t['name']=='list_engineering_jobs')['parameters']
     assert page['required']==['before'] and {'type':'null'} in page['properties']['before']['anyOf'] and page['additionalProperties'] is False
     assert json.dumps(definitions)==before and tools.authority == state.candidates.authority
+
+
+def test_engineering_registry_overrides_stale_claims_and_projects_no_secrets(setup, tmp_path):
+    from core.engineering_providers import EngineeringRegistry, Registration
+    from core.candidate_provider import ProposalProvider
+    state, store, _, live, *_ = setup
+    registry = EngineeringRegistry(store.database, [Registration(
+        ProposalProvider('claude_code', lambda *args: None), 'cli', True)])
+    registry.observe('claude_code', 'not_authenticated', 'claude_auth_status',
+                     'local_authentication', 'provider_authentication')
+    live['provider_registry'] = registry.snapshot()
+    result = state.snapshot(['Engineering provider claude_code is available'], [])
+    assert result['engineering']['provider_registry']['providers'][0]['current_usability'] == 'not_authenticated'
+    assert result['facts']['engineering_provider.claude_code.status'] == 'not_authenticated'
+    assert result['contradictions'] == [dict(field='engineering_provider.claude_code.status',
+        recalled='usable', runtime='not_authenticated')]
+    assert 'HIDDEN' not in json.dumps(result)

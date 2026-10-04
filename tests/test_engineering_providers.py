@@ -7,6 +7,9 @@ from core.database import Database
 from core.candidate_provider import ProviderFailure
 from core.engineering_providers import EngineeringRegistry, Registration, RoutingBlocked
 from core import candidate_claude as claude
+from test_self_edit import setup
+
+pytestmark = pytest.mark.usefixtures('owner')
 
 
 def adapter(name, failure=None):
@@ -94,7 +97,8 @@ def test_claude_noninteractive_tool_disabled_request(monkeypatch):
     assert args[args.index('--tools')+1] == ''
     assert '--strict-mcp-config' in args and '--disable-slash-commands' in args
     assert args[args.index('--settings')+1] == '{"disableAllHooks":true}'
-    assert args[args.index('--permission-mode')+1] == 'default'
+    assert args[args.index('--permission-mode')+1] == 'plan'
+    assert '--restricted' in args and '--safe-mode' in args
     assert not any('skip-permissions' in value for value in args)
     assert json.loads(options['prompt']) == {'goal': 'fix'}
 
@@ -120,3 +124,183 @@ def test_auth_probe_records_no_account_information(tmp_path, monkeypatch):
     assert 'HIDDEN' not in json.dumps(r.snapshot())
     with r.database.transaction() as db:
         assert 'HIDDEN' not in db.execute('SELECT record FROM engineering_provider_state').fetchone()[0]
+
+
+@pytest.mark.parametrize('mode,provider,outcome', [
+    ('codex', 'codex', 'codex_autonomous'),
+    ('fallback', 'claude_code', 'claude_autonomous'),
+    ('mixed', 'claude_code', 'multi_provider'),
+    ('blocked', 'codex', 'unknown')])
+def test_engineering_job_routes_and_durable_attribution(setup, monkeypatch, mode, provider, outcome):
+    from core import self_edit
+    from core.engineering_worker import EngineeringWorker
+    from core.engineering_jobs import project_job
+    from core.candidate_bridge import project
+    from test_engineering_jobs import enqueue
+    from test_engineering import run_checks, model
+    source, database, factory = setup
+    calls = []
+    def transport(payload, instructions, timeout, *, provider='openai'):
+        calls.append(provider)
+        if provider == 'codex' and (mode in {'fallback', 'blocked'} or mode == 'mixed' and calls.count('codex') > 1):
+            raise ProviderFailure(provider, 'provider_quota')
+        if provider == 'claude_code' and mode == 'blocked':
+            raise ProviderFailure(provider, 'provider_authentication')
+        if mode == 'mixed' and provider == 'codex':
+            return {'edits': [{'path': 'src/app.py', 'content': 'value = 3\n'}]}
+        return model(payload, instructions, timeout)
+    monkeypatch.setattr(self_edit, 'model_request', transport)
+    monkeypatch.setenv('OPENAI_API_KEY', 'configured-test-key')
+    monkeypatch.setattr(claude, 'claude_executable', lambda: '/user/claude')
+    monkeypatch.setattr(claude, 'probe_claude', lambda _: 'unknown')
+    job = enqueue(database)
+    service = factory(model=transport, tester=run_checks)
+    result = EngineeringWorker(service, source=source).once()
+    candidate = service.store.get(result['candidate_id'])
+    assert result['id'] == job['id'] and result['provider'] == provider
+    assert result['attribution']['outcome'] == outcome
+    assert project(candidate)['attribution'] == result['attribution']
+    assert project_job(project_job(result)) == project_job(result)
+    if mode == 'blocked':
+        assert result['status'] == 'blocked'
+        assert result['provider_blocker']['stage'] == 'implementing'
+        assert [r['state'] for r in result['provider_blocker']['reasons']] == ['quota_blocked', 'not_authenticated']
+    else:
+        assert result['status'] == 'waiting_for_approval', candidate
+        assert candidate['improvement']['implementation_provider'] == provider
+        assert result['attribution']['review_providers'] == ['openai']
+        assert all(r['execution_origin'] == 'provider' for r in candidate['provider_results'])
+    database.close()
+    from core.engineering_jobs import EngineeringJobs
+    assert EngineeringJobs(Database(database.path)).get(job['id'])['attribution']['outcome'] == outcome
+
+
+def test_injected_adapter_is_operator_assisted_not_provider_autonomous(setup, monkeypatch):
+    from core.engineering_worker import EngineeringWorker
+    from test_engineering_jobs import enqueue
+    from test_engineering import run_checks, model
+    source, database, factory = setup
+    enqueue(database)
+    result = EngineeringWorker(factory(model=model, tester=run_checks), source=source).once()
+    assert result['status'] == 'waiting_for_approval'
+    assert result['attribution'] == dict(outcome='operator_assisted', operator_assisted=True,
+                                      implementation_providers=[], review_providers=[])
+
+
+@pytest.mark.parametrize('operation', ['inspect', 'tests', 'review'])
+def test_external_worktree_change_marks_operator_assisted(setup, monkeypatch, operation):
+    from core import self_edit
+    from test_engineering import ARGS, model, run_checks
+    from pathlib import Path
+    _, _, factory = setup
+    def transport(payload, instructions, timeout, **kwargs):
+        return model(payload, instructions, timeout)
+    monkeypatch.setattr(self_edit, 'model_request', transport)
+    monkeypatch.setenv('OPENAI_API_KEY', 'configured-test-key')
+    service = factory(model=transport, tester=run_checks)
+    candidate = service.engineer('Fix value', **ARGS)
+    assert candidate['attribution']['outcome'] == 'codex_autonomous'
+    Path(candidate['worktree'], 'src/app.py').write_text('value = 2\n# Operator adjustment\n')
+    result = getattr(service, operation)(candidate['id'])
+    assert result['attribution']['outcome'] == 'operator_assisted'
+
+
+def test_legacy_response_is_not_claimed_autonomous():
+    from core.candidate_provider import work_attribution
+    response = dict(provider='codex', stage='implementing', attempt=1, iteration=1,
+                    status='applied', response_sha256='a'*64)
+    assert work_attribution({'provider_results': [response]})['outcome'] == 'unknown'
+
+
+def test_review_fallback_never_uses_candidate_author(tmp_path):
+    r = registry(tmp_path)
+    from core.engineering_providers import Registration
+    r = EngineeringRegistry(r.database, [Registration(adapter('codex'), 'api', True),
+        Registration(adapter('claude_code'), 'cli', True),
+        Registration(adapter('openai', 'provider_unavailable'), 'api', True)])
+    _, name = r.complete({}, '', 1, stage='reviewing', exclude=['codex'])
+    assert name == 'claude_code'
+    with pytest.raises(RoutingBlocked):
+        r.complete({}, '', 1, stage='reviewing', exclude=['codex', 'claude_code'])
+
+
+def test_malformed_response_falls_back_without_success_evidence(tmp_path):
+    r = registry(tmp_path)
+    def validate(value):
+        raise ValueError('SECRET in invalid model output')
+    with pytest.raises(RoutingBlocked) as error:
+        r.complete({}, '', 1, stage='implementing', validate=validate)
+    assert r.snapshot()['last_successful_route'] is None
+    assert 'SECRET' not in json.dumps(error.value.blocker)
+    assert all(v['state'] == 'invocation_failed' for v in error.value.blocker['reasons'])
+
+
+def test_job_attribution_keeps_provider_history_and_operator_assistance_across_retries():
+    from core.candidate_provider import merge_attribution
+    codex = dict(outcome='codex_autonomous', implementation_providers=['codex'],
+                 review_providers=['openai'], operator_assisted=False)
+    claude_work = dict(codex, outcome='claude_autonomous', implementation_providers=['claude_code'])
+    merged = merge_attribution(codex, claude_work)
+    assert merged['outcome'] == 'multi_provider'
+    assert merged['implementation_providers'] == ['claude_code', 'codex']
+    assert merge_attribution(merged, dict(claude_work, operator_assisted=True))['outcome'] == 'operator_assisted'
+
+
+@pytest.mark.parametrize('script,expected', [
+    ('import time; time.sleep(5)', 'provider_timeout'),
+    ('import sys; sys.stdout.write("x" * 256001)', 'provider_output_limit')])
+def test_bounded_cli_subprocess_failure(monkeypatch, script, expected):
+    import sys
+    monkeypatch.setattr(claude, 'claude_executable', lambda: sys.executable)
+    with pytest.raises(ProviderFailure) as error:
+        claude.run_claude(['-c', script], timeout=0.1 if expected == 'provider_timeout' else 2)
+    assert error.value.code == expected
+
+
+def test_cli_subprocess_uses_isolated_cwd_and_discards_stderr(monkeypatch):
+    import sys
+    from pathlib import Path
+    monkeypatch.setattr(claude, 'claude_executable', lambda: sys.executable)
+    code, output = claude.run_claude(['-c',
+        'import os,sys; sys.stderr.write("SECRET"); print(os.getcwd())'], timeout=2)
+    assert code == 0 and 'SECRET' not in output.decode()
+    directory = Path(output.decode().strip())
+    assert directory.name.startswith('jarvis-claude-') and not directory.exists()
+
+
+def test_expired_route_budget_does_not_claim_uninvoked_provider_failure(tmp_path):
+    import time
+    def slow(*args):
+        time.sleep(0.01)
+        raise ProviderFailure('codex', 'provider_timeout')
+    r = registry(tmp_path, codex=NS(name='codex', complete=slow))
+    with pytest.raises(RoutingBlocked) as error:
+        r.complete({}, '', 0.001, stage='implementing')
+    assert error.value.blocker['budget_exhausted']
+    assert r.state('claude_code').state == 'unknown'
+    assert r.state('claude_code').last_failure is None
+
+
+def test_user_nvm_install_detection_and_trusted_override(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(claude.shutil, 'which', lambda _: None)
+    monkeypatch.delenv('JARVIS_CLAUDE_EXECUTABLE', raising=False)
+    binary = tmp_path / '.nvm/versions/node/v22/bin/claude'
+    binary.parent.mkdir(parents=True)
+    binary.write_text('fixture')
+    binary.chmod(0o700)
+    assert claude.claude_executable() == str(binary)
+    monkeypatch.setenv('JARVIS_CLAUDE_EXECUTABLE', 'relative/claude')
+    assert claude.claude_executable() is None
+    monkeypatch.setenv('JARVIS_CLAUDE_EXECUTABLE', str(binary))
+    assert claude.claude_executable() == str(binary)
+
+
+def test_evidence_with_timezone_offset_uses_utc_age(tmp_path):
+    now = ['2026-10-04T02:00:00+02:00']
+    r = registry(tmp_path, clock=lambda: now[0])
+    r.observe('codex', 'available', 'provider_response', 'engineering_request', stage='implementing')
+    now[0] = '2026-10-04T00:01:00+00:00'
+    assert r.state('codex').current_usability == 'available'
+    assert r.snapshot()['last_successful_route']['stage'] == 'implementing'

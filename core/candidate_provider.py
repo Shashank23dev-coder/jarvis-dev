@@ -73,11 +73,54 @@ class ProviderResult(StrictModel):
     iteration: int = Field(ge=1, le=4)
     status: Literal['received', 'no_changes', 'applied']
     response_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    execution_origin: Literal['provider', 'operator_assisted', 'legacy_unknown'] = 'legacy_unknown'
 
 
 def project_provider_results(values):
-    return [ProviderResult.model_validate({k: item[k] for k in ProviderResult.model_fields}).model_dump()
+    return [ProviderResult.model_validate({k: item[k] for k in ProviderResult.model_fields if k in item}).model_dump()
             for item in values[-4:]]
+
+
+class WorkAttribution(StrictModel):
+    outcome: Literal['codex_autonomous', 'claude_autonomous', 'multi_provider', 'operator_assisted', 'unknown']
+    implementation_providers: list[Literal['codex', 'claude_code', 'openai']]
+    review_providers: list[Literal['codex', 'claude_code', 'openai']]
+    operator_assisted: bool
+
+
+def work_attribution(record):
+    """Autonomy follows trusted response evidence, never a configured role."""
+    responses = project_provider_results(record.get('provider_results', []))
+    assisted = (record.get('execution_origin') == 'operator_assisted' or
+                any(r['execution_origin'] == 'operator_assisted' for r in responses))
+    actual = [r for r in responses if r['execution_origin'] == 'provider']
+    authors = sorted({r['provider'] for r in actual if r['stage'] == 'implementing' and r['status'] == 'applied'})
+    reviewers = sorted({r['provider'] for r in actual if r['stage'] == 'reviewing'})
+    return _attribution(authors, reviewers, assisted)
+
+
+def _attribution(authors, reviewers, assisted):
+    # The existing independent OpenAI API review is recorded explicitly, while
+    # autonomy labels describe the engineering agent(s) which implemented work.
+    agents = set(authors) | (set(reviewers) - {'openai'})
+    outcome = ('operator_assisted' if assisted else 'unknown' if not authors else
+               'multi_provider' if len(agents) > 1 else
+               'codex_autonomous' if authors == ['codex'] else
+               'claude_autonomous' if authors == ['claude_code'] else 'multi_provider')
+    return WorkAttribution(outcome=outcome, implementation_providers=authors,
+                           review_providers=reviewers, operator_assisted=assisted).model_dump()
+
+
+def merge_attribution(prior, current):
+    """Keep job-level audit truth across retries and candidate replacements."""
+    current = WorkAttribution.model_validate(current)
+    if prior is None:
+        return current.model_dump()
+    prior = WorkAttribution.model_validate(prior)
+    authors = sorted(set(prior.implementation_providers) | set(current.implementation_providers))
+    reviewers = sorted(set(prior.review_providers) | set(current.review_providers))
+    assisted = prior.operator_assisted or current.operator_assisted
+    return _attribution(authors, reviewers, assisted)
 
 
 def provider_error_code(exc):

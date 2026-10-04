@@ -23,12 +23,15 @@ class RuntimeEvidence(StrictModel):
     observed_at: float | None
     jobs: list[dict]
     supported: bool
+    provider_registry: dict | None = None
 
 
 def project_runtime(value):
     from .engineering_jobs import project_job
     result = RuntimeEvidence.model_validate(value).model_dump()
     result['jobs'] = [project_job(j) for j in result['jobs'][:10]]
+    from .engineering_providers import project_registry
+    result['provider_registry'] = project_registry(result['provider_registry'])
     return result
 
 

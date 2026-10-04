@@ -39,6 +39,7 @@ def contradictions(history, facts):
         alias = aliases.get(field, '')
         if parts[0] in {'job', 'candidate'}: alias = parts[0] + r'\s+' + re.escape(parts[1])
         if parts[0] == 'provider': alias = r'(?:provider\s+)?' + parts[1] + r'(?:\s+provider)?'
+        if parts[0] == 'engineering_provider': alias = r'engineering\s+(?:provider\s+)?' + parts[1] + r'(?:\s+provider)?'
         if parts[0] == 'tool': alias = r'(?:tool|capability)\s+' + parts[1]
         pattern = r'(?<![\w.])(?:' + re.escape(field) + (('|' + alias) if alias else '') + r')["\s]*(?:[:=]["\s]*|is\s+)([a-z0-9_-]+)(?![\w-])'
         for value in re.findall(pattern, context, re.I):
@@ -47,9 +48,9 @@ def contradictions(history, facts):
                 value = {'true': True, 'false': False, 'enabled': True, 'disabled': False,
                          'available': True, 'unavailable': False}.get(value)
             else:
-                value = {'available': 'usable', 'healthy': 'active', 'unhealthy': 'inactive',
+                value = {'available': 'available' if live == 'available' else 'usable', 'healthy': 'active', 'unhealthy': 'inactive',
                          'automatic': 'not_required', 'required': 'human_required'}.get(value, value)
-                allowed = {'usable','unavailable','quota_blocked','active','inactive','created','queued','planning',
+                allowed = {'available','usable','unavailable','not_authenticated','invocation_failed','quota_blocked','active','inactive','created','queued','planning',
                     'implementing','testing','reviewing','waiting_for_approval','completed','blocked','failed',
                     'needs_revision','passed','rejected','discarded','human_required','not_required','deployed','rolled_back'}
                 if value not in allowed and not re.fullmatch('[0-9a-f]{40}', value): value = None
@@ -107,7 +108,7 @@ class SelfState:
                         and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', t['name'])})
         result = dict(observed_at=now, brain=brain, available_tools=names[:128],
             production=dict(revision=None, observed_at=None), deployment=dict(state=None, source=None, as_of=None),
-            engineering=dict(supported=None, worker='unknown', observed_at=None, jobs=[], candidates=[], visibility='unavailable'),
+            engineering=dict(supported=None, worker='unknown', observed_at=None, jobs=[], candidates=[], visibility='unavailable', provider_registry=None),
             providers=dict(configured=self.configured, configured_route=self.route,
                 active=brain['provider_used'] if brain['route_status'] in {'started','completed'} else None, availability={}, observations=[]),
             approvals=dict(candidate_apply='human_required', production_deploy='human_required'))
@@ -142,9 +143,13 @@ class SelfState:
             live = self.engineering_runtime()
             engineering = result['engineering']
             engineering.update(supported=live['supported'], worker=live['worker'], observed_at=live['observed_at'], visibility='owner_recent_jobs')
+            from .engineering_providers import project_registry
+            engineering['provider_registry'] = project_registry(live.get('provider_registry'))
             for job in live['jobs'][:5]:
                 if not valid_id(job.get('id')): continue
-                engineering['jobs'].append(dict(id=job['id'], status=job['status']))
+                from .candidate_provider import WorkAttribution
+                engineering['jobs'].append(dict(id=job['id'], status=job['status'],
+                    attribution=WorkAttribution.model_validate(job['attribution']).model_dump() if job.get('attribution') else None))
                 cid = job.get('candidate_id')
                 if valid_id(cid):
                     c = live['candidate_records'].get(cid, {})
@@ -159,7 +164,7 @@ class SelfState:
                 failure = project_failure(job.get('failure'))
                 if failure and failure['attempt'] == job.get('attempts') and failure['code'] in {
                         'provider_quota','provider_unavailable','provider_authentication','provider_rate_limit','provider_timeout','provider_request_rejected','provider_invalid_response','provider_output_limit'}:
-                    state = {'provider_quota':'quota_blocked','provider_unavailable':'unavailable','provider_authentication':'unavailable'}.get(failure['code'],'unknown')
+                    state = {'provider_quota':'quota_blocked','provider_unavailable':'unavailable','provider_authentication':'not_authenticated'}.get(failure['code'],'unknown')
                     observe(failure['provider'], state, job.get('completed_at'), 'engineering_failure', 'historical', failure['code'])
         except Exception: pass
         if brain['available']:
@@ -183,6 +188,9 @@ class SelfState:
         facts.update({'job.'+v['id']+'.state':v['status'] for v in result['engineering']['jobs']})
         facts.update({'candidate.'+v['id']+'.state':v['state'] for v in result['engineering']['candidates']})
         facts.update({'provider.'+p+'.status':v['current_usability'] for p,v in availability.items()})
+        registry = result['engineering']['provider_registry'] or {}
+        facts.update({'engineering_provider.'+p['provider_id']+'.status':p['current_usability']
+                      for p in registry.get('providers', [])})
         claimed_tools = [n.lower() for n in re.findall(r'(?:tool[. ]|capability )([a-z][a-z0-9_]{0,63})',json.dumps(history)[:256000],re.I)]
         facts.update({'tool.'+n+'.available':n in names for n in set(names[:128]+claimed_tools[:128]) if n in names or len(names)<=128})
         result['facts'] = facts

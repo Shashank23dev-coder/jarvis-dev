@@ -126,7 +126,8 @@ def test_production_execution_denied(setup, monkeypatch, mode):
 
 
 @pytest.mark.parametrize('path', ['.env', 'core/engineering_jobs.py', 'core/engineering_worker.py',
-                                 'core/engineering_tools.py', 'core/candidate_store.py'])
+                                 'core/engineering_tools.py', 'core/candidate_store.py',
+                                 'core/engineering_providers.py', 'core/candidate_claude.py'])
 def test_protected_paths_fail_before_queue(setup, path):
     _, db, _ = setup
     with pytest.raises(ToolDenied):

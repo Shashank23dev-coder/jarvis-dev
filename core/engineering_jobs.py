@@ -71,9 +71,12 @@ class EngineeringJobs:
             active = db.execute("SELECT COUNT(*) FROM engineering_jobs WHERE json_extract(record, '$.lease_until') > ?",
                                 (time.time(),)).fetchone()[0]
         observed = row[0] if row else None
+        from .engineering_providers import EngineeringRegistry
+        from .self_edit import model_request
         return dict(worker='active' if observed and (time.time() - observed < 20 or active) else
                     'inactive' if observed else 'unknown', observed_at=observed,
-                    jobs=[project_job(j) for j in self.recent()], supported=True)
+                    jobs=[project_job(j) for j in self.recent()], supported=True,
+                    provider_registry=EngineeringRegistry.defaults(self.database, model_request).snapshot())
 
     def _save(self, db, job, event):
         db.execute('UPDATE engineering_jobs SET record=? WHERE id=?',
@@ -281,6 +284,8 @@ class EngineeringJobs:
         prior_failures = candidate.get('failures', [])
         job.setdefault('failures', []).extend(prior_failures[offsets.get(candidate['id'], 0):])
         offsets[candidate['id']] = len(prior_failures)
+        from .candidate_provider import work_attribution, merge_attribution
+        job['attribution'] = merge_attribution(job.get('attribution'), work_attribution(candidate))
 
     def finish(self, identifier, owner, candidate=None, *, failure=None):
         with self.database.transaction() as db:
@@ -298,6 +303,9 @@ class EngineeringJobs:
             if candidate:
                 self._merge_candidate_failures(job, candidate)
                 improvement = candidate.get('improvement', {})
+                job.update(provider=improvement.get('implementation_provider', job['provider']),
+                    provider_results=candidate.get('provider_results', []),
+                    provider_blocker=candidate.get('provider_blocker'))
                 job.update(test_result=candidate['test_results'], review_result=candidate['reviewer_result'])
                 job['improvement'].update(baseline_evidence=improvement.get('baseline_comparison'),
                     implementation_attempts=improvement.get('failures_revisions', []),
@@ -322,6 +330,8 @@ class EngineeringJobs:
 def project_job(job):
     """Closed production projection: no paths, model prose, logs or host config."""
     from .candidate_provider import PROVIDERS, project_failure
+    from .candidate_provider import WorkAttribution, project_provider_results, work_attribution
+    from .engineering_providers import ProviderBlocker
     failures = job.get('failures', [])
     failure_count = job.get('failure_count', len(failures))
     if type(failure_count) is not int or failure_count < len(failures):
@@ -389,4 +399,7 @@ def project_job(job):
             else 'execution_not_passed' if job['status'] in {'blocked', 'failed'}
             else 'human_approval_required' if job['status'] == 'waiting_for_approval' else None),
         'lease': lease, 'recovery': recovery, 'history': history,
+        'attribution': WorkAttribution.model_validate(job.get('attribution') or work_attribution(job)).model_dump(),
+        'provider_results': project_provider_results(job.get('provider_results', [])),
+        'provider_blocker': ProviderBlocker.model_validate(job['provider_blocker']).model_dump() if job.get('provider_blocker') else None,
         'test_result': tests, 'review_result': {'verdict': verdict}}

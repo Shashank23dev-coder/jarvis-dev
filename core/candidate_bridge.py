@@ -177,16 +177,22 @@ def project(record):
     summary = record.get('diff_summary') or {}
     summary = {k: v for k, v in summary.items() if k in {'files', 'added', 'deleted'} and type(v) is int and 0 <= v <= 400}
     from .candidate_provider import project_failure, project_provider_results
+    from .candidate_provider import work_attribution, WorkAttribution
+    from .engineering_providers import ProviderBlocker
     projected = dict(id=record['id'], state=record['state'], busy=bool(record.get('busy')),
                 failure=project_failure(record.get('failure')),
                 failures=[project_failure(item) for item in record.get('failures', [])[-8:]],
                 provider_results=project_provider_results(record.get('provider_results', [])),
+                attribution=WorkAttribution.model_validate(record.get('attribution') or work_attribution(record)).model_dump(),
+                provider_blocker=ProviderBlocker.model_validate(record['provider_blocker']).model_dump() if record.get('provider_blocker') else None,
                 diff_summary=summary, files_changed=[], test_results=tests,
                 reviewer_result=dict(verdict=verdict, summary='Host review completed; detailed evidence remains in dev.') if verdict else None,
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)
     if record.get('improvement'):
         improvement = record['improvement']
-        if improvement.get('implementation_provider') != 'codex' or improvement.get('review_provider') != 'openai':
+        if (improvement.get('implementation_provider') not in {'codex', 'claude_code'}
+                or improvement.get('review_provider') not in {'openai', 'codex', 'claude_code'}
+                or improvement.get('implementation_provider') == improvement.get('review_provider')):
             raise ToolDenied('Invalid engineering provider evidence')
         comparison = improvement.get('baseline_comparison', {}).get('result')
         if comparison not in {'not_run', 'not_compared', 'inconclusive', 'regressed', 'improved', 'unchanged_pass', 'unchanged_failure', 'changed_test_suite'}:
@@ -201,7 +207,7 @@ def project(record):
                 and item.get('state') in {'passed', 'needs_revision', 'rejected'}],
             baseline_comparison={'result': comparison}, review_result=verdict,
             confidence='supported_by_tests_and_review' if record['state'] == 'passed' and not record.get('busy') else 'insufficient',
-            implementation_provider='codex', review_provider='openai')
+            implementation_provider=improvement['implementation_provider'], review_provider=improvement['review_provider'])
         if improvement.get('engineering_action') == 'engineer':
             if improvement.get('scope') not in {'documentation', 'code'}:
                 raise ToolDenied('Invalid engineering scope')

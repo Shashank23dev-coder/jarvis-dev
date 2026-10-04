@@ -31,6 +31,10 @@ class EngineeringWorker:
             # permit overlapping execution while its child still edits/tests.
             self.service.engineering_lock_fd = fd
             self.jobs.heartbeat()
+            from .engineering_providers import EngineeringRegistry
+            from .self_edit import model_request
+            if self.service.model is model_request:
+                EngineeringRegistry.defaults(self.jobs.database, model_request).refresh_claude(force=False)
             owner = str(uuid4())
             job = self.jobs.claim(owner)
             if job is None:
