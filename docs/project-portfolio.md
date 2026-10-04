@@ -147,3 +147,29 @@ The existing private development database receives seeds on first registry load;
 this implementation does not restart services. Back up it with existing job and
 candidate state. Tests use temporary SQLite databases/repositories and scripted
 providers; live credentials and project runtimes are unnecessary.
+
+## Validation checkpoints
+
+Implemented from `42aa7cb5d2ebd67aeb50a5746d6c428911186173`:
+
+- `3b5dcdb`: persistent portfolio, capability records and preflight policy;
+  initial focused tests: 20 passed.
+- `43b883c`: owner tools/broker, job association, legacy-path preflight,
+  self-state, compatibility/safety coverage and documentation.
+
+Validation on the integrated implementation:
+
+- `.venv/bin/python -m pytest -q tests/test_engineering_portfolio.py
+  tests/test_portfolio_integration.py tests/test_engineering_jobs.py
+  tests/test_engineering_action.py tests/test_self_state.py
+  tests/test_candidate_bridge.py tests/test_candidate_tools.py`:
+  **197 passed, 1 skipped**.
+- `.venv/bin/python -m pytest -q`: **1081 passed, 14 skipped** in 626.90 seconds.
+  Skipped checks retain existing opt-in Docker / unavailable isolation conditions.
+  Existing injected test-adapter multiprocessing emitted 120 fork deprecation warnings.
+- `node --test tests/ui.test.cjs`: **14 passed**.
+
+Read-only Git identity checks confirmed Trading Bot's supplied baseline. No
+Trading Bot source/runtime/credential/service operation, Claude authentication,
+production modification, deployment or service restart was performed. Protected
+release fixture hashes and the completed provider execution layer are unchanged.
