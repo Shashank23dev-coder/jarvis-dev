@@ -56,20 +56,20 @@ def test_legacy_planning_transport_unchanged(monkeypatch):
 def test_import_does_not_load_credentials_or_construct_client():
     # Patching openai.OpenAI imports the entire SDK before importing main, and
     # can itself exhaust the sandbox deadline. Reject those imports instead.
-    script = '''import builtins, socket, subprocess, threading
+    script = '''import socket, subprocess, sys, threading
 from unittest.mock import patch
-original_import = builtins.__import__
-def checked_import(name, *args, **kwargs):
-    if name.split('.')[0] in {'openai', 'dotenv'}:
-        raise AssertionError('Provider or credential module loaded at import')
-    return original_import(name, *args, **kwargs)
-with patch('builtins.__import__', side_effect=checked_import), \\
-     patch.object(threading.Thread, 'start', side_effect=AssertionError('Worker started at import')), \\
+class RejectProviderImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'openai', 'dotenv'}:
+            raise AssertionError('Provider or credential module loaded at import')
+sys.meta_path.insert(0, RejectProviderImports())
+with patch.object(threading.Thread, 'start', side_effect=AssertionError('Worker started at import')), \\
      patch.object(subprocess, 'Popen', side_effect=AssertionError('Process started at import')), \\
      patch.object(socket.socket, 'connect', side_effect=AssertionError('Network access at import')), \\
      patch.object(socket, 'create_connection', side_effect=AssertionError('Network access at import')):
     import main
     assert main.task_store.database._connection is None
+    assert 'openai' not in sys.modules and 'dotenv' not in sys.modules
 print('imported')
 '''
     environment = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
