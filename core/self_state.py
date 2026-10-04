@@ -219,6 +219,8 @@ class SelfState:
         if result['portfolio'] is not None:
             facts.update({'capability.'+c['capability_id']+'.status': c['current_usability'] for c in result['portfolio']['capabilities']})
             facts.update({'project.'+p['project_id']+'.status': p['status'] for p in result['portfolio']['projects']})
+            facts.update({'project.'+p['project_id']+'.repository_inspection': p['repository_inspection']['available']
+                          for p in result['portfolio']['projects'] if p['repository_inspection'] is not None})
         claimed_tools = [n.lower() for n in re.findall(r'(?:tool[. ]|capability )([a-z][a-z0-9_]{0,63})',json.dumps(history)[:256000],re.I)]
         facts.update({'tool.'+n+'.available':n in names for n in set(names[:128]+claimed_tools[:128]) if n in names or len(names)<=128})
         result['facts'] = facts

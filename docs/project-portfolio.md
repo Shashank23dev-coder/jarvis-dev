@@ -13,7 +13,8 @@ candidate isolation, apply and deployment authority are unchanged.
 `portfolio_projects` stores `project_id`, name, description, category, status,
 repository (nullable means unknown), runtime notes, executive (`Jarvis` only),
 dependencies, known capabilities, limitations, read-only flag, baseline/current
-commit, repository observation state, last inspected/updated timestamps and
+commit, repository observation state, optional `repository_inspection` (available,
+reason, canonical root, observed revision, baseline conflict, timestamp), last inspected/updated timestamps and
 typed evidence source/scope/time. Registration is host-only; seeding uses insert
 if absent and preserves existing records. Explicit trusted replacement updates a
 record. A registered repository never becomes an executable root argument.
@@ -68,13 +69,32 @@ execution. This change never probes a paid provider or authenticates Claude.
 `decisions`, as well as existing heartbeat, jobs and provider registry/routing.
 It does not invoke providers or project runtimes.
 
-`inspect_portfolio_project(project_id)` refreshes only Git identity metadata at
-the two fixed configured roots. The subprocess is `/usr/bin/git
---no-optional-locks -C <fixed-root> rev-parse --show-toplevel HEAD`, with a bounded
-timeout and stripped environment/global Git configuration. Roots and Git links
-must be canonical. No status/index operation, source-file inspection, credentials,
-trading runtime or service action is permitted. CreatorOS and other projects
-without an authorized fixed inspector return registered information only.
+`inspect_portfolio_project(project_id)` refreshes Git identity metadata through
+the same resolver as `inspect_project_repository`. The latter accepts a project
+ID and a bounded read operation: inspect, list_files, read_text, literal search_text,
+filtered git_status or git_diff. Trusted host Portfolio metadata supplies the
+canonical registered repository root; callers cannot supply roots. The adapter
+uses existing `RepositoryTools` path policy, descriptor-based no-follow reads,
+bounded output, stripped subprocess environment and safe Git arguments. Identity
+checks use fixed `rev-parse --show-toplevel HEAD` through that native executor.
+
+For requests naming a known project, existing list/read/status/diff tools and
+the read-only command facade receive the resolved project context in a per-task
+registry copy. Production chat uses the existing owner broker/mailbox and its
+host database; the chat container's filesystem and prompt text do not supply
+roots. Tool definitions include the resolved project ID. No new transport or
+permission system is introduced. Default repository tools retain their existing
+behavior when no project is referenced. Automatic association recognizes the
+three initial identities; other registered IDs can be explicitly inspected.
+
+Unknown location, missing/inaccessible/unsafe roots, unavailable Git identity and
+baseline conflicts return structured evidence without falling back to Jarvis.
+CreatorOS remains inaccessible until trusted host registration establishes its
+root. A baseline mismatch reports the actual revision and blocks source reads.
+Protected paths, traversal, root/parent/file symlinks and hardlinked files are
+rejected or omitted. Text passes existing credential redaction with additional
+quoted-key redaction. No external project writes, candidates, tests, arbitrary
+commands, runtime/service operations or deployment are added.
 
 `decide_engineering(project_id=null, required_capabilities=[])` evaluates the
 host-bound current request against the portfolio and live provider/task evidence.
@@ -88,6 +108,8 @@ The policy is deliberately small and conservative:
 
 - `USE_EXISTING`: recognized requests to add/use Codex or Claude support reuse
   existing adapters/routing. Authentication and quota remain separate blockers.
+  Project inspection/assessment requests require fresh scoped repo-files evidence;
+  once confirmed, they reuse the bounded repository capability.
   Other explicitly requested capabilities require fresh usable evidence and
   matching project scope before a reuse decision.
 - `INTEGRATE`: a known project connection should use current Jarvis-side tools,
@@ -100,13 +122,13 @@ The policy is deliberately small and conservative:
   execution blockers remain the existing router's responsibility.
 - `NEED_MORE_INFORMATION`: ambiguous goals, unlocated projects, unknown project
   IDs, unavailable/unproven required operations or requests to change the
-  metadata-only Trading Bot need requirements/access clarification. Unregistered
+  read-only Trading Bot need requirements/access clarification. Unregistered
   explicit project IDs produce clarification rather than invented identities.
 
 Known project names/IDs can infer association; ambiguous requests remain null.
 For “connect Trading Bot to Jarvis”, the referenced external project is Trading
 Bot. An explicit registered ID takes precedence. A concrete Jarvis-side change
-should associate with `jarvis-core`; a project reference never extends access.
+should associate with `jarvis-core`; a project reference never extends execution authority.
 
 ## Engineering jobs and runtime truth
 
@@ -131,9 +153,11 @@ recent rationale. Owner-only observations remain owner-only; an unavailable
 broker gives unknown portfolio state. Runtime provider observations override
 stale capability claims, completed tool/Brain evidence is scoped and expires,
 and contradictions are surfaced. A changed Git HEAD is reported alongside the
-supplied baseline rather than silently replacing it. The configured Jarvis root
-overrides a stale saved location. Git observations are timestamped history, not
-proof of project runtime compatibility or future access.
+supplied baseline rather than silently replacing it. Owner runtime snapshots
+refresh each registered repository's bounded Git/access evidence and derive
+repo-files usability/project scope from fresh observations. Stored paths do not
+override failed live access. Git observations are timestamped history, not proof
+of project runtime compatibility or future access.
 
 ## Limits and operations
 
@@ -173,3 +197,20 @@ Read-only Git identity checks confirmed Trading Bot's supplied baseline. No
 Trading Bot source/runtime/credential/service operation, Claude authentication,
 production modification, deployment or service restart was performed. Protected
 release fixture hashes and the completed provider execution layer are unchanged.
+
+## Registered repository integration checkpoint
+
+Implemented from `2f00db807cb29d812d59cb2b63d540d144ad8d3f` to close the gap
+between Portfolio metadata and the UI's fixed Jarvis repository scope. The small
+adapter lives in `core/engineering_repository.py`; it resolves trusted project
+IDs and delegates to existing tools and the existing host broker.
+
+Dev acceptance used the UI's `POST /task` endpoint via FastAPI TestClient with a
+scripted model and real filesystem/Git reads, a temporary SQLite database and
+synthetic owner authentication. This proves the UI/tool integration, not autonomous
+model planning or production deployment. Three successful read-only calls listed
+181 visible Trading Bot files, read 15,149 characters from `README.md`, and checked
+Git identity. Root: `/srv/jarvis/projects/trading-bot`; observed revision:
+`e03c307c64fdaaf267ecb7be3898325af555f966`, matching the stored baseline. Git
+status was empty before and after. No full assessment, runtime, credential,
+candidate or deployment operation was performed.

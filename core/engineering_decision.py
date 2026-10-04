@@ -86,6 +86,10 @@ class Decisions:
             required = ['claude-code-engineering' if 'claude' in reuse[0] else 'codex-engineering', 'provider-routing']
         elif integrate and not required:
             required = ['repo-files', 'engineering-jobs', 'provider-routing']
+        elif (project and not required and not engineering and
+              re.search(r'\b(?:inspect|assess|list|read|search)\b', text) and
+              not re.search(r'\b(?:fix|build|implement|create|add|change|repair)\b', text)):
+            required = ['repo-files']
         missing = [cid for cid in required if cid not in caps or not caps[cid]['registered']]
         outcome, rationale = 'NEED_MORE_INFORMATION', 'The goal does not establish a specific existing operation, integration boundary or engineering change.'
         if unknown_project:
@@ -98,7 +102,7 @@ class Decisions:
             if missing:
                 rationale = 'Integration prerequisites are missing; establish access and the requested interaction before choosing new engineering.'
             else:
-                outcome, rationale = 'INTEGRATE', 'Use Jarvis-side repo tools, jobs and routing to define the integration boundary. Trading Bot permits fixed-root Git metadata only. External process/SSH access is not established; confirm the desired interaction and runtime before implementation.'
+                outcome, rationale = 'INTEGRATE', 'Use registered-project read-only repository tools, Jarvis-side jobs and routing to define the integration boundary. External process/SSH access is not established; confirm the desired interaction and runtime before implementation.'
         elif integrate:
             rationale = 'Identify the project and desired integration boundary; do not invent a protocol from an unspecified connection request.'
         elif required:
@@ -114,7 +118,7 @@ class Decisions:
         elif engineering or re.search(r'\b(?:fix|build|implement|create|add|change|improve|update|repair)\b', text):
             outcome, rationale = 'BUILD', 'A specific engineering change was requested; preserve existing systems and use the controlled candidate workflow in configured dev.'
         if project and project['read_only'] and outcome == 'BUILD':
-            outcome, rationale = 'NEED_MORE_INFORMATION', 'This project permits metadata inspection only. Define a Jarvis-side integration task; the project reference grants no editing or runtime access.'
+            outcome, rationale = 'NEED_MORE_INFORMATION', 'This project permits read-only repository inspection. Define a Jarvis-side integration task; the project reference grants no editing or runtime access.'
         relevant = required or (['codex-engineering', 'claude-code-engineering', 'engineering-jobs', 'repo-files', 'testing', 'independent-review'] if outcome == 'BUILD' else [])
         resources = [cid for cid in relevant if cid in caps and caps[cid]['registered'] and
                      caps[cid]['current_usability'] in {'available', 'unknown', 'unproven'} and

@@ -38,15 +38,17 @@ class Request(StrictModel):
         from .engineering_tools import JobArguments, JobListArguments
         from .engineering_decision import DecisionArguments
         from .engineering_portfolio import ProjectArguments
-        schema = (ProjectArguments if self.action == 'project_inspect' else DecisionArguments if self.action == 'decision' else JobListArguments if self.action == 'job_list' else
+        from .engineering_repository import RepositoryArguments
+        schema = (RepositoryArguments if self.action == 'project_repository' else ProjectArguments if self.action == 'project_inspect' else DecisionArguments if self.action == 'decision' else JobListArguments if self.action == 'job_list' else
                   StrictModel if self.action in {'workspace', 'runtime'} else
                   EngineeringArguments if self.action in {'engineer', 'job_create'} else
                   JobArguments if self.action.startswith('job_') else
                   CreateArguments if self.action == 'create' else CandidateArguments)
         if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard', 'runtime',
-                              'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume', 'decision', 'project_inspect'}:
+                              'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume', 'decision', 'project_inspect', 'project_repository'}:
             raise ToolDenied('Unsupported candidate operation')
-        schema.model_validate(self.arguments)
+        values = schema.model_validate(self.arguments)
+        if self.action == 'project_repository': values.checked()
         if self.engineering_action is not None:
             if self.action not in {'workspace', 'engineer', 'job_create', 'inspect', 'tests', 'review'}:
                 raise ToolDenied('Engineering action cannot authorize this operation')
@@ -128,6 +130,9 @@ class CandidateClient:
                     if action == 'project_inspect':
                         from .engineering_portfolio import ProjectEvidence
                         return ProjectEvidence.model_validate(result['record']).model_dump()
+                    if action == 'project_repository':
+                        from .engineering_repository import project_result
+                        return project_result(result['record'])
                     if action.startswith('job_'):
                         from .engineering_jobs import project_job
                         return ([project_job(j) for j in result['record']] if action == 'job_list'

@@ -77,25 +77,34 @@ def test_runtime_wins_and_surfaces_contradiction(portfolio):
 def test_project_git_probe_only_identity_no_runtime_or_mutation(portfolio, monkeypatch, tmp_path):
     root = tmp_path / 'bot'
     root.mkdir()
-    from core.engineering_portfolio import PROJECT_ROOTS
-    monkeypatch.setattr('core.engineering_portfolio.PROJECT_ROOTS', dict(PROJECT_ROOTS) | {'trading-bot': root})
+    (root / '.git').mkdir()
+    record = next(p for p in portfolio.projects() if p['project_id'] == 'trading-bot')
+    portfolio.register_project(record | dict(repository=str(root)), replace=True)
     calls = []
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return SimpleNamespace(returncode=0, stdout=str(root).encode() + b'\n' + b'1' * 40 + b'\n')
-    monkeypatch.setattr('core.engineering_portfolio.subprocess.run', run)
+        from tools.repository import CommandResult
+        return CommandResult(tuple(argv), 0, str(root) + '\n' + '1' * 40 + '\n')
+    monkeypatch.setattr('tools.repository.RepositoryTools._execute', lambda self, argv, **kwargs: run(argv, **kwargs))
     value = portfolio.inspect_project('trading-bot')
     assert value['repository_state'] == 'present' and value['read_only']
-    assert calls[0][0] == ['/usr/bin/git', '--no-optional-locks', '-C', str(root), 'rev-parse', '--show-toplevel', 'HEAD']
-    assert calls[0][1]['env'] == {'PATH': '/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
+    assert calls[0][0][-3:] == ('rev-parse', '--show-toplevel', 'HEAD')
+    assert '--no-optional-locks' in calls[0][0] and '-c' in calls[0][0]
+    assert '--work-tree=' + str(root) in calls[0][0]
+    assert calls[0][1]['timeout'] == 3
     assert any(c['resource'] == 'trading-bot' for c in portfolio.snapshot()['contradictions'])
     assert 'Linux compatibility and runtime are unproven' in value['runtime_notes'][0]
 
 
-def test_probe_failure_no_raw_errors(portfolio, monkeypatch):
+def test_probe_failure_no_raw_errors(portfolio, monkeypatch, tmp_path):
+    root = tmp_path / 'repo'
+    root.mkdir()
+    (root / '.git').mkdir()
+    record = next(p for p in portfolio.projects() if p['project_id'] == 'trading-bot')
+    portfolio.register_project(record | dict(repository=str(root)), replace=True)
     def fail(*args, **kwargs):
         raise OSError('PRIVATE_AUTH_MATERIAL')
-    monkeypatch.setattr('core.engineering_portfolio.subprocess.run', fail)
+    monkeypatch.setattr('tools.repository.RepositoryTools._execute', fail)
     assert portfolio.inspect_project('trading-bot')['repository_state'] == 'unavailable'
     assert 'PRIVATE_AUTH_MATERIAL' not in json.dumps(portfolio.snapshot())
 
@@ -150,7 +159,7 @@ def test_unknown_project_and_no_authority_from_association(portfolio):
 def test_decisions_and_snapshots_never_touch_trading_files(portfolio, monkeypatch, tmp_path):
     def forbidden(*args, **kwargs):
         pytest.fail('Normal portfolio/preflight must not invoke subprocesses or trading runtime')
-    monkeypatch.setattr('core.engineering_portfolio.subprocess.run', forbidden)
+    monkeypatch.setattr('tools.repository.RepositoryTools._execute', forbidden)
     bot = tmp_path / 'trading-bot'
     bot.mkdir()
     (bot / 'baseline.py').write_text('untouched\n')

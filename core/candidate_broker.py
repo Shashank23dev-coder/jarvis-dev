@@ -42,6 +42,9 @@ class Broker:
         authority = require_owner(authority if authority is not None else current_owner.get())
         self.check_source()
         request = Request.model_validate(raw).checked()
+        if request.action == 'project_repository':
+            from .engineering_repository import inspect_repository
+            return inspect_repository(self.service.store.database, **request.arguments)
         if request.action == 'project_inspect':
             from .engineering_portfolio import inspect_project_record
             return inspect_project_record(self.service.store.database, **request.arguments)

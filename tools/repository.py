@@ -134,6 +134,41 @@ class RepositoryTools:
             raise ToolDenied("File contains binary control characters")
         return value
 
+    def search_text(self, query: str, path: str = '.', *, max_matches: int = 50) -> CommandResult:
+        """Literal, bounded search through the same filtered descriptor-safe reads."""
+        if not isinstance(query, str) or not 1 <= len(query) <= 256 or '\n' in query or '\x00' in query:
+            raise ToolDenied('Expected a bounded literal search term')
+        if type(max_matches) is not int or not 1 <= max_matches <= 100:
+            raise ToolDenied('Invalid search limit')
+        names = self.list_files(path)
+        lines, scanned, size = [], 0, 0
+        for name in names:
+            try:
+                content = self.read_text(name)
+            except ToolDenied:
+                continue  # Binary, oversized or otherwise unreadable files.
+            scanned += len(content.encode('utf-8'))
+            if scanned > 5_000_000:
+                return CommandResult(('search_text',), 0, '\n'.join(lines), truncated=True)
+            for number, line in enumerate(content.splitlines(), 1):
+                if query in line:
+                    entry = f'{name!r}:{number}: {line[:1000]}'
+                    size += len(entry.encode('utf-8'))
+                    if size > self.max_output_bytes or len(lines) >= max_matches:
+                        return CommandResult(('search_text',), 0, '\n'.join(lines), truncated=True)
+                    lines.append(entry)
+        return CommandResult(('search_text',), 0, '\n'.join(lines))
+
+    def git_revision(self) -> str:
+        """Fixed identity probe only; never arbitrary Git arguments or log prose."""
+        import re
+        raw = self._git_command('rev-parse', '--show-toplevel', 'HEAD')
+        lines = raw.stdout.splitlines()
+        if (raw.returncode or raw.timed_out or raw.truncated or len(lines) != 2
+                or lines[0] != str(self.root) or not re.fullmatch('[0-9a-f]{40}', lines[1])):
+            raise ToolError('Repository identity unavailable')
+        return lines[1]
+
     def _execute(self, argv: Sequence[str], *, timeout: float) -> CommandResult:
         """Internal bounded executor, never exposed as a tool."""
         environment = {

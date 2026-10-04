@@ -1,8 +1,6 @@
 """Executive-owned resources in existing SQLite storage; records grant no authority."""
 import json
 from pathlib import Path
-import re
-import subprocess
 from typing import Annotated, Literal
 from types import MappingProxyType
 
@@ -36,6 +34,21 @@ class Evidence(StrictModel):
         return utc_time(value).replace(tzinfo=None).isoformat()
 
 
+class RepositoryObservation(StrictModel):
+    available: bool
+    reason: Literal['available', 'project_unknown', 'location_unknown', 'root_missing',
+        'root_inaccessible', 'root_unsafe', 'git_unavailable', 'baseline_conflict']
+    root: Text | None = None
+    current_commit: Annotated[str, Field(pattern=r'^[0-9a-f]{40}$')] | None = None
+    baseline_conflict: bool = False
+    observed_at: str
+
+    @field_validator('observed_at')
+    @classmethod
+    def date(cls, value):
+        return Evidence.date(value)
+
+
 class Project(StrictModel):
     project_id: Identifier
     name: Text
@@ -52,6 +65,7 @@ class Project(StrictModel):
     baseline_commit: Annotated[str, Field(pattern=r'^[0-9a-f]{40}$')] | None = None
     current_commit: Annotated[str, Field(pattern=r'^[0-9a-f]{40}$')] | None = None
     repository_state: Literal['present', 'unavailable', 'unknown'] = 'unknown'
+    repository_inspection: RepositoryObservation | None = None
     last_inspected: str | None = None
     last_updated: str
     evidence: Evidence
@@ -163,11 +177,18 @@ class Portfolio:
             category='trading', status='unproven', repository='/srv/jarvis/projects/trading-bot',
             baseline_commit='e03c307c64fdaaf267ecb7be3898325af555f966', read_only=True,
             runtime_notes=['Windows runtime is external; Linux compatibility and runtime are unproven.'],
-            limitations=['Metadata inspection only; no file changes, credentials, runtime or service operations.']),
+            limitations=['Bounded read-only repository inspection; no file changes, credentials, runtime or service operations.']),
             dict(project_id='creator-os', name='CreatorOS', description='Creator operating-system project; conceptual identity only.',
             category='creator', status='needs_discovery', limitations=['Authoritative repository, location and runtime unknown.'])]
         for project in projects:
             self.register_project(dict(project, last_updated=self.clock(), evidence=self.evidence('user_baseline', 'initial project identity').model_dump()))
+        # Upgrade only the previous native seed's obsolete description. Existing
+        # host records, roots, baselines and read-only flags remain authoritative.
+        for project in self.projects():
+            old = 'Metadata inspection only; no file changes, credentials, runtime or service operations.'
+            if project['project_id'] == 'trading-bot' and old in project['limitations']:
+                project['limitations'] = [projects[1]['limitations'][0] if limit == old else limit for limit in project['limitations']]
+                self.register_project(project, replace=True)
         capabilities = [
             ('codex-engineering', 'Codex engineering', 'engineering_provider', 'codex', 'external', ['code', 'documentation'], ['Live provider evidence required.']),
             ('claude-code-engineering', 'Claude Code engineering', 'engineering_provider', 'claude_code', 'external', ['code', 'documentation'], ['Installation is not authentication or proven usability.']),
@@ -194,27 +215,13 @@ class Portfolio:
                     db.execute('SELECT record FROM portfolio_projects ORDER BY id LIMIT 32')]
 
     def inspect_project(self, project_id):
-        """Optional Git identity probe only, never status, file contents or runtime."""
-        if project_id not in PROJECT_ROOTS:
+        """Refresh registered identity via the same bounded repository adapter."""
+        project = next((p for p in self.projects() if p['project_id'] == project_id), None)
+        if not project or not project['repository']:
             return None
-        root = PROJECT_ROOTS[project_id]
-        value = next(p for p in self.projects() if p['project_id'] == project_id)
-        value.update(repository=str(root), current_commit=None, repository_state='unavailable',
-                     last_inspected=self.clock(), last_updated=self.clock(),
-                     evidence=self.evidence('project_git', 'repository identity only; runtime unproven').model_dump())
-        try:
-            if root.resolve(strict=True) != root or root.is_symlink() or (root / '.git').is_symlink():
-                raise ValueError('Unsafe repository identity')
-            result = subprocess.run(['/usr/bin/git', '--no-optional-locks', '-C', str(root),
-                'rev-parse', '--show-toplevel', 'HEAD'], capture_output=True, timeout=3,
-                env={'PATH': '/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'})
-            lines = result.stdout.decode('ascii').splitlines() if len(result.stdout) < 8192 else []
-            if result.returncode == 0 and len(lines) == 2 and lines[0] == str(root) and re.fullmatch('[0-9a-f]{40}', lines[1]):
-                value.update(repository_state='present', current_commit=lines[1])
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            pass
-        self.register_project(value, replace=True)
-        return value
+        from .engineering_repository import resolve_repository
+        resolve_repository(self.database, project_id)
+        return next(p for p in self.projects() if p['project_id'] == project_id)
 
     def snapshot(self, *, provider_registry=None, observations=None):
         """Fresh observations overlay saved claims; never infer execution from config."""
@@ -234,17 +241,25 @@ class Portfolio:
                     current_usability=provider['current_usability'],
                     evidence=evidence(observation) or self.evidence('provider_registry', 'unobserved').model_dump(),
                     last_success=evidence(provider['last_success']), last_failure=evidence(provider['last_failure']))
-        capabilities, conflicts = overlay_capabilities(capabilities, changes, self.clock())
         projects = self.projects()
+        inspected = [p for p in projects if p['repository_inspection'] and
+            0 <= (utc_time(self.clock()) - utc_time(p['repository_inspection']['observed_at'])).total_seconds() < 300]
+        if inspected:
+            usable = [p['project_id'] for p in inspected if p['repository_inspection']['available']]
+            latest = max(p['repository_inspection']['observed_at'] for p in inspected)
+            changes['repo-files'] = dict(current_usability='available' if usable else 'unavailable', configured=True,
+                project_scope=usable, evidence=dict(source='project_git', scope='registered project root/Git access; individual paths remain policy-checked', observed_at=latest))
+        capabilities, conflicts = overlay_capabilities(capabilities, changes, self.clock())
         for p in projects:
             if p['baseline_commit'] and p['current_commit'] and p['baseline_commit'] != p['current_commit']:
                 conflicts.append(dict(resource=p['project_id'], field='commit', registry=p['baseline_commit'], runtime=p['current_commit']))
-            if p['project_id'] == 'jarvis-core':
-                root = str(PROJECT_ROOTS['jarvis-core'])
-                if p['repository'] != root:
-                    conflicts.append(dict(resource=p['project_id'], field='repository', registry=p['repository'], runtime=root))
-                    p['repository'] = root
         return PortfolioSnapshot(projects=projects, capabilities=capabilities, contradictions=conflicts[:64]).model_dump()
+
+    def repository_snapshot(self, *, provider_registry=None):
+        from .engineering_repository import resolve_repository
+        for project in self.projects():
+            resolve_repository(self.database, project['project_id'])
+        return self.snapshot(provider_registry=provider_registry)
 
 
 def inspect_project_record(database, project_id):

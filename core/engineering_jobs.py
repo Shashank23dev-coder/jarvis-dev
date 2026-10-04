@@ -79,7 +79,7 @@ class EngineeringJobs:
         return dict(worker='active' if observed and (time.time() - observed < 20 or active) else
                     'inactive' if observed else 'unknown', observed_at=observed,
                     jobs=[project_job(j) for j in self.recent()], supported=True,
-                    provider_registry=registry, portfolio=Portfolio(self.database).snapshot(provider_registry=registry),
+                    provider_registry=registry, portfolio=Portfolio(self.database).repository_snapshot(provider_registry=registry),
                     decisions=Decisions(self.database).recent())
 
     def _save(self, db, job, event):

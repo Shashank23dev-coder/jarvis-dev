@@ -281,7 +281,17 @@ def test_http_contract_and_conversation_continuity(tmp_path, monkeypatch, enable
 
 @pytest.mark.parametrize('goal', ['What did we decide about SQLite backups?', 'Run parser tests',
                                   'What did we talk about last time?', 'Hello'])
-def test_memory_recall_and_experience_context_match_legacy(tmp_path, goal):
+def test_memory_recall_and_experience_context_match_legacy(tmp_path, goal, monkeypatch):
+    from datetime import datetime, timezone
+    instant = datetime.now(timezone.utc)
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant if tz else instant.replace(tzinfo=None)
+    # Sequential routes must compare retrieval semantics at the same instant;
+    # runtime inspection can make their wall-clock score decay differ.
+    for module in ('core.recall', 'core.experience', 'core.experience_evaluation'):
+        monkeypatch.setattr(module + '.datetime', FixedClock)
     from test_experience import capture
     store = TaskStore(tmp_path / 'context.db')
     earlier = store.create_task('Use SQLite backups daily')
