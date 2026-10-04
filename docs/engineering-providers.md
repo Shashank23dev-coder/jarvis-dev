@@ -132,3 +132,26 @@ Claude's administrative managed policy remains authoritative. This is a
 tool-disabled CLI integration, not a new OS sandbox for the vendor binary.
 Output spooling is deadline-bounded with a bounded read, rather than a streaming
 disk quota. There is no parallel arena or automatic apply/deployment.
+
+Final verification on 2026-10-04:
+
+- Provider and watchdog checks: 35 passed.
+- Bridge and exact fixture release-guard checks: 76 passed, 1 opt-in Docker skip.
+- Broader engineering compatibility checks: 202 passed, 2 opt-in Docker skips.
+- Full Python suite: 1,040 passed, 14 skipped. Skips cover opt-in Docker and
+  Bubblewrap-specific assertions. Existing trusted test-adapter fork paths emit
+  Python deprecation warnings; the normal engineering worker uses subprocesses.
+- UI suite: 14 passed.
+- Live read-only authentication probe: Claude installed, not authenticated.
+
+The full run exposed existing scripted-clock interference from background reads
+and a watchdog fixture deadline too short to reliably reach its test subprocess.
+The fixtures now isolate the caller's clock and allow Git setup to finish before
+testing descendant termination. The watchdog assertion still checks the child
+cannot write after the supervisor deadline. Its reviewed test-file identity was
+updated in the release guard; exact-path/blob checks and rejection of unapproved
+key material passed. No release or deployment was performed.
+
+The passing full-suite JUnit artifact is
+`/tmp/jarvis-provider-full-python-verified.xml`. Implementation, integration,
+subprocess verification and fixture corrections were saved in separate commits.
