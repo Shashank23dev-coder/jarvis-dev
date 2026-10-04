@@ -126,7 +126,7 @@ def test_prior_missing_information_cannot_be_bypassed_by_queue_call(setup):
     job_goal = 'Inspect the repository'
     context = dict(task_id=str(uuid4()), conversation_id=str(uuid4()))
     tools = CandidateTools(job_goal, db, source_context=context)
-    decision = tools.decide(project_id='jarvis-core', required_capabilities=['repo-files'])
+    decision = tools.decide(project_id='jarvis-core', required_capabilities=['testing'])
     assert decision.outcome == 'NEED_MORE_INFORMATION'
     from core.candidate_action import EngineeringAction, goal_digest
     action = EngineeringAction(provider='codex', scope='code', goal_digest=goal_digest(job_goal), **context)

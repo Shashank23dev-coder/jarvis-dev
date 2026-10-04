@@ -30,11 +30,12 @@ class Request(StrictModel):
     engineering_action: EngineeringAction | None = None
 
     def checked(self):
-        require_owner(self.authority)
+        # Serialized authority is audit metadata. Authentication is checked at
+        # the HTTP perimeter and the host's private channel, never from JSON.
         if not all(valid_id(v) for v in (self.request_id, self.task_id, self.conversation_id)):
-            raise ToolDenied('Invalid request identity')
+            raise ToolDenied('Invalid request identity', reason='invalid_request')
         if not 0 <= time.time() - self.created <= 330:
-            raise ToolDenied('Expired request')
+            raise ToolDenied('Expired request', reason='expired_request')
         from .engineering_tools import JobArguments, JobListArguments
         from .engineering_decision import DecisionArguments
         from .engineering_portfolio import ProjectArguments
@@ -46,9 +47,8 @@ class Request(StrictModel):
                   CreateArguments if self.action == 'create' else CandidateArguments)
         if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard', 'runtime',
                               'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume', 'decision', 'project_inspect', 'project_repository'}:
-            raise ToolDenied('Unsupported candidate operation')
-        values = schema.model_validate(self.arguments)
-        if self.action == 'project_repository': values.checked()
+            raise ToolDenied('Unsupported candidate operation', reason='unsupported_action')
+        schema.model_validate(self.arguments)
         if self.engineering_action is not None:
             if self.action not in {'workspace', 'engineer', 'job_create', 'inspect', 'tests', 'review'}:
                 raise ToolDenied('Engineering action cannot authorize this operation')
@@ -62,7 +62,7 @@ def root():
     ROOT.mkdir(mode=0o700, exist_ok=True)
     info = ROOT.lstat()
     if not stat.S_ISDIR(info.st_mode) or ROOT.resolve() != ROOT or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ToolDenied('Unsafe mailbox')
+        raise ToolDenied('Unsafe mailbox', reason='mailbox_unsafe')
     return ROOT
 
 
@@ -71,17 +71,17 @@ def read(path):
     with os.fdopen(fd, 'rb') as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_BYTES:
-            raise ToolDenied('Unsafe mailbox entry')
+            raise ToolDenied('Unsafe mailbox entry', reason='mailbox_unsafe')
         data = stream.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
-        raise ToolDenied('Mailbox size exceeded')
+        raise ToolDenied('Mailbox size exceeded', reason='mailbox_limit')
     return json.loads(data)
 
 
 def write(path, data):
     encoded = json.dumps(data, allow_nan=False).encode()
     if len(encoded) > MAX_BYTES:
-        raise ToolDenied('Mailbox size exceeded')
+        raise ToolDenied('Mailbox size exceeded', reason='mailbox_limit')
     temp = path.parent / (str(uuid4()) + '.tmp')
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -101,7 +101,7 @@ class CandidateClient:
         from .engineering_authority import current_owner
         authority = require_owner(current_owner.get())
         if not self.context:
-            raise ToolDenied('Source task metadata required')
+            raise ToolDenied('Source task metadata required', reason='source_metadata_required')
         context = dict(self.context, authority=authority.model_dump())
         request = Request(request_id=str(uuid4()), goal=self.goal, action=action,
                           arguments=arguments, created=time.time(),
@@ -110,7 +110,7 @@ class CandidateClient:
         directory = root()
         # Bound concurrent waiting callers and refuse rather than evicting work.
         if len(list(directory.iterdir())) >= 16:
-            raise ToolDenied('Candidate mailbox is full')
+            raise ToolDenied('Candidate mailbox is full', reason='mailbox_full')
         incoming = directory / (request.request_id + '.request')
         outgoing = directory / (request.request_id + '.response')
         write(incoming, request.model_dump())
@@ -119,8 +119,18 @@ class CandidateClient:
             while time.monotonic() < deadline:
                 if outgoing.exists():
                     result = read(outgoing)
-                    if result.get('request_id') != request.request_id or not result.get('ok'):
-                        raise ToolDenied('Candidate broker denied the request')
+                    if result.get('request_id') != request.request_id:
+                        raise ToolDenied('Invalid broker response', reason='invalid_response')
+                    if not result.get('ok'):
+                        # Use only closed host diagnostic codes, never raw prose.
+                        error = result.get('error') or {}
+                        if not isinstance(error, dict):
+                            error = {}
+                        reason = error.get('reason')
+                        if (not isinstance(reason, str) or reason not in ToolDenied.reasons or
+                                error.get('gate') != ToolDenied.reasons[reason]):
+                            reason = 'legacy_rejection'
+                        raise ToolDenied('Candidate broker denied the request', reason=reason)
                     if action == 'runtime':
                         from .engineering_tools import project_runtime
                         return project_runtime(result['record'])
@@ -140,7 +150,7 @@ class CandidateClient:
                     return (EngineeringWorkspace.model_validate(result['record']).checked().model_dump()
                             if action == 'workspace' else project(result['record']))
                 time.sleep(.2)
-            raise ToolDenied('Candidate broker unavailable or timed out; inspect before retrying')
+            raise ToolDenied('Candidate broker unavailable or timed out; inspect before retrying', reason='unavailable')
         finally:
             incoming.unlink(missing_ok=True)
             outgoing.unlink(missing_ok=True)

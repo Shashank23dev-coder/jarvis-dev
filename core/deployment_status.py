@@ -102,7 +102,7 @@ class SnapshotInspector:
             result = projection(value.get('current'), value['history'][::-1], value.get('observed_at'))
             return redact(result)
         except Exception:
-            raise ToolDenied('Deployment status snapshot unavailable') from None
+            raise ToolDenied('Deployment status snapshot unavailable', reason='deployment_status_unavailable') from None
 
     def status(self):
         data = self.load()

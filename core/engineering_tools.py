@@ -47,7 +47,10 @@ def runtime(tools):
     require_owner(tools.authority)
     result = (tools._service().invoke('runtime', {}) if tools.production else
               EngineeringJobs(tools.database).runtime())
-    return RuntimeEvidence.model_validate(project_runtime(result))
+    result = RuntimeEvidence.model_validate(project_runtime(result))
+    if result.portfolio is not None:
+        tools.observe_portfolio(result.portfolio)
+    return result
 
 
 def invoke(tools, operation, job_id=None, *, before=None):

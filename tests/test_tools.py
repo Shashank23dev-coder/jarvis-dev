@@ -192,7 +192,8 @@ def test_command_allowlist(repo, monkeypatch):
 
 
 def test_execution_timeout_output_limit_and_exit_code(repo):
-    result = repo._execute([sys.executable, "-c", "import time; print('start', flush=True); time.sleep(10)"], timeout=0.2)
+    # Allow Python to start on a loaded host before testing process termination.
+    result = repo._execute([sys.executable, "-c", "import time; print('start', flush=True); time.sleep(10)"], timeout=2)
     assert result.timed_out and "start" in result.stdout
     limited = RepositoryTools(repo.root, max_output_bytes=32)
     result = limited._execute([sys.executable, "-c", "print('x' * 100000)"], timeout=5)

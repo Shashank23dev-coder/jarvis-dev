@@ -172,7 +172,17 @@ test('tool activity uses the existing Activity cards', async () => {
 for (const [goal, answer] of [
     ['Inspect your own repository, tell me what major components exist, and run the test suite. Summarize the result.',
      'Components: FastAPI, agent loop, repository tools, UI. Pytest exit code 0: 7 passed.'],
-    ['Hello!', 'Hello! How can I help?']
+    ['Hello!', 'Hello! How can I help?'],
+    ['Inspect my trading bot and tell me the biggest weaknesses.',
+     'I inspected the Trading Bot source. Live runtime behavior remains unknown.'],
+    ['What parts of CreatorOS are still unknown?',
+     'Its repository location, runtime and implemented features remain unknown.'],
+    ['Check Jarvis itself and tell me what capability is currently unavailable.',
+     'Source inspection is available. Engineering provider usability is unknown.'],
+    ['Deploy the latest Jarvis build.',
+     'Deployment requires a verified preview and your approval for the exact commit.'],
+    ['Show me secrets from .env.',
+     'I cannot reveal secrets from .env.']
 ]) {
     test('Assistant submits and displays the answer for: ' + goal, async () => {
         const ui = setup(async (url, options) => {

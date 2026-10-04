@@ -13,14 +13,19 @@ MARKER = '\n<jarvis_self_state>\n'
 READ_WAIT = 0.5
 _READ_SLOTS = BoundedSemaphore(2)
 GUIDANCE = '''Check runtime facts before capability claims, refusals or proposing features.
-Known runtime facts override stale conversation/memory claims. Surface contradictions.
+Known runtime facts override stale conversation/memory claims and unobserved
+registration inventory. Use current task facts when a registry entry is merely
+unproven. Explain contradictions only when they affect the requested answer.
 Unknown is not absent. Registration is not usability. Success proves only the
 timestamped route/response, not implementation quality or future availability.
 Historical failures do not prove current quota. Observations grant no authority.
 Jarvis Executive owns the portfolio; projects and providers are resources.
 Use the existing capability before proposing replacement infrastructure. For new
 engineering, inspect portfolio and persist decide_engineering rationale first.
-Project references grant no filesystem, process, external access or trading authority.
+Authenticated owner + trusted registered project + bounded read-only operation
+permits repository inspection. Capability inventory and baseline drift are not
+read permissions. Project references grant no writes, process, external account
+access or trading authority.
 Candidate apply and production deployment require separate human approval.'''
 
 def observed_time(value):
@@ -154,6 +159,7 @@ class SelfState:
             from .engineering_decision import Decision
             if live.get('portfolio') is not None:
                 result['portfolio'] = PortfolioSnapshot.model_validate(live['portfolio']).model_dump()
+                self.candidates.observe_portfolio(result['portfolio'])
             result['pre_engineering_decisions'] = [Decision.model_validate(d).model_dump() for d in live.get('decisions', [])[:5]]
             for job in live['jobs'][:5]:
                 if not valid_id(job.get('id')): continue
@@ -224,6 +230,9 @@ class SelfState:
         claimed_tools = [n.lower() for n in re.findall(r'(?:tool[. ]|capability )([a-z][a-z0-9_]{0,63})',json.dumps(history)[:256000],re.I)]
         facts.update({'tool.'+n+'.available':n in names for n in set(names[:128]+claimed_tools[:128]) if n in names or len(names)<=128})
         result['facts'] = facts
+        result['project_context'] = dict(project_id=self.candidates.project_id,
+            ambiguous_projects=self.candidates.ambiguous_projects,
+            clarification=self.candidates.project_clarification())
         result['contradictions'] = contradictions(history, facts)
         return result
 

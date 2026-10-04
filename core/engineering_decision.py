@@ -42,19 +42,42 @@ class Decision(StrictModel):
         return Evidence.date(value)
 
 
+def project_matches(goal, projects):
+    """Names/IDs from registration identify context, never repository paths."""
+    text = re.sub(r'^\s*jarvis\s*[:,]\s*', '', goal.casefold())
+    aliases = {'jarvis-core': ('jarvis',), 'trading-bot': ('trading bot',),
+               'creator-os': ('creatoros', 'creator os')}
+    matches = []
+    for project in projects:
+        pid = project['project_id']
+        names = {pid, pid.replace('-', ' ').replace('_', ' '),
+                 *aliases.get(pid, ())}
+        if project.get('name'):
+            names.add(project['name'].casefold())
+        # A name inside a supplied path is not a project reference.
+        if any(re.search(r'(?<![\w/.-])' + re.escape(name) + r'(?![\w/-])', text)
+               for name in names):
+            matches.append(pid)
+    return matches
+
+
+def repository_inspection_goal(goal):
+    """A continuation hint only; tool policy still owns every operation."""
+    text = goal.casefold()
+    return bool(re.search(r'\b(?:inspect|assess|review|analy[sz]e|check|read|search|weaknesses|bugs)\b', text)
+        and not re.search(r'\b(?:fix|build|implement|create|add|change|repair|deploy|delete|remove|restart|trade|buy|sell|withdraw|deposit|fund|secrets?|credentials?|plan)\b|\.env', text))
+
+
 def associate(goal, projects, explicit=None):
     ids = {p['project_id'] for p in projects}
     if explicit:
         if explicit not in ids:
             raise ToolDenied('Unknown portfolio project')
         return explicit
-    text = goal.casefold()
-    matches = {pid for pid, aliases in {
-        'jarvis-core': ('jarvis-core', 'jarvis'), 'trading-bot': ('trading-bot', 'trading bot'),
-        'creator-os': ('creator-os', 'creatoros', 'creator os')}.items()
-        if pid in ids and any(re.search(r'\b' + re.escape(alias) + r'\b', text) for alias in aliases)}
+    matches = set(project_matches(goal, projects))
     # "Connect trading bot to Jarvis" refers to the external project.
-    if len(matches) > 1: matches.discard('jarvis-core')
+    if len(matches) > 1 and re.search(r'\b(?:connect|integrate|link)\b', goal, re.I):
+        matches.discard('jarvis-core')
     return next(iter(matches)) if len(matches) == 1 else None
 
 
@@ -82,20 +105,28 @@ class Decisions:
         # to an existing implementation is engineering, not mere registration.
         reuse = re.search(r'\b(?:add|enable|use|set up) (?:claude(?: code)?|codex)(?: (?:code )?support| provider)?(?: to jarvis)?[.!]?$', text)
         integrate = re.search(r'\b(?:connect|integrate|link)\b', text)
+        inspection = (project and not engineering and
+            (repository_inspection_goal(goal) or re.search(r'\b(?:list|read|search)\b', text)) and
+            not re.search(r'\b(?:fix|build|implement|create|add|change|repair)\b', text))
+        metadata = (project and not engineering and
+                    re.search(r'\b(?:known|unknown|where|status|capabilit\w*|unavailable)\b', text) and
+                    not re.search(r'\b(?:fix|build|implement|create|add|change|improve|update|repair|deploy)\b', text))
         if reuse and not required:
             required = ['claude-code-engineering' if 'claude' in reuse[0] else 'codex-engineering', 'provider-routing']
         elif integrate and not required:
             required = ['repo-files', 'engineering-jobs', 'provider-routing']
-        elif (project and not required and not engineering and
-              re.search(r'\b(?:inspect|assess|list|read|search)\b', text) and
-              not re.search(r'\b(?:fix|build|implement|create|add|change|repair)\b', text)):
+        elif inspection and not required:
             required = ['repo-files']
         missing = [cid for cid in required if cid not in caps or not caps[cid]['registered']]
         outcome, rationale = 'NEED_MORE_INFORMATION', 'The goal does not establish a specific existing operation, integration boundary or engineering change.'
         if unknown_project:
             rationale = 'The requested project is not registered; identify its authoritative identity and location before engineering.'
+        elif metadata and not required:
+            outcome, rationale = 'USE_EXISTING', 'Use registered project metadata and current capability observations; report unknown location or runtime without inventing them.'
         elif project and project['status'] == 'needs_discovery':
             rationale = 'Project identity is known, but its authoritative repository and runtime need discovery before engineering.'
+        elif inspection and required == ['repo-files'] and project['repository']:
+            outcome, rationale = 'USE_EXISTING', 'Use bounded owner reads on the trusted registered root. Capability freshness, scope and baseline drift are observations, not read authorization; the repository tool reports actual access.'
         elif reuse and not missing:
             outcome, rationale = 'USE_EXISTING', 'Provider support and routing already exist. Use the existing adapter; authentication and remote usability must be checked separately.'
         elif integrate and project:

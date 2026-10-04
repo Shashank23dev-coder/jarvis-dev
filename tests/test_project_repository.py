@@ -150,16 +150,16 @@ def test_secret_redaction_and_filtered_git(projects):
         assert '.env' not in encoded and 'PROTECTED_SENTINEL' not in encoded and 'synthetic-sensitive-value' not in encoded
 
 
-def test_baseline_conflict_structured_and_no_fallback(projects):
+def test_baseline_conflict_is_observation_and_reads_current_registered_root(projects):
     portfolio, roots = projects
     root = roots['trading-bot']
     (root / 'new.txt').write_text('New revision')
     git(root, 'add', '.')
     git(root, 'commit', '-m', 'Changed baseline')
     result = inspect_repository(portfolio.database, project_id='trading-bot', operation='read_text', path='src/app.py')
-    assert not result['repository']['available'] and result['repository']['reason'] == 'baseline_conflict'
+    assert result['repository']['available'] and result['repository']['reason'] == 'available'
     assert result['repository']['current_commit'] == git(root, 'rev-parse', 'HEAD').strip()
-    assert result['repository']['baseline_conflict'] and result['text'] is None
+    assert result['repository']['baseline_conflict'] and "project = 'trading-bot'" in result['text']
     assert any(c['resource'] == 'trading-bot' for c in portfolio.snapshot()['contradictions'])
 
 

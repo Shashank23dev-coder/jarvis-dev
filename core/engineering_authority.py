@@ -24,5 +24,5 @@ def require_owner(authority):
     # Serialized fields are audit metadata, never an authentication credential.
     # Only trusted perimeter/operator code can supply the in-process capability.
     if not isinstance(authority, OwnerDevAuthority):
-        raise ToolDenied('Authenticated owner development capability required')
+        raise ToolDenied('Authenticated owner development capability required', reason='owner_required')
     return authority

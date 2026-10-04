@@ -1,6 +1,7 @@
 """Current-message deployment capability binding; model arguments contain no approval."""
 import copy
 import json
+import re
 from types import MappingProxyType
 from typing import Annotated
 
@@ -34,6 +35,10 @@ Use deployment_status for current identity and latest release, deployment_histor
 and inspect_deployment for prior results. Never read protected repository paths
 for deployment information. Production uses a timestamped controller snapshot;
 report its observation time and unknown eligibility, not a live health claim.
+For a deployment request, inspect the current revision and prepare a successful
+preview before asking for the exact commit approval. A missing controller
+snapshot is a connection blocker, not a grant of deployment authority. Explain
+that blocker and do not ask for approval of an unverified release.
 '''
 
     def __init__(self, goal, factory=None):
@@ -41,18 +46,28 @@ report its observation time and unknown eligibility, not a live health claim.
         self.reader = (lambda: ControllerInspector(factory())) if factory else configured_inspector
         self.approved = approved_commit(goal)
         self.result = None
+        self.blockers = {}
+
+    def _read(self, operation, *arguments):
+        try:
+            result = getattr(self.reader(), operation)(*arguments)
+        except ToolDenied as exc:
+            self.blockers[operation] = exc.public_error()['message']
+            raise
+        self.blockers.pop(operation, None)
+        return json.dumps(result)
 
     def preview(self, commit):
-        return json.dumps(self.reader().preview(commit))
+        return self._read('preview', commit)
 
     def inspect(self, deployment_id):
-        return json.dumps(self.reader().inspect(deployment_id))
+        return self._read('inspect', deployment_id)
 
     def history(self):
-        return json.dumps(self.reader().history())
+        return self._read('history')
 
     def status(self):
-        return json.dumps(self.reader().status())
+        return self._read('status')
 
     def deploy(self, commit):
         if self.approved != commit:
@@ -82,6 +97,9 @@ report its observation time and unknown eligibility, not a live health claim.
 
     def final_response(self, original):
         if self.result is None:
+            if self.blockers and re.search(r'\bdeploy\b', self.goal, re.I):
+                return ('I could not prepare deployment. ' + ' '.join(dict.fromkeys(self.blockers.values())) +
+                        ' Deployment requires a verified preview and your approval for the exact commit. Nothing was deployed.')
             return original
         return (f"Deployment {self.result['id']}: {self.result['status']}. Commit: {self.result['commit']}. "
                 f"Rollback: {json.dumps(self.result['rollback'])}. "

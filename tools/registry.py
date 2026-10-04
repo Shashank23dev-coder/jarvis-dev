@@ -1,10 +1,10 @@
 """Fixed safe-tool dispatch, strict validation and mandatory metadata-only audit."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from time import monotonic
 from types import MappingProxyType
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING, get_args
 from uuid import uuid4
 
 from .policy import ToolDenied
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 ERROR_MESSAGES = MappingProxyType({
     "unknown_tool": "The requested tool is not registered.",
     "invalid_arguments": "Arguments do not match the tool schema.",
-    "denied": "Repository policy denied the operation.",
+    "denied": "That action is outside the authorized tools for this request.",
     "tool_failed": "The tool could not complete the operation.",
     "command_failed": "The command exited unsuccessfully.",
     "timed_out": "The command exceeded its time limit.",
@@ -102,6 +102,12 @@ class ToolRegistry:
         return definition.arguments.model_validate(values).model_dump()
 
     def _data(self, definition: ToolDefinition, raw) -> StrictModel:
+        variants = get_args(definition.result)
+        if variants:
+            # Project facades retain the native result when no project is named.
+            # Each alternative is still a fixed, validated host result schema.
+            variant = next((kind for kind in variants if isinstance(raw, kind)), variants[-1])
+            return self._data(replace(definition, result=variant), raw)
         limit = self.MAX_RESULT_CHARS
         if definition.result is FileListResult:
             # Validate before capping; malformed results must never reach the model.
@@ -166,6 +172,7 @@ class ToolRegistry:
             task_id, invocation_id=invocation_id, tool_name=safe_name, status="started",
             started_at=started_at, duration_ms=0, summary="Tool request received.")
         data = None
+        denial = None
         code = rejection
         if not code:
             if definition is None:
@@ -185,15 +192,22 @@ class ToolRegistry:
                                 code = "output_limit"
                             elif data.returncode:
                                 code = "command_failed"
-                    except ToolDenied:
+                    except ToolDenied as exc:
                         code = "denied"
+                        denial = ToolFailure(**exc.public_error())
                     except Exception:
                         # Includes schema validation failures and infrastructure errors.
                         # Do not expose exception strings or Pydantic input/error details.
                         code = "tool_failed"
         result_type = ToolResult[definition.result] if definition else ToolResult[TextResult]
+        if code == 'invalid_arguments':
+            denial = ToolFailure(code=code, message=ERROR_MESSAGES[code],
+                                 gate='tool_arguments', reason='schema_mismatch')
+        elif code == 'unknown_tool':
+            denial = ToolFailure(code=code, message=ERROR_MESSAGES[code],
+                                 gate='tool_dispatch', reason='unregistered_tool')
         result = result_type(ok=code is None, data=data,
-                             error=ToolFailure(code=code, message=ERROR_MESSAGES[code]) if code else None)
+                             error=(denial or ToolFailure(code=code, message=ERROR_MESSAGES[code])) if code else None)
         task_store.add_tool_activity(
             task_id, invocation_id=invocation_id, tool_name=safe_name,
             status="completed" if result.ok else "failed", started_at=started_at,

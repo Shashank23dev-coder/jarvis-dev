@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+import sys
 
 from tools.policy import ToolDenied
 from .candidate_bridge import Request, project, MAX_BYTES
@@ -17,8 +18,9 @@ CONTAINER = 'jarvis-jarvis-1'
 
 
 class Broker:
-    def __init__(self, service, *, source=SOURCE):
+    def __init__(self, service=None, *, source=SOURCE, database=None):
         self.service = service
+        self.database = service.store.database if service is not None else database
         # Trusted host configuration only; no request may select a repository.
         self.source = Path(source)
 
@@ -27,7 +29,7 @@ class Broker:
             canonical = self.source.resolve(strict=True)
             actual = self.service.source.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
-            raise ToolDenied('Broker development checkout unavailable') from exc
+            raise ToolDenied('Broker development checkout unavailable', reason='development_checkout_required') from exc
         if (os.environ.get('JARVIS_MODE') != 'development'
                 or not self.source.is_absolute()
                 or canonical != self.source
@@ -35,25 +37,29 @@ class Broker:
                 or actual != self.source
                 or not (self.source / '.git').is_dir()
                 or (self.source / '.git').is_symlink()):
-            raise ToolDenied('Broker requires the configured development checkout')
+            raise ToolDenied('Broker requires the configured development checkout', reason='development_checkout_required')
 
     def execute(self, raw, *, authority=None):
         from .engineering_authority import current_owner, require_owner
         authority = require_owner(authority if authority is not None else current_owner.get())
-        self.check_source()
         request = Request.model_validate(raw).checked()
+        # Registered reads are authorized by owner + host Portfolio + native
+        # read operation. Candidate workspace eligibility is unrelated.
         if request.action == 'project_repository':
             from .engineering_repository import inspect_repository
-            return inspect_repository(self.service.store.database, **request.arguments)
+            return inspect_repository(self.database, **request.arguments)
         if request.action == 'project_inspect':
             from .engineering_portfolio import inspect_project_record
-            return inspect_project_record(self.service.store.database, **request.arguments)
+            return inspect_project_record(self.database, **request.arguments)
         if request.action == 'decision':
             from .engineering_decision import preflight
-            return preflight(self.service.store.database, request.goal, task_id=request.task_id, **request.arguments)
+            return preflight(self.database, request.goal, task_id=request.task_id, **request.arguments)
         if request.action == 'runtime':
             from .engineering_jobs import EngineeringJobs
-            return EngineeringJobs(self.service.store.database).runtime()
+            return EngineeringJobs(self.database).runtime()
+        if self.service is None:
+            self.service = SelfEditService(self.database, source_root=self.source, candidate_root=STATE / 'candidates')
+        self.check_source()
         if request.action.startswith('job_'):
             from .engineering_jobs import EngineeringJobs, project_job
             jobs = EngineeringJobs(self.service.store.database)
@@ -129,7 +135,7 @@ def transport(operation, payload=None):
                                 input=data, capture_output=True, timeout=10,
                                 env={'PATH': '/usr/bin:/bin', 'HOME': home})
     if result.returncode or len(result.stdout) > MAX_BYTES:
-        raise ToolDenied('Candidate mailbox unavailable')
+        raise ToolDenied('Candidate mailbox unavailable', reason='unavailable')
     return json.loads(result.stdout)
 
 
@@ -144,26 +150,11 @@ def main():
         raise ToolDenied('Unsafe broker state directory')
     fd = os.open(STATE / 'broker.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    service = SelfEditService(Database(STATE / 'candidates.sqlite3'), source_root=SOURCE,
-                              candidate_root=STATE / 'candidates')
-    broker = Broker(service)
     while True:
         try:
             raw = transport('receive')
             if raw:
-                try:
-                    from .engineering_authority import OwnerDevAuthority
-                    # Fixed docker-exec into the configured application, whose
-                    # mailbox is private to its UID. Candidate/test containers
-                    # have neither this mailbox nor the Docker socket mounted.
-                    authority = OwnerDevAuthority()
-                    # The currently deployed protocol predates authority audit
-                    # fields. Issue them from this authenticated private channel
-                    # so a dev broker upgrade needs no production deployment.
-                    record = broker.execute(dict(raw, authority=authority.model_dump()), authority=authority)
-                    response = dict(request_id=raw['request_id'], ok=True, record=record)
-                except Exception:
-                    response = dict(request_id=raw['request_id'], ok=False)
+                response = execute_current(raw)
                 transport('respond', response)
         except Exception:
             # Fixed diagnostic only. Neither Docker output nor requests are logs.
@@ -171,5 +162,48 @@ def main():
         time.sleep(1)
 
 
+def execute_current(raw):
+    """The existing operator loop transports; each dispatch loads current code.
+
+    A long-running mailbox process must never cache request authorization from
+    an older release. The fixed local child uses this same broker and protocol.
+    No request selects its executable, checkout, environment or service.
+    """
+    result = subprocess.run([sys.executable, '-B', '-m', 'core.candidate_broker', '--execute'],
+        input=json.dumps(raw).encode(), capture_output=True, timeout=930, cwd=SOURCE)
+    if result.returncode or len(result.stdout) > MAX_BYTES:
+        return dict(request_id=raw['request_id'], ok=False,
+                    error=ToolDenied(reason='unavailable').public_error())
+    return json.loads(result.stdout)
+
+
+def execute_private(raw):
+    """Called only by the fixed operator entrypoint on its private channel."""
+    from pydantic import ValidationError
+    from .engineering_authority import OwnerDevAuthority
+    if (os.environ.get('JARVIS_MODE') != 'development'
+            or Path(__file__).resolve().parents[1] != SOURCE):
+        raise ToolDenied('Broker requires authorized host runtime', reason='development_checkout_required')
+    database = Database(STATE / 'candidates.sqlite3')
+    authority = OwnerDevAuthority()
+    try:
+        record = Broker(database=database).execute(dict(raw, authority=authority.model_dump()), authority=authority)
+        return dict(request_id=raw['request_id'], ok=True, record=record)
+    except ToolDenied as exc:
+        error = exc.public_error()
+    except ValidationError:
+        error = ToolDenied(reason='invalid_request').public_error()
+    except Exception:
+        error = dict(code='tool_failed', gate='broker_execution', reason='execution_failed',
+                     message='broker_execution: execution_failed')
+    return dict(request_id=raw['request_id'], ok=False, error=error)
+
+
 if __name__ == '__main__':
-    main()
+    if sys.argv[1:] == ['--execute']:
+        raw = json.loads(sys.stdin.buffer.read(MAX_BYTES + 1))
+        print(json.dumps(execute_private(raw)))
+    elif not sys.argv[1:]:
+        main()
+    else:
+        raise ToolDenied('Unsupported broker entrypoint')

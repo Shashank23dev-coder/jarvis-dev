@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import json
+import re
 from typing import Callable
 
 from models.openai_client import request_agent_turn
@@ -12,7 +13,20 @@ from .recall import RECALL_INSTRUCTIONS, NAVIGATION_INSTRUCTIONS
 from .task_context import TaskContext, assemble_context
 
 
-INSTRUCTIONS = """You are Jarvis, a conversational assistant with read-only repository tools.
+INSTRUCTIONS = """You are Jarvis, an intelligent executive assistant with repository tools.
+Understand the user's intent, infer relevant registered project context, and use
+current runtime evidence and existing capabilities to carry out the request.
+Authenticated owner requests for bounded, non-sensitive source inspection need
+no additional permission. Act, then explain findings. Ask only for genuinely
+ambiguous intent or protected, destructive, production, financial or external
+account actions; authentication does not grant those actions automatically.
+If source is available but runtime is not connected, inspect the source and
+report findings with runtime behavior explicitly unknown. Continue other useful
+work when one evidence source is unavailable. Never treat missing runtime,
+provider evidence or a stale baseline as a denial of safe source inspection.
+Use project names in conversation. Keep capability decision labels, policy gates
+and tool plumbing internal except for requested debugging. Explain blockers in
+human terms using the returned reason, never an invented denial or path.
 Decide whether tools are needed for the user's request. Answer greetings and
 general questions directly without tools or unnecessary engineering plans.
 For repository inspection, gather evidence with list_files and read_text.
@@ -31,6 +45,8 @@ or execute arbitrary commands. Only host-authorized candidate tools, when suppli
 may delegate isolated changes to the existing candidate workflow. Never request unauthorized tools or work around a policy denial.
 Do not reveal credentials or protected content. Do not claim a tool succeeded
 when it failed, timed out, or returned truncated output. Explain relevant limits.
+Do not offer to read names or redacted values from a protected .env file. Use
+allowed documentation or configuration the owner has already redacted instead.
 Give a concise final response grounded in the tool results. No execution plan
 should be described as already performed. Do not expose private reasoning.
 """
@@ -94,7 +110,7 @@ class AgentRunner:
         deployments = DeploymentTools(goal)
         registry = deployments.bind(registry)
         from .brain_status import BrainStatusTools
-        brain_status = BrainStatusTools(task_store, task_id)
+        brain_status = BrainStatusTools(task_store, task_id, goal=goal)
         registry = brain_status.bind(registry)
         from .self_state import SelfState
         awareness = SelfState(task_store, task_id, candidates,
@@ -106,6 +122,8 @@ class AgentRunner:
         calls = iterations = 0
         reflection = TaskReflection()
         retrieval_tracked = False
+        source_read = source_blocked = False
+        inspection_reminders = 0
 
         def finish(status, response, reason):
             outcome = self._finish(task_store, task_id, status, deployments.final_response(candidates.final_response(brain_status.final_response(response))), iterations, calls, reason)
@@ -117,6 +135,9 @@ class AgentRunner:
             assembled = context_builder(context, task_store, recall_limits=self.recall_limits,
                                         experience_limits=self.experience_limits)
             history, recall, experiences = assembled.history, assembled.recall, assembled.experiences
+            conversation = task_store.memory.prompt_history(context.conversation_id, through_task=task_id)
+            candidates.project_history = [item['content'] for item in conversation[:-1]
+                if item.get('role') == 'user' and isinstance(item.get('content'), str)][-4:]
             if assembled.answer is not None:
                 return finish('completed', assembled.answer, assembled.stop_reason)
             for iterations in range(1, self.max_iterations + 1):
@@ -142,6 +163,10 @@ class AgentRunner:
                 request = dict(input=history.copy(), tools=registry.model_tools(),
                                instructions=instructions, allow_tools=allow_tools)
                 turn = request_turn(**(awareness.enrich(request) if runtime_session is None else request))
+                from .engineering_decision import repository_inspection_goal
+                clarification = candidates.project_clarification()
+                if clarification and repository_inspection_goal(goal):
+                    return finish('completed', clarification, 'project_clarification')
                 if turn.status != "completed":
                     return finish("failed", "The model did not complete its response.", "model_incomplete")
                 if not isinstance(turn.output, list) or len(turn.output) > 32:
@@ -172,6 +197,17 @@ class AgentRunner:
                     calls += 1  # Invalid names/arguments and policy denials consume budget too.
                     result = registry.execute(name, request.get("arguments"),
                                                    task_id=task_id, task_store=task_store)
+                    if name in {'list_files', 'read_text', 'inspect_project_repository', 'run_command', 'run_pytest'}:
+                        evidence = getattr(result.data, 'repository', None)
+                        if evidence is not None:
+                            source_blocked |= not evidence.available
+                            source_read |= bool(result.ok and getattr(result.data, 'operation', None) == 'read_text'
+                                                and getattr(result.data, 'text', None))
+                        if result.error and result.error.reason != 'git_metadata_required':
+                            # After an attempted read, let the model explain its
+                            # concrete blocker or choose other permitted files.
+                            # Do not force retries of a denied operation.
+                            source_blocked = True
                     attempt_capture(lambda: reflection.observe(name, request.get('arguments'), result))
                     # Preserve reasoning and all other output items as required by Responses.
                     history.extend(turn.output)
@@ -185,6 +221,23 @@ class AgentRunner:
                             return finish('limit_reached', 'Engineering preparation completed, but implementation did not run before the execution limit.', 'execution_limit')
                         history.extend(turn.output)
                         history.append({'role': 'developer', 'content': candidates.CONTINUE_ENGINEERING})
+                        continue
+                    project = next((p for p in candidates.projects if p['project_id'] == candidates.project_id), {})
+                    # A model refusal/permission question cannot end a supported
+                    # owner inspection before any source evidence is collected.
+                    # Metadata questions, plan-only requests and protected goals
+                    # remain outside this hint; authorization is never inferred.
+                    if (allow_tools and inspection_reminders < 2 and not source_read and not source_blocked
+                            and project and repository_inspection_goal(goal)
+                            and not re.search(r'\b(?:capabilit\w*|status)\b', goal, re.I)):
+                        inspection_reminders += 1
+                        history.extend(turn.output)
+                        history.append({'role': 'developer', 'content':
+                            'Continue the requested inspection in this task. The authenticated owner has already '
+                            'requested safe source inspection of ' + project['name'] + '. Use list_files/read_text '
+                            'or inspect_project_repository to collect available source evidence before answering. '
+                            'An unavailable external runtime does not block source reads. Do not ask for another '
+                            'permission or invent source findings. Preserve all tool protections.'})
                         continue
                     return finish("completed", turn.text, "final_response")
                 else:

@@ -72,7 +72,7 @@ It does not invoke providers or project runtimes.
 `inspect_portfolio_project(project_id)` refreshes Git identity metadata through
 the same resolver as `inspect_project_repository`. The latter accepts a project
 ID and a bounded read operation: inspect, list_files, read_text, literal search_text,
-filtered git_status or git_diff. Trusted host Portfolio metadata supplies the
+filtered git_status or git_diff, bounded git_log or git_revision. Trusted host Portfolio metadata supplies the
 canonical registered repository root; callers cannot supply roots. The adapter
 uses existing `RepositoryTools` path policy, descriptor-based no-follow reads,
 bounded output, stripped subprocess environment and safe Git arguments. Identity
@@ -84,13 +84,16 @@ registry copy. Production chat uses the existing owner broker/mailbox and its
 host database; the chat container's filesystem and prompt text do not supply
 roots. Tool definitions include the resolved project ID. No new transport or
 permission system is introduced. Default repository tools retain their existing
-behavior when no project is referenced. Automatic association recognizes the
-three initial identities; other registered IDs can be explicitly inspected.
+behavior when no project is referenced and the project catalog is available.
+Automatic association recognizes registered names and IDs, including the three
+initial identities. Production custom identities come from the host Portfolio
+snapshot. Explicit registered IDs can also be inspected.
 
-Unknown location, missing/inaccessible/unsafe roots, unavailable Git identity and
-baseline conflicts return structured evidence without falling back to Jarvis.
+Unknown location and missing/inaccessible/unsafe roots return structured evidence
+without falling back to Jarvis. Git availability and baseline conflicts are observations.
 CreatorOS remains inaccessible until trusted host registration establishes its
-root. A baseline mismatch reports the actual revision and blocks source reads.
+root. A baseline mismatch reports the actual revision and permits safe source reads.
+Missing Git permits file reads and reports `git_unavailable`; Git operations still require Git.
 Protected paths, traversal, root/parent/file symlinks and hardlinked files are
 rejected or omitted. Text passes existing credential redaction with additional
 quoted-key redaction. No external project writes, candidates, tests, arbitrary
@@ -108,8 +111,8 @@ The policy is deliberately small and conservative:
 
 - `USE_EXISTING`: recognized requests to add/use Codex or Claude support reuse
   existing adapters/routing. Authentication and quota remain separate blockers.
-  Project inspection/assessment requests require fresh scoped repo-files evidence;
-  once confirmed, they reuse the bounded repository capability.
+  Owner project inspection/assessment reuses the bounded registered repository
+  capability without capability freshness/scope or baseline approval gates.
   Other explicitly requested capabilities require fresh usable evidence and
   matching project scope before a reuse decision.
 - `INTEGRATE`: a known project connection should use current Jarvis-side tools,
@@ -238,3 +241,7 @@ results. Its sanitized proof is `/tmp/jarvis-project-readonly-erlxihh0/acceptanc
 Trading Bot Git status remained empty after the full validation run as well.
 No production modification, deployment, service operation or provider
 authentication was performed.
+
+The current authorization model and complete production-path denial trace are in
+[Owner read-only authorization](owner-readonly-authorization.md). Earlier checkpoints
+describe historical behavior, including the former baseline gate.

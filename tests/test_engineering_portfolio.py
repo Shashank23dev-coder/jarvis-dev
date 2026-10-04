@@ -105,7 +105,10 @@ def test_probe_failure_no_raw_errors(portfolio, monkeypatch, tmp_path):
     def fail(*args, **kwargs):
         raise OSError('PRIVATE_AUTH_MATERIAL')
     monkeypatch.setattr('tools.repository.RepositoryTools._execute', fail)
-    assert portfolio.inspect_project('trading-bot')['repository_state'] == 'unavailable'
+    project=portfolio.inspect_project('trading-bot')
+    assert project['repository_state']=='present'
+    assert project['repository_inspection']['reason']=='git_unavailable'
+    assert project['repository_inspection']['available']
     assert 'PRIVATE_AUTH_MATERIAL' not in json.dumps(portfolio.snapshot())
 
 
@@ -131,14 +134,14 @@ def test_preflight_outcomes_and_durable_rationale(portfolio, goal, project, outc
         assert value['capability_states']['claude-code-engineering'] == 'unproven'
 
 
-def test_existing_capability_needs_fresh_usable_scoped_evidence(portfolio):
+def test_owner_repository_inspection_does_not_need_capability_freshness_or_scope(portfolio):
     decisions = Decisions(portfolio.database)
     kwargs = dict(project_id='jarvis-core', required_capabilities=['repo-files'])
-    assert decisions.evaluate('Inspect repository', portfolio.snapshot(), **kwargs)['outcome'] == 'NEED_MORE_INFORMATION'
+    assert decisions.evaluate('Inspect repository', portfolio.snapshot(), **kwargs)['outcome'] == 'USE_EXISTING'
     snapshot = portfolio.snapshot(observations={'repo-files': dict(current_usability='available', configured=True,
         evidence=portfolio.evidence('bound_tools', 'current task configured repository').model_dump())})
     assert decisions.evaluate('Inspect repository', snapshot, **kwargs)['outcome'] == 'USE_EXISTING'
-    assert decisions.evaluate('Inspect repository', snapshot, project_id='trading-bot', required_capabilities=['repo-files'])['outcome'] == 'NEED_MORE_INFORMATION'
+    assert decisions.evaluate('Inspect repository', snapshot, project_id='trading-bot', required_capabilities=['repo-files'])['outcome'] == 'USE_EXISTING'
 
 
 def test_missing_capability_build_requires_specific_request(portfolio):

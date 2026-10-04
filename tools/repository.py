@@ -76,12 +76,12 @@ class RepositoryTools:
             info = os.fstat(descriptor)
             if directory:
                 if not stat.S_ISDIR(info.st_mode):
-                    raise ToolDenied("Expected a directory")
+                    raise ToolDenied("Expected a directory", reason='directory_required')
             elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise ToolDenied("Only regular, non-linked files are readable")
+                raise ToolDenied("Only regular, non-linked files are readable", reason='linked_or_special_file')
             yield descriptor
         except OSError as exc:
-            raise ToolDenied("Path unavailable or unsafe") from exc
+            raise ToolDenied("Path unavailable or unsafe", reason='path_unavailable_or_unsafe') from exc
         finally:
             os.close(descriptor)
 
@@ -116,11 +116,11 @@ class RepositoryTools:
     def _read_bytes(self, path: str) -> bytes:
         with self._open(path) as descriptor:
             if os.fstat(descriptor).st_size > self.max_file_bytes:
-                raise ToolDenied("File exceeds configured size limit")
+                raise ToolDenied("File exceeds configured size limit", reason='file_size_limit')
             with os.fdopen(os.dup(descriptor), "rb") as stream:
                 data = stream.read(self.max_file_bytes + 1)
             if len(data) > self.max_file_bytes:
-                raise ToolDenied("File exceeds configured size limit")
+                raise ToolDenied("File exceeds configured size limit", reason='file_size_limit')
             return data
 
     def read_text(self, path: str) -> str:
@@ -129,17 +129,17 @@ class RepositoryTools:
         try:
             value = data.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ToolDenied("File is not UTF-8 text") from exc
+            raise ToolDenied("File is not UTF-8 text", reason='utf8_required') from exc
         if any(ord(char) < 32 and char not in "\t\n\r" for char in value):
-            raise ToolDenied("File contains binary control characters")
+            raise ToolDenied("File contains binary control characters", reason='binary_content')
         return value
 
     def search_text(self, query: str, path: str = '.', *, max_matches: int = 50) -> CommandResult:
         """Literal, bounded search through the same filtered descriptor-safe reads."""
         if not isinstance(query, str) or not 1 <= len(query) <= 256 or '\n' in query or '\x00' in query:
-            raise ToolDenied('Expected a bounded literal search term')
+            raise ToolDenied('Expected a bounded literal search term', reason='invalid_search')
         if type(max_matches) is not int or not 1 <= max_matches <= 100:
-            raise ToolDenied('Invalid search limit')
+            raise ToolDenied('Invalid search limit', reason='invalid_search')
         names = self.list_files(path)
         lines, scanned, size = [], 0, 0
         for name in names:
@@ -168,6 +168,18 @@ class RepositoryTools:
                 or lines[0] != str(self.root) or not re.fullmatch('[0-9a-f]{40}', lines[1])):
             raise ToolError('Repository identity unavailable')
         return lines[1]
+
+    def git_log(self) -> CommandResult:
+        """Ten revisions, parent hashes and timestamps; no commit prose or patches."""
+        raw = self._git_command('log', '-10', '--format=%H %P %ct', '--no-decorate',
+                                '--no-show-signature', '--no-notes')
+        if raw.returncode or raw.timed_out or raw.truncated:
+            raise ToolError('Git log failed or exceeded its limits')
+        import re
+        if any(not re.fullmatch(r'[0-9a-f]{40}(?: [0-9a-f]{40})*  ?[0-9]+', line)
+               for line in raw.stdout.splitlines()):
+            raise ToolError('Git log identity unavailable')
+        return CommandResult(('git', 'log'), 0, raw.stdout)
 
     def _execute(self, argv: Sequence[str], *, timeout: float) -> CommandResult:
         """Internal bounded executor, never exposed as a tool."""
@@ -229,7 +241,7 @@ class RepositoryTools:
 
     def _git_command(self, *arguments: str) -> CommandResult:
         if not (self.root / ".git").is_dir() or (self.root / ".git").is_symlink():
-            raise ToolDenied("Expected a standalone repository with a local .git directory")
+            raise ToolDenied("Expected a standalone repository with a local .git directory", reason='git_metadata_required')
         return self._execute((
             self._git, "--no-optional-locks", "--git-dir=" + str(self.root / ".git"),
             "--work-tree=" + str(self.root), "-c", "core.bare=false", "-c", "core.fsmonitor=false",
@@ -269,7 +281,7 @@ class RepositoryTools:
         if path is not None:
             self.policy.check(path)
             if not self._visible_git_path(path):
-                raise ToolDenied("Path unavailable or unsafe")
+                raise ToolDenied("Path unavailable or unsafe", reason='path_unavailable_or_unsafe')
             paths = [path]
         else:
             tracked = self._git_command("ls-files", "-z", "--cached")

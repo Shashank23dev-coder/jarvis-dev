@@ -66,6 +66,8 @@ ErrorCode = Literal[
 class ToolFailure(StrictModel):
     code: ErrorCode
     message: str
+    gate: str | None = None
+    reason: str | None = None
 
 
 ResultData = TypeVar("ResultData", bound=StrictModel)
