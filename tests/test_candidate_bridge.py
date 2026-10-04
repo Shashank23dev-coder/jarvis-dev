@@ -271,12 +271,30 @@ def test_visible_tools_do_not_expand_current_request_authority(tmp_path, monkeyp
 def test_absent_broker_times_out_without_local_fallback(tmp_path, monkeypatch):
     import core.candidate_bridge as bridge
     from types import SimpleNamespace
+    from threading import get_ident, Thread
     monkeypatch.setenv('JARVIS_MODE', 'production')
     monkeypatch.setattr(bridge, 'ROOT', tmp_path / 'mailbox')
     # Advance only the mailbox clock, not global task/store deadlines.
     ticks = iter((0, 311))
+    caller = get_ident()
+    # Runtime readers from earlier test modules may still be finishing. They
+    # must keep real time and cannot consume this caller's scripted deadline.
+    def monotonic():
+        return next(ticks) if get_ident() == caller else time.monotonic()
+    def sleep(delay):
+        if get_ident() == caller:
+            pytest.fail('Unexpected polling')
+        time.sleep(delay)
     monkeypatch.setattr(bridge, 'time', SimpleNamespace(time=time.time,
-        monotonic=lambda: next(ticks), sleep=lambda _: pytest.fail('Unexpected polling')))
+        monotonic=monotonic, sleep=sleep))
+    observed = []
+    def background_clock():
+        observed.append(bridge.time.monotonic())
+        bridge.time.sleep(0)
+    reader = Thread(target=background_clock)
+    reader.start()
+    reader.join(1)
+    assert not reader.is_alive() and observed[0] not in {0, 311}
     store = TaskStore(tmp_path / 'chat.sqlite3')
     task = store.create_task(GOAL)
     model = ScriptedModel(call('create_self_edit_candidate', ARGS), final('Unavailable'))
