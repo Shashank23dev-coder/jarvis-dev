@@ -42,6 +42,12 @@ class Broker:
         authority = require_owner(authority if authority is not None else current_owner.get())
         self.check_source()
         request = Request.model_validate(raw).checked()
+        if request.action == 'project_inspect':
+            from .engineering_portfolio import inspect_project_record
+            return inspect_project_record(self.service.store.database, **request.arguments)
+        if request.action == 'decision':
+            from .engineering_decision import preflight
+            return preflight(self.service.store.database, request.goal, task_id=request.task_id, **request.arguments)
         if request.action == 'runtime':
             from .engineering_jobs import EngineeringJobs
             return EngineeringJobs(self.service.store.database).runtime()
@@ -81,10 +87,15 @@ class Broker:
                     if prior.get('engineering_action') != context.get('engineering_action') or existing['goal'] != request.goal:
                         raise ToolDenied('Source action mismatch')
                     return project(self.service.store.get(existing['id']))
+            from .engineering_decision import submission_decision
+            decision = submission_decision(self.service.store.database, request.goal,
+                task_id=request.task_id, project_id=request.arguments.get('project_id'))
+            context.update(project_id=decision['project_id'], decision_id=decision['id'])
             handler = self.service.engineer if request.action == 'engineer' else self.service.start
             options = ({'engineering_action': request.engineering_action.model_dump()}
                        if request.engineering_action else {})
-            record = handler(request.goal, **request.arguments, source_context=context, **options)
+            arguments = {key: value for key, value in request.arguments.items() if key != 'project_id'}
+            record = handler(request.goal, **arguments, source_context=context, **options)
         else:
             identifier = request.arguments['candidate_id']
             existing = self.service.store.get(identifier, internal=True)

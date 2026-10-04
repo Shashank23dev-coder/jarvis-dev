@@ -4,11 +4,15 @@ from pathlib import Path
 import re
 import subprocess
 from typing import Annotated, Literal
+from types import MappingProxyType
 
 from pydantic import Field, field_validator
 from tools.schemas import StrictModel
 from .database import timestamp
 from .engineering_providers import utc_time
+
+PROJECT_ROOTS = MappingProxyType({'jarvis-core': Path('/home/ubuntu/jarvis-dev'),
+                                'trading-bot': Path('/srv/jarvis/projects/trading-bot')})
 
 Identifier = Annotated[str, Field(pattern=r'^[a-z][a-z0-9_-]{0,63}$')]
 Text = Annotated[str, Field(min_length=1, max_length=1000)]
@@ -17,7 +21,7 @@ Usability = Literal['available', 'unavailable', 'unproven', 'unknown',
                     'not_authenticated', 'quota_blocked', 'invocation_failed']
 Category = Literal['reasoning_provider', 'engineering_provider', 'research',
     'repo_filesystem', 'sandbox', 'testing', 'persistent_jobs', 'deployment',
-    'memory', 'evaluation_review', 'external_integration', 'browser_web', 'managed_agent', 'self_state', 'routing']
+    'memory', 'evaluation_review', 'external_integration', 'browser_web', 'managed_agent', 'self_state', 'routing', 'engineering_workflow']
 
 
 class Evidence(StrictModel):
@@ -82,7 +86,38 @@ class PortfolioSnapshot(StrictModel):
     executive: Literal['Jarvis'] = 'Jarvis'
     projects: Annotated[list[Project], Field(max_length=32)]
     capabilities: Annotated[list[Capability], Field(max_length=64)]
-    contradictions: Annotated[list[dict], Field(max_length=64)] = Field(default_factory=list)
+    contradictions: Annotated[list['ResourceContradiction'], Field(max_length=64)] = Field(default_factory=list)
+
+
+class ResourceContradiction(StrictModel):
+    resource: Identifier
+    field: Literal['configured', 'current_usability', 'commit', 'repository']
+    registry: Text | bool | None
+    runtime: Text | bool | None
+
+
+class ProjectArguments(StrictModel):
+    project_id: Identifier
+
+
+class ProjectEvidence(StrictModel):
+    project: Project
+    contradictions: Annotated[list[ResourceContradiction], Field(max_length=64)] = Field(default_factory=list)
+
+
+def overlay_capabilities(capabilities, changes, now):
+    result, conflicts = [], []
+    for saved in capabilities:
+        value = Capability.model_validate(dict(saved, **changes.get(saved['capability_id'], {}))).model_dump()
+        age = (utc_time(now) - utc_time(value['evidence']['observed_at'])).total_seconds()
+        if not 0 <= age < value['freshness_seconds']:
+            value['current_usability'] = 'unknown'
+        if saved['capability_id'] in changes:
+            for field in ('configured', 'current_usability'):
+                if saved[field] not in {None, 'unknown', 'unproven'} and saved[field] != value[field]:
+                    conflicts.append(dict(resource=value['capability_id'], field=field, registry=saved[field], runtime=value[field]))
+        result.append(value)
+    return result, conflicts
 
 
 class Portfolio:
@@ -118,7 +153,7 @@ class Portfolio:
 
     def seed(self):
         native = self.evidence('native_registration', 'implemented; runtime execution unproven')
-        source = str(Path(__file__).resolve().parents[1])
+        source = str(PROJECT_ROOTS['jarvis-core'])
         projects = [dict(project_id='jarvis-core', name='Jarvis', description='Jarvis Executive and its native systems.',
             category='assistant', status='active', repository=source,
             runtime_notes=['Linux development checkout; production is a separate controlled runtime.'],
@@ -142,6 +177,8 @@ class Portfolio:
             ('repo-files', 'Repository and file tools', 'repo_filesystem', 'RepositoryTools', 'native', ['inspect_repository', 'read_files'], ['Configured repository only; protected files denied; no arbitrary external process or SSH access.']),
             ('testing', 'Isolated testing', 'testing', 'tools.sandbox', 'native', ['testing'], ['A registered test tool does not prove a usable sandbox.']),
             ('independent-review', 'Independent review and evaluation', 'evaluation_review', 'SelfEditService', 'native', ['review'], ['Requires a usable non-author provider and test evidence.']),
+            ('candidate-workflow', 'Controlled candidate workflow', 'engineering_workflow', 'SelfEditService', 'native', ['code', 'documentation'], ['Isolated configured-dev candidates; stops for human apply approval.']),
+            ('candidate-apply', 'Controlled candidate apply', 'engineering_workflow', 'CandidateApply', 'native', ['apply_candidate'], ['Separate exact human approval; no automatic apply, push or deployment.']),
             ('deployment-pipeline', 'Controlled deployment pipeline', 'deployment', 'deployment controller', 'native', ['deployment'], ['Separate human approval; controller availability unproven.']),
             ('memory', 'Persistent memory and experience', 'memory', 'SQLite memory / experience', 'native', ['memory'], ['Task access and existing retention/privacy rules apply.']),
             ('self-state', 'Runtime self-state', 'self_state', 'SelfState', 'native', ['capability_status'], ['Bounded observations; unknown is not absent.']),
@@ -158,16 +195,15 @@ class Portfolio:
 
     def inspect_project(self, project_id):
         """Optional Git identity probe only, never status, file contents or runtime."""
-        roots = {'jarvis-core': Path(__file__).resolve().parents[1], 'trading-bot': Path('/srv/jarvis/projects/trading-bot')}
-        if project_id not in roots:
+        if project_id not in PROJECT_ROOTS:
             return None
-        root = roots[project_id]
+        root = PROJECT_ROOTS[project_id]
         value = next(p for p in self.projects() if p['project_id'] == project_id)
         value.update(repository=str(root), current_commit=None, repository_state='unavailable',
                      last_inspected=self.clock(), last_updated=self.clock(),
                      evidence=self.evidence('project_git', 'repository identity only; runtime unproven').model_dump())
         try:
-            if root.is_symlink() or (root / '.git').is_symlink():
+            if root.resolve(strict=True) != root or root.is_symlink() or (root / '.git').is_symlink():
                 raise ValueError('Unsafe repository identity')
             result = subprocess.run(['/usr/bin/git', '--no-optional-locks', '-C', str(root),
                 'rev-parse', '--show-toplevel', 'HEAD'], capture_output=True, timeout=3,
@@ -198,30 +234,26 @@ class Portfolio:
                     current_usability=provider['current_usability'],
                     evidence=evidence(observation) or self.evidence('provider_registry', 'unobserved').model_dump(),
                     last_success=evidence(provider['last_success']), last_failure=evidence(provider['last_failure']))
-        conflicts = []
-        for index, value in enumerate(capabilities):
-            saved = value.copy()
-            age = (utc_time(self.clock()) - utc_time(value['evidence']['observed_at'])).total_seconds()
-            if not 0 <= age < value['freshness_seconds']:
-                value['current_usability'] = 'unknown'
-            if value['capability_id'] in changes:
-                value.update(changes[value['capability_id']])
-                value = Capability.model_validate(value).model_dump()
-                for field in ('configured', 'current_usability'):
-                    if saved[field] not in {None, 'unknown', 'unproven'} and saved[field] != value[field]:
-                        conflicts.append(dict(resource=value['capability_id'], field=field, registry=saved[field], runtime=value[field]))
-            # Update the list object, including validated fresh projections.
-            age = (utc_time(self.clock()) - utc_time(value['evidence']['observed_at'])).total_seconds()
-            if not 0 <= age < value['freshness_seconds']:
-                value['current_usability'] = 'unknown'
-            capabilities[index] = value
+        capabilities, conflicts = overlay_capabilities(capabilities, changes, self.clock())
         projects = self.projects()
         for p in projects:
             if p['baseline_commit'] and p['current_commit'] and p['baseline_commit'] != p['current_commit']:
                 conflicts.append(dict(resource=p['project_id'], field='commit', registry=p['baseline_commit'], runtime=p['current_commit']))
             if p['project_id'] == 'jarvis-core':
-                root = str(Path(__file__).resolve().parents[1])
+                root = str(PROJECT_ROOTS['jarvis-core'])
                 if p['repository'] != root:
                     conflicts.append(dict(resource=p['project_id'], field='repository', registry=p['repository'], runtime=root))
                     p['repository'] = root
         return PortfolioSnapshot(projects=projects, capabilities=capabilities, contradictions=conflicts[:64]).model_dump()
+
+
+def inspect_project_record(database, project_id):
+    from tools.policy import ToolDenied
+    portfolio = Portfolio(database)
+    project = next((p for p in portfolio.projects() if p['project_id'] == project_id), None)
+    if project is None:
+        raise ToolDenied('Unknown portfolio project')
+    portfolio.inspect_project(project_id)
+    snapshot = portfolio.snapshot()
+    return ProjectEvidence(project=next(p for p in snapshot['projects'] if p['project_id'] == project_id),
+        contradictions=[c for c in snapshot['contradictions'] if c['resource'] == project_id]).model_dump()

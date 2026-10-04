@@ -24,6 +24,8 @@ class RuntimeEvidence(StrictModel):
     jobs: list[dict]
     supported: bool
     provider_registry: dict | None = None
+    portfolio: dict | None = None
+    decisions: list[dict] = []
 
 
 def project_runtime(value):
@@ -32,6 +34,10 @@ def project_runtime(value):
     result['jobs'] = [project_job(j) for j in result['jobs'][:10]]
     from .engineering_providers import project_registry
     result['provider_registry'] = project_registry(result['provider_registry'])
+    from .engineering_portfolio import PortfolioSnapshot
+    from .engineering_decision import Decision
+    result['portfolio'] = PortfolioSnapshot.model_validate(result['portfolio']).model_dump() if result['portfolio'] is not None else None
+    result['decisions'] = [Decision.model_validate(v).model_dump() for v in result['decisions'][:5]]
     return result
 
 

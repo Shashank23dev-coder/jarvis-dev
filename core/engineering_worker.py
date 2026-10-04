@@ -47,8 +47,11 @@ class EngineeringWorker:
                         candidate = self.service.inspect(prior['id'])
                 if candidate is None or candidate['state'] != 'passed':
                     context = dict(job['source'], source='engineering_job', engineering_job_id=job['id'],
-                                   lease_owner=owner, attempt=job['attempts'])
-                    candidate = self.service.engineer(job['goal'], **job['arguments'],
+                                   lease_owner=owner, attempt=job['attempts'], project_id=job.get('project_id'),
+                                   decision_id=(job.get('decision') or {}).get('id'))
+                    # Project references never select a filesystem root.
+                    arguments = {k: v for k, v in job['arguments'].items() if k != 'project_id'}
+                    candidate = self.service.engineer(job['goal'], **arguments,
                         source_context=context, engineering_action=job['action'])
             except Exception as exc:
                 from .candidate_provider import failure_evidence, execution_error_code

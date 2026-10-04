@@ -211,7 +211,7 @@ def test_broker_create_rerun_review_discard_real_docker(setup, monkeypatch):
     assert not Path(full['worktree']).exists()
 
 
-CANDIDATE_TOOLS = {'create_self_edit_candidate', 'inspect_self_edit_candidate',
+CANDIDATE_TOOLS = {'decide_engineering', 'inspect_portfolio_project', 'create_self_edit_candidate', 'inspect_self_edit_candidate',
                    'rerun_candidate_tests', 'review_self_edit_candidate', 'discard_self_edit_candidate'}
 READ_ONLY_TOOLS = {'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest',
                    'run_command', 'deployment_status', 'preview_deployment',

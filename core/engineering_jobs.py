@@ -73,10 +73,14 @@ class EngineeringJobs:
         observed = row[0] if row else None
         from .engineering_providers import EngineeringRegistry
         from .self_edit import model_request
+        registry = EngineeringRegistry.defaults(self.database, model_request).snapshot()
+        from .engineering_portfolio import Portfolio
+        from .engineering_decision import Decisions
         return dict(worker='active' if observed and (time.time() - observed < 20 or active) else
                     'inactive' if observed else 'unknown', observed_at=observed,
                     jobs=[project_job(j) for j in self.recent()], supported=True,
-                    provider_registry=EngineeringRegistry.defaults(self.database, model_request).snapshot())
+                    provider_registry=registry, portfolio=Portfolio(self.database).snapshot(provider_registry=registry),
+                    decisions=Decisions(self.database).recent())
 
     def _save(self, db, job, event):
         db.execute('UPDATE engineering_jobs SET record=? WHERE id=?',
@@ -99,7 +103,7 @@ class EngineeringJobs:
         action = EngineeringAction.model_validate(action).check(goal, context)
         if not all(valid_id(context.get(key)) for key in ('task_id', 'conversation_id')):
             raise ToolDenied('Invalid job source')
-        args = EngineeringArguments.model_validate(arguments).model_dump()
+        args = EngineeringArguments.model_validate(arguments).model_dump(exclude_none=True)
         policy = CandidatePolicy()
         for path in args['inspect_paths']:
             policy.edit_path(path)
@@ -112,6 +116,18 @@ class EngineeringJobs:
         for key in ('problem_detected', 'hypothesis'):
             safe_text(args[key])
         source = {key: context[key] for key in ('task_id', 'conversation_id')}
+        # Persist the rationale in its own transaction even when submission is
+        # refused. Idempotent retries keep the originally committed decision.
+        with self.database.transaction() as db:
+            prior = db.execute('SELECT record FROM engineering_jobs WHERE task_id=?', (action.task_id,)).fetchone()
+        if prior:
+            job = json.loads(prior[0])
+            if any(job[key] != value for key, value in
+                   [('goal', goal), ('action', action.model_dump()), ('arguments', args), ('source', source)]):
+                raise ToolDenied('Engineering job source mismatch')
+            return self.get(job['id'])
+        from .engineering_decision import submission_decision
+        decision = submission_decision(self.database, goal, project_id=args.get('project_id'), task_id=action.task_id)
         with self.database.transaction() as db:
             row = db.execute('SELECT record FROM engineering_jobs WHERE task_id=?', (action.task_id,)).fetchone()
             if row:
@@ -121,6 +137,7 @@ class EngineeringJobs:
                     raise ToolDenied('Engineering job source mismatch')
                 return self.get(job['id'])
             job = dict(id=str(uuid4()), type='engineering', goal=goal, source=source,
+                project_id=decision['project_id'], decision=decision,
                 status='queued', provider='codex', created_at=timestamp(), started_at=None,
                 completed_at=None, current_stage='queued', attempts=0, candidate_id=None,
                 candidate_ids=[], test_result=[], review_result=None, error=None,
@@ -208,7 +225,7 @@ class EngineeringJobs:
         from .candidate_tools import EngineeringArguments
         from tools.candidate_edit import CandidatePolicy, safe_text
         require_owner(authority)
-        args = EngineeringArguments.model_validate(arguments).model_dump()
+        args = EngineeringArguments.model_validate(arguments).model_dump(exclude_none=True)
         policy = CandidatePolicy()
         for path in args['inspect_paths']:
             policy.edit_path(path)
@@ -226,6 +243,8 @@ class EngineeringJobs:
             if job['action']['scope'] == 'documentation' and any(
                     not p.startswith('docs/') for p in args['inspect_paths']):
                 raise ToolDenied('Documentation scope mismatch')
+            if args.get('project_id', job.get('project_id')) != job.get('project_id'):
+                raise ToolDenied('Input recovery cannot change the job project')
             job.setdefault('input_revisions', []).append(dict(timestamp=timestamp(), arguments=job['arguments']))
             job['arguments'] = args
             self._save(db, job, 'inputs_revised')
@@ -390,6 +409,8 @@ def project_job(job):
         raise ToolDenied('Invalid engineering recovery metadata')
     return {key: job.get(key) for key in ('id', 'type', 'status', 'provider', 'created_at',
         'started_at', 'completed_at', 'current_stage', 'attempts', 'candidate_id', 'control')} | {
+        'project_id': project_reference(job.get('project_id')),
+        'decision': project_decision(job.get('decision')),
         'error': 'Engineering job requires attention' if job.get('error') else None,
         'failure': project_failure(job.get('failure')),
         'failures': failures, 'failure_count': failure_count,
@@ -403,3 +424,14 @@ def project_job(job):
         'provider_results': project_provider_results(job.get('provider_results', [])),
         'provider_blocker': ProviderBlocker.model_validate(job['provider_blocker']).model_dump() if job.get('provider_blocker') else None,
         'test_result': tests, 'review_result': {'verdict': verdict}}
+
+
+def project_reference(value):
+    from .engineering_portfolio import Identifier
+    from pydantic import TypeAdapter
+    return TypeAdapter(Identifier | None).validate_python(value)
+
+
+def project_decision(value):
+    from .engineering_decision import Decision
+    return Decision.model_validate(value).model_dump() if value is not None else None

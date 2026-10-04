@@ -7,6 +7,12 @@ paths and targeted tests. The compatibility name is `engineer_candidate`.
 The host action binds submission content for integrity and idempotency; it does
 not restrict later inspection or control to the originating conversation.
 
+Before substantial engineering, use `decide_engineering` to check the existing
+project/capability portfolio. Submission also enforces this preflight. New jobs
+support optional `project_id` and persist their decision/rationale; old jobs
+remain valid without either. References are audit context and never select a
+repository or expand authority. See [Project portfolio](project-portfolio.md).
+
 The broker commits jobs to private host SQLite storage outside the checkout.
 Production has no editing fallback or writable host mount. The separate worker
 implements in a real isolated candidate rooted in the fixed jarvis-dev source,

@@ -21,7 +21,7 @@ def portfolio(tmp_path):
 def test_seed_projects_and_capabilities_persist(portfolio):
     value = portfolio.snapshot()
     assert {p['project_id'] for p in value['projects']} == {'jarvis-core', 'trading-bot', 'creator-os'}
-    assert len(value['capabilities']) == 12
+    assert len(value['capabilities']) == 14
     assert all(p['executive'] == 'Jarvis' for p in value['projects'])
     portfolio.database.close()
     assert Portfolio(Database(portfolio.database.path), clock=lambda: NOW).snapshot() == value
@@ -74,15 +74,19 @@ def test_runtime_wins_and_surfaces_contradiction(portfolio):
     assert 'not_authenticated' in json.dumps(snapshot)
 
 
-def test_project_git_probe_only_identity_no_runtime_or_mutation(portfolio, monkeypatch):
+def test_project_git_probe_only_identity_no_runtime_or_mutation(portfolio, monkeypatch, tmp_path):
+    root = tmp_path / 'bot'
+    root.mkdir()
+    from core.engineering_portfolio import PROJECT_ROOTS
+    monkeypatch.setattr('core.engineering_portfolio.PROJECT_ROOTS', dict(PROJECT_ROOTS) | {'trading-bot': root})
     calls = []
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return SimpleNamespace(returncode=0, stdout=b'/srv/jarvis/projects/trading-bot\n' + b'1' * 40 + b'\n')
+        return SimpleNamespace(returncode=0, stdout=str(root).encode() + b'\n' + b'1' * 40 + b'\n')
     monkeypatch.setattr('core.engineering_portfolio.subprocess.run', run)
     value = portfolio.inspect_project('trading-bot')
     assert value['repository_state'] == 'present' and value['read_only']
-    assert calls[0][0] == ['/usr/bin/git', '--no-optional-locks', '-C', '/srv/jarvis/projects/trading-bot', 'rev-parse', '--show-toplevel', 'HEAD']
+    assert calls[0][0] == ['/usr/bin/git', '--no-optional-locks', '-C', str(root), 'rev-parse', '--show-toplevel', 'HEAD']
     assert calls[0][1]['env'] == {'PATH': '/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
     assert any(c['resource'] == 'trading-bot' for c in portfolio.snapshot()['contradictions'])
     assert 'Linux compatibility and runtime are unproven' in value['runtime_notes'][0]
@@ -137,8 +141,8 @@ def test_missing_capability_build_requires_specific_request(portfolio):
 
 
 def test_unknown_project_and_no_authority_from_association(portfolio):
-    with pytest.raises(ToolDenied):
-        Decisions(portfolio.database).evaluate('Fix a bug', portfolio.snapshot(), project_id='made-up')
+    value = Decisions(portfolio.database).evaluate('Fix a bug', portfolio.snapshot(), project_id='made-up')
+    assert value['outcome'] == 'NEED_MORE_INFORMATION' and value['project_id'] is None
     assert associate('Jarvis and CreatorOS and trading bot', portfolio.projects()) is None
     assert associate('Unrelated request', portfolio.projects()) is None
 

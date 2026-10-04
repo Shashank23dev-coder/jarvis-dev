@@ -1,4 +1,4 @@
-"""Bounded production mailbox. No host paths, credentials or commands cross it."""
+"""Bounded owner mailbox. Fixed project locations are metadata, never authority."""
 import json
 import os
 from pathlib import Path
@@ -36,13 +36,15 @@ class Request(StrictModel):
         if not 0 <= time.time() - self.created <= 330:
             raise ToolDenied('Expired request')
         from .engineering_tools import JobArguments, JobListArguments
-        schema = (JobListArguments if self.action == 'job_list' else
+        from .engineering_decision import DecisionArguments
+        from .engineering_portfolio import ProjectArguments
+        schema = (ProjectArguments if self.action == 'project_inspect' else DecisionArguments if self.action == 'decision' else JobListArguments if self.action == 'job_list' else
                   StrictModel if self.action in {'workspace', 'runtime'} else
                   EngineeringArguments if self.action in {'engineer', 'job_create'} else
                   JobArguments if self.action.startswith('job_') else
                   CreateArguments if self.action == 'create' else CandidateArguments)
         if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard', 'runtime',
-                              'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume'}:
+                              'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume', 'decision', 'project_inspect'}:
             raise ToolDenied('Unsupported candidate operation')
         schema.model_validate(self.arguments)
         if self.engineering_action is not None:
@@ -120,6 +122,12 @@ class CandidateClient:
                     if action == 'runtime':
                         from .engineering_tools import project_runtime
                         return project_runtime(result['record'])
+                    if action == 'decision':
+                        from .engineering_decision import Decision
+                        return Decision.model_validate(result['record']).model_dump()
+                    if action == 'project_inspect':
+                        from .engineering_portfolio import ProjectEvidence
+                        return ProjectEvidence.model_validate(result['record']).model_dump()
                     if action.startswith('job_'):
                         from .engineering_jobs import project_job
                         return ([project_job(j) for j in result['record']] if action == 'job_list'

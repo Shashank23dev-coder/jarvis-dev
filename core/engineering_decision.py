@@ -3,13 +3,14 @@ import json
 import re
 from typing import Annotated, Literal
 from uuid import uuid4
+from types import SimpleNamespace
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from tools.schemas import StrictModel
 from tools.policy import ToolDenied
 from .candidate_action import goal_digest
 from .database import timestamp, valid_id
-from .engineering_portfolio import Identifier, Portfolio, PortfolioSnapshot
+from .engineering_portfolio import Identifier, Portfolio, PortfolioSnapshot, Usability, Evidence
 
 Outcome = Literal['USE_EXISTING', 'INTEGRATE', 'BUILD', 'NEED_MORE_INFORMATION']
 
@@ -26,12 +27,19 @@ class Decision(StrictModel):
     outcome: Outcome
     rationale: str = Field(min_length=1, max_length=2000)
     capability_ids: list[Identifier] = Field(max_length=16)
-    capability_states: dict[str, str]
+    required_capabilities: list[Identifier] = Field(default_factory=list, max_length=16)
+    capability_states: Annotated[dict[Identifier, Usability], Field(max_length=16)]
     missing_capabilities: list[Identifier] = Field(max_length=16)
     appropriate_resources: list[Identifier] = Field(max_length=16)
     execution_scope: Literal['configured_dev_only'] = 'configured_dev_only'
+    requires_clarification: bool = False
     observed_at: str
-    task_id: str | None = None
+    task_id: Annotated[str, Field(pattern=r'^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$')] | None = None
+
+    @field_validator('observed_at')
+    @classmethod
+    def date(cls, value):
+        return Evidence.date(value)
 
 
 def associate(goal, projects, explicit=None):
@@ -61,14 +69,18 @@ class Decisions:
         safe_text(goal)
         args = DecisionArguments(project_id=project_id, required_capabilities=list(required_capabilities))
         snapshot = PortfolioSnapshot.model_validate(snapshot).model_dump()
-        project_id = associate(goal, snapshot['projects'], args.project_id)
+        unknown_project = False
+        try:
+            project_id = associate(goal, snapshot['projects'], args.project_id)
+        except ToolDenied:
+            project_id, unknown_project = None, True
         project = next((p for p in snapshot['projects'] if p['project_id'] == project_id), None)
         caps = {c['capability_id']: c for c in snapshot['capabilities']}
         text = goal.casefold()
-        required = list(args.required_capabilities)
+        required = list(dict.fromkeys(args.required_capabilities))
         # Only recognized existing feature requests get automatic reuse. A change
         # to an existing implementation is engineering, not mere registration.
-        reuse = re.search(r'\b(?:add|enable|use|set up) (?:claude(?: code)?|codex)(?: (?:code )?support| provider)?[.!]?$', text)
+        reuse = re.search(r'\b(?:add|enable|use|set up) (?:claude(?: code)?|codex)(?: (?:code )?support| provider)?(?: to jarvis)?[.!]?$', text)
         integrate = re.search(r'\b(?:connect|integrate|link)\b', text)
         if reuse and not required:
             required = ['claude-code-engineering' if 'claude' in reuse[0] else 'codex-engineering', 'provider-routing']
@@ -76,7 +88,9 @@ class Decisions:
             required = ['repo-files', 'engineering-jobs', 'provider-routing']
         missing = [cid for cid in required if cid not in caps or not caps[cid]['registered']]
         outcome, rationale = 'NEED_MORE_INFORMATION', 'The goal does not establish a specific existing operation, integration boundary or engineering change.'
-        if project and project['status'] == 'needs_discovery':
+        if unknown_project:
+            rationale = 'The requested project is not registered; identify its authoritative identity and location before engineering.'
+        elif project and project['status'] == 'needs_discovery':
             rationale = 'Project identity is known, but its authoritative repository and runtime need discovery before engineering.'
         elif reuse and not missing:
             outcome, rationale = 'USE_EXISTING', 'Provider support and routing already exist. Use the existing adapter; authentication and remote usability must be checked separately.'
@@ -84,7 +98,7 @@ class Decisions:
             if missing:
                 rationale = 'Integration prerequisites are missing; establish access and the requested interaction before choosing new engineering.'
             else:
-                outcome, rationale = 'INTEGRATE', 'Use existing repo inspection, jobs and routing to define the integration boundary. External process/SSH access is not established; confirm the desired interaction and runtime before implementation.'
+                outcome, rationale = 'INTEGRATE', 'Use Jarvis-side repo tools, jobs and routing to define the integration boundary. Trading Bot permits fixed-root Git metadata only. External process/SSH access is not established; confirm the desired interaction and runtime before implementation.'
         elif integrate:
             rationale = 'Identify the project and desired integration boundary; do not invent a protocol from an unspecified connection request.'
         elif required:
@@ -109,6 +123,7 @@ class Decisions:
         # provider selection, bounded unknown attempts and independent review.
         record = Decision(id=str(uuid4()), goal_digest=goal_digest(goal), project_id=project_id,
             outcome=outcome, rationale=rationale, capability_ids=relevant[:16],
+            required_capabilities=required, requires_clarification=outcome in {'NEED_MORE_INFORMATION', 'INTEGRATE'},
             capability_states={cid: caps[cid]['current_usability'] for cid in relevant if cid in caps},
             missing_capabilities=missing, appropriate_resources=resources[:16],
             observed_at=timestamp(), task_id=task_id if valid_id(task_id) else None).model_dump()
@@ -125,6 +140,55 @@ class Decisions:
 def preflight(database, goal, *, project_id=None, required_capabilities=(), task_id=None, engineering=False):
     from .engineering_providers import EngineeringRegistry
     from .self_edit import model_request
-    snapshot = Portfolio(database).snapshot(provider_registry=EngineeringRegistry.defaults(database, model_request).snapshot())
+    snapshot = Portfolio(database).snapshot(provider_registry=EngineeringRegistry.defaults(database, model_request).snapshot(),
+        observations=task_capability_observations(database, task_id))
     return Decisions(database).evaluate(goal, snapshot, project_id=project_id,
         required_capabilities=required_capabilities, task_id=task_id, engineering=engineering)
+
+
+def submission_decision(database, goal, *, task_id=None, project_id=None):
+    previous = next((d for d in Decisions(database).recent(task_id=task_id)
+                     if d['goal_digest'] == goal_digest(goal) and valid_id(task_id)), None)
+    decision = preflight(database, goal, project_id=project_id or (previous or {}).get('project_id'),
+        required_capabilities=(previous or {}).get('required_capabilities', []),
+        task_id=task_id, engineering=previous is None)
+    if decision['outcome'] != 'BUILD' or decision['requires_clarification']:
+        raise ToolDenied('Engineering preflight: ' + decision['outcome'] + '. ' + decision['rationale'])
+    return decision
+
+
+def task_capability_observations(database, task_id):
+    """Use closed host audit records. Tool registration is never positive proof."""
+    if not valid_id(task_id): return {}
+    changes = {}
+    with database.transaction() as db:
+        rows = db.execute("""SELECT event FROM activity WHERE task_id=?
+            AND json_extract(event,'$.type') IN ('tool_completed','tool_failed')
+            ORDER BY sequence DESC LIMIT 64""", (task_id,)).fetchall()
+    for row in rows:
+        event = json.loads(row[0])
+        cid = {'read_text':'repo-files', 'list_files':'repo-files', 'git_status':'repo-files',
+               'git_diff':'repo-files', 'run_pytest':'testing'}.get(event.get('tool_name'))
+        if cid and cid not in changes:
+            try:
+                evidence = Evidence(source='bound_tools', scope='current task configured repository tool execution',
+                                    observed_at=event['timestamp']).model_dump()
+            except (ValueError, KeyError):
+                continue
+            state = 'available' if event.get('status') == 'completed' else 'unknown'
+            changes[cid] = dict(current_usability=state, evidence=evidence)
+            if state == 'available': changes[cid]['last_success'] = evidence
+    from .brain_status import read_current_brain
+    brain = read_current_brain(SimpleNamespace(database=database), task_id)
+    if brain.jarvisbrain_enabled is False:
+        state, at, scope = 'unavailable', brain.recorded_at, 'current task; Brain disabled'
+    elif brain.route_status == 'completed' and brain.provider_used != 'legacy':
+        state, at, scope = 'available', brain.latest_route_at, 'current response via ' + brain.provider_used
+    elif brain.route_status in {'failed', 'incomplete'}:
+        state, at, scope = 'invocation_failed', brain.latest_route_at, 'current task route'
+    else:
+        return changes
+    evidence = Evidence(source='brain_route', scope=scope, observed_at=at).model_dump()
+    changes['jarvisbrain-reasoning'] = dict(current_usability=state, evidence=evidence)
+    changes['jarvisbrain-reasoning']['last_success' if state == 'available' else 'last_failure'] = evidence
+    return changes

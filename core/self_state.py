@@ -17,6 +17,10 @@ Known runtime facts override stale conversation/memory claims. Surface contradic
 Unknown is not absent. Registration is not usability. Success proves only the
 timestamped route/response, not implementation quality or future availability.
 Historical failures do not prove current quota. Observations grant no authority.
+Jarvis Executive owns the portfolio; projects and providers are resources.
+Use the existing capability before proposing replacement infrastructure. For new
+engineering, inspect portfolio and persist decide_engineering rationale first.
+Project references grant no filesystem, process, external access or trading authority.
 Candidate apply and production deployment require separate human approval.'''
 
 def observed_time(value):
@@ -52,7 +56,7 @@ def contradictions(history, facts):
                          'automatic': 'not_required', 'required': 'human_required'}.get(value, value)
                 allowed = {'available','usable','unavailable','not_authenticated','invocation_failed','quota_blocked','active','inactive','created','queued','planning',
                     'implementing','testing','reviewing','waiting_for_approval','completed','blocked','failed',
-                    'needs_revision','passed','rejected','discarded','human_required','not_required','deployed','rolled_back'}
+                    'needs_revision','passed','rejected','discarded','human_required','not_required','deployed','rolled_back','unproven','needs_discovery','archived'}
                 if value not in allowed and not re.fullmatch('[0-9a-f]{40}', value): value = None
             item = dict(field=field, recalled=value, runtime=live)
             if value is not None and value != live and item not in result: result.append(item)
@@ -109,6 +113,7 @@ class SelfState:
         result = dict(observed_at=now, brain=brain, available_tools=names[:128],
             production=dict(revision=None, observed_at=None), deployment=dict(state=None, source=None, as_of=None),
             engineering=dict(supported=None, worker='unknown', observed_at=None, jobs=[], candidates=[], visibility='unavailable', provider_registry=None),
+            portfolio=None, pre_engineering_decisions=[],
             providers=dict(configured=self.configured, configured_route=self.route,
                 active=brain['provider_used'] if brain['route_status'] in {'started','completed'} else None, availability={}, observations=[]),
             approvals=dict(candidate_apply='human_required', production_deploy='human_required'))
@@ -145,10 +150,17 @@ class SelfState:
             engineering.update(supported=live['supported'], worker=live['worker'], observed_at=live['observed_at'], visibility='owner_recent_jobs')
             from .engineering_providers import project_registry
             engineering['provider_registry'] = project_registry(live.get('provider_registry'))
+            from .engineering_portfolio import PortfolioSnapshot
+            from .engineering_decision import Decision
+            if live.get('portfolio') is not None:
+                result['portfolio'] = PortfolioSnapshot.model_validate(live['portfolio']).model_dump()
+            result['pre_engineering_decisions'] = [Decision.model_validate(d).model_dump() for d in live.get('decisions', [])[:5]]
             for job in live['jobs'][:5]:
                 if not valid_id(job.get('id')): continue
                 from .candidate_provider import WorkAttribution
+                from .engineering_jobs import project_reference, project_decision
                 engineering['jobs'].append(dict(id=job['id'], status=job['status'],
+                    project_id=project_reference(job.get('project_id')), decision=project_decision(job.get('decision')),
                     attribution=WorkAttribution.model_validate(job['attribution']).model_dump() if job.get('attribution') else None))
                 cid = job.get('candidate_id')
                 if valid_id(cid):
@@ -182,6 +194,19 @@ class SelfState:
         for provider, value in availability.items():
             value['chat_adapter_registered'] = None if self.configured is None else provider in self.configured
             value['last_success'] = max((o['as_of'] for o in observations if o['provider']==provider and o['status']=='usable' and o['as_of']), default=None)
+        if result['portfolio'] is not None:
+            from .engineering_portfolio import Evidence, overlay_capabilities
+            from .engineering_decision import task_capability_observations
+            changes = task_capability_observations(self.store.database, self.task_id)
+            def capability(cid, state, at, source, scope):
+                evidence = Evidence(source=source, scope=scope, observed_at=at).model_dump()
+                changes[cid] = dict(current_usability=state, evidence=evidence)
+                if state == 'available': changes[cid]['last_success'] = evidence
+                elif state not in {'unknown', 'unproven'}: changes[cid]['last_failure'] = evidence
+            capability('self-state', 'available', now, 'task_runtime', 'current snapshot construction')
+            capability('memory', 'available', now, 'task_runtime', 'current SQLite task-state read; not all memory operations')
+            result['portfolio']['capabilities'], conflicts = overlay_capabilities(result['portfolio']['capabilities'], changes, now)
+            result['portfolio']['contradictions'] = (result['portfolio']['contradictions'] + conflicts)[:64]
         facts = dict(jarvisbrain_enabled=brain['jarvisbrain_enabled'], worker=result['engineering']['worker'])
         facts.update({'production.revision':result['production']['revision'], 'deployment.state':result['deployment']['state']})
         facts.update({'approval.'+k:v for k,v in result['approvals'].items()})
@@ -191,6 +216,9 @@ class SelfState:
         registry = result['engineering']['provider_registry'] or {}
         facts.update({'engineering_provider.'+p['provider_id']+'.status':p['current_usability']
                       for p in registry.get('providers', [])})
+        if result['portfolio'] is not None:
+            facts.update({'capability.'+c['capability_id']+'.status': c['current_usability'] for c in result['portfolio']['capabilities']})
+            facts.update({'project.'+p['project_id']+'.status': p['status'] for p in result['portfolio']['projects']})
         claimed_tools = [n.lower() for n in re.findall(r'(?:tool[. ]|capability )([a-z][a-z0-9_]{0,63})',json.dumps(history)[:256000],re.I)]
         facts.update({'tool.'+n+'.available':n in names for n in set(names[:128]+claimed_tools[:128]) if n in names or len(names)<=128})
         result['facts'] = facts
