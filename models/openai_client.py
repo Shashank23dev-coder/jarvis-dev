@@ -1,7 +1,5 @@
 import os
 from functools import lru_cache
-from dotenv import load_dotenv
-from openai import OpenAI
 from .provider import ProviderTurn as AgentTurn
 
 MODEL = "gpt-5.6"
@@ -23,7 +21,9 @@ def strict_schema(value):
 def get_client():
     """Create the client only when needed, so imports/tests need no credentials."""
     if os.getenv("JARVIS_MODE", "development") != "production":
+        from dotenv import load_dotenv
         load_dotenv()
+    from openai import OpenAI
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 

@@ -282,6 +282,7 @@ def test_expired_route_budget_does_not_claim_uninvoked_provider_failure(tmp_path
 
 
 def test_user_nvm_install_detection_and_trusted_override(tmp_path, monkeypatch):
+    import os
     from pathlib import Path
     monkeypatch.setattr(Path, 'home', lambda: tmp_path)
     monkeypatch.setattr(claude.shutil, 'which', lambda _: None)
@@ -290,8 +291,29 @@ def test_user_nvm_install_detection_and_trusted_override(tmp_path, monkeypatch):
     binary.parent.mkdir(parents=True)
     binary.write_text('fixture')
     binary.chmod(0o700)
+    # Docker scratch is deliberately noexec. Model executable permissions for
+    # this discovery-only fixture; retain the real access check elsewhere.
+    real_access = claude.os.access
+    def fixture_access(path, mode):
+        if Path(path).is_relative_to(tmp_path):
+            return mode == os.X_OK and Path(path).is_file() and bool(Path(path).stat().st_mode & 0o111)
+        return real_access(path, mode)
+    monkeypatch.setattr(claude.os, 'access', fixture_access)
     assert claude.claude_executable() == str(binary)
     monkeypatch.setenv('JARVIS_CLAUDE_EXECUTABLE', 'relative/claude')
+    assert claude.claude_executable() is None
+    monkeypatch.setenv('JARVIS_CLAUDE_EXECUTABLE', str(binary))
+    assert claude.claude_executable() == str(binary)
+    binary.chmod(0o600)
+    assert claude.claude_executable() is None
+    monkeypatch.setenv('JARVIS_CLAUDE_EXECUTABLE', str(binary.parent))
+    assert claude.claude_executable() is None
+    binary.chmod(0o700)
+    second = tmp_path / '.nvm/versions/node/v24/bin/claude'
+    second.parent.mkdir(parents=True)
+    second.write_text('fixture')
+    second.chmod(0o700)
+    monkeypatch.delenv('JARVIS_CLAUDE_EXECUTABLE')
     assert claude.claude_executable() is None
     monkeypatch.setenv('JARVIS_CLAUDE_EXECUTABLE', str(binary))
     assert claude.claude_executable() == str(binary)

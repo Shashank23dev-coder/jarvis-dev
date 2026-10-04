@@ -277,12 +277,15 @@ def test_additional_invalid_production_configuration(production, field, value):
 
 
 def test_production_client_does_not_load_dotenv(monkeypatch):
+    import sys
+    from types import SimpleNamespace
     from models import openai_client
     monkeypatch.setenv('JARVIS_MODE', 'production')
     monkeypatch.setenv('OPENAI_API_KEY', 'test-provider-key')
-    monkeypatch.setattr(openai_client, 'load_dotenv', lambda: pytest.fail('Production loaded local .env'))
+    monkeypatch.setitem(sys.modules, 'dotenv', SimpleNamespace(
+        load_dotenv=lambda: pytest.fail('Production loaded local .env')))
     sentinel = object()
-    monkeypatch.setattr(openai_client, 'OpenAI', lambda **kwargs: sentinel)
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(OpenAI=lambda **kwargs: sentinel))
     openai_client.get_client.cache_clear()
     try:
         assert openai_client.get_client() is sentinel
