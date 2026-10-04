@@ -214,3 +214,27 @@ Git identity. Root: `/srv/jarvis/projects/trading-bot`; observed revision:
 `e03c307c64fdaaf267ecb7be3898325af555f966`, matching the stored baseline. Git
 status was empty before and after. No full assessment, runtime, credential,
 candidate or deployment operation was performed.
+
+Validation on the committed integration checkpoint `6b1d7d7`:
+
+- `.venv/bin/python -m pytest -q tests/test_project_repository.py
+  tests/test_engineering_portfolio.py tests/test_portfolio_integration.py
+  tests/test_candidate_bridge.py tests/test_candidate_tools.py
+  tests/test_self_state.py tests/test_engineering_jobs.py
+  tests/test_engineering_action.py tests/test_agent.py tests/test_brain.py`:
+  **315 passed, 1 skipped** (including 38 registered-repository tests).
+- `.venv/bin/python -m pytest -q`: **1120 passed, 14 skipped**, 771.43 seconds;
+  89 existing multiprocessing fork deprecation warnings. Optional isolation
+  checks retain their existing skips.
+- `node --test tests/ui.test.cjs`: **14 passed**.
+- `git diff --check` and the protected release fixture hashes passed.
+
+An existing Brain context-comparison test now fixes its retrieval clock so
+wall-clock score decay cannot cause false mismatches between sequential routes.
+Runtime retrieval and the completed engineering loop were not changed.
+
+The acceptance check was repeated after the implementation commit with identical
+results. Its sanitized proof is `/tmp/jarvis-project-readonly-erlxihh0/acceptance.json`.
+Trading Bot Git status remained empty after the full validation run as well.
+No production modification, deployment, service operation or provider
+authentication was performed.
