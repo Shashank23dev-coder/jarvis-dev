@@ -53,10 +53,9 @@ class Broker:
         authority = require_owner(authority if authority is not None else current_owner.get())
         request = Request.model_validate(raw).checked()
         if request.action == 'release_prepare':
-            from .deployment_release import configured_service, ReleaseService, ReleaseConfig
+            from .deployment_release import preparation_service
             # Validation needs source + a private journal, not production access.
-            service = (configured_service() if os.environ.get('JARVIS_DEPLOY_CONFIG') else
-                ReleaseService(ReleaseConfig(SOURCE, STATE / 'release-preparation', STATE / 'production.env')))
+            service = preparation_service(source=self.source, state=STATE)
             return ReleasePreparation.model_validate(service.prepare()).model_dump()
         # Registered reads are authorized by owner + host Portfolio + native
         # read operation. Candidate workspace eligibility is unrelated.
@@ -107,26 +106,26 @@ class Broker:
             from .engineering_portfolio import Portfolio
             from .engineering_repository import development_service
             project_id = associate(request.goal, Portfolio(self.database).projects(), request.arguments.get('project_id'))
-            self.service = development_service(self.service, project_id)
+            service = development_service(self.service, project_id)
             # Durable idempotency by source task, including crash/retry requests.
-            with self.service.store.database.transaction() as db:
+            with service.store.database.transaction() as db:
                 rows = db.execute("SELECT record FROM candidates WHERE json_extract(record, '$.source_context.task_id') = ? LIMIT 1", (request.task_id,)).fetchall()
             for row in rows:
                 existing = json.loads(row['record'])
                 prior = existing.get('source_context', {})
                 if prior.get('source') == 'production_chat' and prior.get('task_id') == request.task_id:
-                    if existing.get('source_root') != str(self.service.source):
+                    if existing.get('source_root') != str(service.source):
                         raise ToolDenied('Candidate source mismatch')
                     if prior.get('conversation_id') != request.conversation_id:
                         raise ToolDenied('Source task mismatch')
                     if prior.get('engineering_action') != context.get('engineering_action') or existing['goal'] != request.goal:
                         raise ToolDenied('Source action mismatch')
-                    return project(self.service.store.get(existing['id']))
+                    return project(service.store.get(existing['id']))
             from .engineering_decision import submission_decision
-            decision = submission_decision(self.service.store.database, request.goal,
+            decision = submission_decision(service.store.database, request.goal,
                 task_id=request.task_id, project_id=project_id)
             context.update(project_id=project_id, decision_id=decision['id'])
-            handler = self.service.engineer if request.action == 'engineer' else self.service.start
+            handler = service.engineer if request.action == 'engineer' else service.start
             options = ({'engineering_action': request.engineering_action.model_dump()}
                        if request.engineering_action else {})
             arguments = {key: value for key, value in request.arguments.items() if key != 'project_id'}
@@ -134,30 +133,30 @@ class Broker:
         else:
             identifier = request.arguments['candidate_id']
             from .engineering_repository import development_service
-            self.service = development_service(self.service, candidate_id=identifier)
-            existing = self.service.store.get(identifier, internal=True)
+            service = development_service(self.service, candidate_id=identifier)
+            existing = service.store.get(identifier, internal=True)
             if not existing:
                 raise ToolDenied('Candidate unavailable')
-            if existing.get('source_root') != str(self.service.source):
+            if existing.get('source_root') != str(service.source):
                 raise ToolDenied('Candidate source mismatch')
             if request.action in {'preview', 'audit', 'apply'}:
                 from .candidate_apply import CandidateApply
-                apply = CandidateApply(self.service)
+                apply = CandidateApply(service)
                 result = (apply.preview(identifier) if request.action == 'preview' else
                     apply.inspect(identifier, read_only=True) if request.action == 'audit' else
                     apply.apply(identifier, request.goal, authority=authority))
                 return project_apply(result)
             if request.action == 'inspect':
-                return project(self.service.inspect(identifier))
+                return project(service.inspect(identifier))
             operations = existing.setdefault('chat_operations', [])
             if any(item['request_id'] == request.request_id for item in operations):
                 return project(existing)
             if len(operations) >= 64:
                 raise ToolDenied('Candidate operation audit limit reached')
             operations.append(context | {'action': request.action})
-            self.service.store.save(existing, 'production_chat_' + request.action)
-            handler = {'inspect': self.service.inspect, 'tests': self.service.tests,
-                       'review': self.service.review, 'discard': self.service.discard}[request.action]
+            service.store.save(existing, 'production_chat_' + request.action)
+            handler = {'inspect': service.inspect, 'tests': service.tests,
+                       'review': service.review, 'discard': service.discard}[request.action]
             record = handler(identifier)
         return project(record)
 
@@ -247,7 +246,7 @@ def execute_private(raw):
     database = Database(STATE / 'candidates.sqlite3')
     authority = OwnerDevAuthority()
     try:
-        record = Broker(database=database).execute(dict(raw, authority=authority.model_dump()), authority=authority)
+        record = Broker(database=database, source=SOURCE).execute(dict(raw, authority=authority.model_dump()), authority=authority)
         return dict(request_id=raw['request_id'], ok=True, record=record)
     except ToolDenied as exc:
         error = exc.public_error()

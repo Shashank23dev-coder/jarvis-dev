@@ -37,6 +37,23 @@ def test_registration_configuration_is_not_availability_and_duplicate_denied(tmp
     assert future.state('future_agent').current_usability == 'unavailable'
 
 
+def test_registered_additional_provider_routes_and_projects_job(setup):
+    from core.candidate_action import EngineeringAction, goal_digest
+    from core.engineering_jobs import EngineeringJobs, project_job
+    from test_engineering import ARGS
+    from uuid import uuid4
+    database = setup[1]
+    providers = EngineeringRegistry(database, [Registration(adapter('grok'), 'api', True)])
+    assert providers.complete({}, '', 1, stage='implementing')[1] == 'grok'
+    context = dict(task_id=str(uuid4()), conversation_id=str(uuid4()))
+    goal = 'Fix a small bug in Jarvis'
+    action = EngineeringAction(provider='grok', scope='code', goal_digest=goal_digest(goal), **context)
+    job = EngineeringJobs(database).create(goal, action.model_dump(), ARGS, context)
+    assert project_job(job)['provider'] == 'grok'
+    with pytest.raises(RoutingBlocked):
+        providers.complete({}, '', 1, stage='reviewing', exclude=['grok'])
+
+
 @pytest.mark.parametrize('code', ['provider_unavailable', 'provider_quota', 'provider_authentication'])
 def test_codex_failure_falls_back_and_observations_survive_restart(tmp_path, code):
     r = registry(tmp_path, codex=adapter('codex', code))

@@ -122,6 +122,42 @@ def test_unknown_project_cannot_be_redirected_to_jarvis(setup):
         tools._service('creator-os')
 
 
+def test_external_candidate_keeps_broker_source_and_projects_separate(setup, tmp_path):
+    from core.engineering_portfolio import Portfolio
+    source, database, factory = setup
+    external = tmp_path / 'external'
+    # A clean distinct registered Git fixture; never select a root from a request.
+    import subprocess
+    subprocess.run(['git', 'clone', '--local', str(source), str(external)], check=True,
+        capture_output=True)
+    portfolio = Portfolio(database)
+    project = next(p for p in portfolio.projects() if p['project_id'] == 'trading-bot')
+    portfolio.register_project(project | dict(repository=str(external)), replace=True)
+    broker = Broker(factory(), source=source)
+    created = broker.execute(request('create', 'Fix my trading bot', dict(
+        inspect_paths=['src/app.py'], targeted_tests=['tests/test_app.py'], project_id='trading-bot')))
+    assert created['state'] == 'passed'
+    assert broker.service.source == source
+    again = broker.execute(request('inspect', 'Inspect candidate', dict(candidate_id=created['id'])))
+    assert again['id'] == created['id'] and again['state'] == 'passed'
+    assert (source / 'src/app.py').read_text() == 'value = 1\n'
+    assert (external / 'src/app.py').read_text() == 'value = 1\n'
+
+
+def test_legacy_portfolio_upgrades_only_obsolete_authority_wording(setup):
+    from core.engineering_portfolio import Portfolio
+    portfolio = Portfolio(setup[1])
+    record = next(p for p in portfolio.projects() if p['project_id'] == 'trading-bot')
+    original = record | dict(repository=str(setup[0]), limitations=[
+        'Bounded read-only repository inspection; no file changes, credentials, runtime or service operations.',
+        'Operator custom limitation'])
+    portfolio.register_project(original, replace=True)
+    upgraded = next(p for p in Portfolio(setup[1]).projects() if p['project_id'] == 'trading-bot')
+    assert upgraded['repository'] == original['repository'] and upgraded['read_only'] == original['read_only']
+    assert upgraded['limitations'][-1] == 'Operator custom limitation'
+    assert 'isolated development' in upgraded['limitations'][0]
+
+
 def test_registered_project_tests_use_its_sandbox(projects, monkeypatch):
     from tools import RepositoryTools, CommandResult
     from core.engineering_repository import inspect_repository

@@ -131,7 +131,9 @@ timestamped and advisory; it is not continuous remote health monitoring.
 Claude's administrative managed policy remains authoritative. This is a
 tool-disabled CLI integration, not a new OS sandbox for the vendor binary.
 Output spooling is deadline-bounded with a bounded read, rather than a streaming
-disk quota. There is no parallel arena or automatic apply/deployment.
+disk quota. Registered adapters route by declared role, with authors excluded
+from independent review. Routine reviewed development apply is autonomous;
+production deployment still requires exact owner approval.
 
 Final verification on 2026-10-04:
 

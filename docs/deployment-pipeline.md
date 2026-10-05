@@ -29,7 +29,13 @@ filename/content checks cannot recognize every arbitrary embedded credential.
 the existing Bubblewrap/Docker development test sandbox. It records exit status,
 backend, limits and timestamp, not potentially sensitive test output. A rerun
 invalidates prior evidence before starting. Both suites must pass within 24 hours.
-Validation is a trusted CLI operation, not a model tool and not a production action.
+The authenticated `prepare_release` tool delegates this source validation to the
+host and reuses fresh evidence for the exact commit. Preparation needs no owner
+approval or production credentials; it cannot deploy. Fixture/setup failures,
+backend failures, timeouts and application test failures have separate evidence
+categories. All prevent passing readiness; they do not mislabel source as unsafe.
+Git-context security failures remain separate hard denials. Synthetic test secret
+markers are assembled at runtime, removing fragile whole-file fixture exceptions.
 
 Preview reports SHA, commit message, changed paths from the current image revision
 when that revision exists locally, validation/context-policy evidence, image tag

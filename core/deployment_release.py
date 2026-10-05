@@ -206,13 +206,23 @@ class ReleaseService:
                 results = []
                 repository = RepositoryTools(root, pytest_timeout=600)
                 for phase, paths, ui in [('python', ['tests'], False), ('ui', ['tests/ui.test.cjs'], True)]:
-                    result = run_tests(repository, root, paths, ui=ui)
+                    from tools.policy import ToolError
+                    try:
+                        result = run_tests(repository, root, paths, ui=ui)
+                    except (ToolError, OSError):
+                        # Context security checks above have already passed.
+                        # An unavailable test backend is validation evidence,
+                        # never a claim that the production source is unsafe.
+                        results.append(dict(phase=phase, passed=False, returncode=None,
+                            sandbox=None, summary=[], failure_kind='test_environment'))
+                        continue
                     summary = re.findall(r'(?:\d+ (?:passed|failed|skipped|errors?)\b|# (?:tests|pass|fail|skipped) \d+)', result.stdout)
                     results.append(dict(phase=phase, passed=not (result.returncode or result.timed_out or result.truncated),
                                         returncode=result.returncode, sandbox=result.sandbox,
                                         summary=summary[-8:],
                                         failure_kind=('environment_timeout' if result.timed_out else
                                             'environment_output_limit' if result.truncated else
+                                            'test_fixture_failure' if re.search(r'ERROR at (?:setup|teardown)', result.stdout) else
                                             'test_failure' if result.returncode == 1 else
                                             'test_environment' if result.returncode else None)))
                 self.clean(sha)
@@ -333,6 +343,15 @@ class ReleaseService:
         except Exception:
             record['rollback'] = dict(verified=False, at=now(), error='Operator reconciliation required')
             self.event(data, record, 'rollback_failed')
+
+
+def preparation_service(*, source=None, state=None):
+    """Source validation needs no production credentials or runtime access."""
+    if os.environ.get('JARVIS_DEPLOY_CONFIG'):
+        return configured_service()
+    from .candidate_broker import SOURCE, STATE
+    return ReleaseService(ReleaseConfig(source or SOURCE,
+        (state or STATE) / 'release-preparation', (state or STATE) / 'production.env'))
 
 
 def configured_service():

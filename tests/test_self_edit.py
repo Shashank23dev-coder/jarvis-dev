@@ -60,6 +60,10 @@ def setup(tmp_path):
     git(source, 'add', '.')
     git(source, 'commit', '-m', 'Baseline fixture')
     database = Database(tmp_path / 'state.db')
+    from core.engineering_portfolio import Portfolio
+    portfolio = Portfolio(database)
+    project = next(p for p in portfolio.projects() if p['project_id'] == 'jarvis-core')
+    portfolio.register_project(project | dict(repository=str(source)), replace=True)
     def service(**kwargs):
         return SelfEditService(database, source_root=source, candidate_root=tmp_path / 'candidates',
                                model=kwargs.pop('model', propose), tester=kwargs.pop('tester', passed), **kwargs)

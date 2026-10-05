@@ -57,3 +57,17 @@ occurred after the test completed; the result and all edits were recovered.
 The default OpenAI review adapter retains its existing reviewer role; additional
 registered adapters can route by their declared roles. Job projections now
 accept the same bounded provider IDs as registration and action schemas.
+
+Checkpoint 2: repository/candidate/job/provider tests passed **430**, with **1**
+explicit opt-in Docker integration skipped, in 584.79 seconds. Evidence:
+`/tmp/jarvis-authority-resume_repository.txt` and `.xml`. This recovered the old
+failing group without discarding its security, persistence, integrity or rollback
+checks. Later additions (project separation, provider extension, release harness
+classification and task acceptance) receive separate focused validation below.
+
+Checkpoint 3: assistant/partial-success and real private-mailbox tests passed
+**51**, with **1** opt-in sandbox integration skipped, in 265.52 seconds.
+Evidence: `/tmp/jarvis-authority-resume_partial.txt` and `.xml`. Source inspection
+continued through missing runtime evidence, project clarification remained
+concise, protected paths stayed blocked, and child-process fixture failures
+returned errors promptly instead of leaving requests waiting.

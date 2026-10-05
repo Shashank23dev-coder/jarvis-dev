@@ -253,16 +253,17 @@ def development_service(service, project_id=None, *, candidate_id=None):
             raise ToolDenied('Candidate unavailable')
         project_id = record.get('source_context', {}).get('project_id')
     selected = service
-    if project_id and project_id != 'jarvis-core':
+    if project_id:
         evidence, repository = resolve_repository(service.store.database, project_id)
         if repository is None:
             raise ToolDenied('Registered project source is unavailable', reason='project_context_unavailable')
-        from .self_edit import SelfEditService
-        selected = SelfEditService(service.store.database, source_root=repository.root,
-            candidate_root=service.root, limits=service.limits if service.explicit_limits else None,
-            model=service.model, tester=service.tester)
-        if hasattr(service, 'engineering_lock_fd'):
-            selected.engineering_lock_fd = service.engineering_lock_fd
+        if repository.root != service.source:
+            from .self_edit import SelfEditService
+            selected = SelfEditService(service.store.database, source_root=repository.root,
+                candidate_root=service.root, limits=service.limits if service.explicit_limits else None,
+                model=service.model, tester=service.tester)
+            if hasattr(service, 'engineering_lock_fd'):
+                selected.engineering_lock_fd = service.engineering_lock_fd
     if candidate_id and record.get('source_root') != str(selected.source):
         raise ToolDenied('Registered candidate source has changed')
     return selected

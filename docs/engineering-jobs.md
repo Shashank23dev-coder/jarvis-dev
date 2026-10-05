@@ -1,21 +1,22 @@
 # Persistent engineering jobs
 
-Authenticated owners use `prepare_engineering(provider="codex", scope="code")`
-(or documentation scope) to obtain the configured-dev editable/test catalog, then
-`create_engineering_job` to queue the current goal, problem, hypothesis, inspection
+Authenticated owners use `create_engineering_job` directly to queue the current goal, problem, hypothesis, inspection
 paths and targeted tests. The compatibility name is `engineer_candidate`.
+`prepare_engineering` optionally discovers the editable/test catalog; it is not
+an authorization step. Registered providers may be selected by provider ID.
 The host action binds submission content for integrity and idempotency; it does
 not restrict later inspection or control to the originating conversation.
 
-Before substantial engineering, use `decide_engineering` to check the existing
-project/capability portfolio. Submission also enforces this preflight. New jobs
+`decide_engineering` supplies advisory project/capability observations. New jobs
 support optional `project_id` and persist their decision/rationale; old jobs
-remain valid without either. References are audit context and never select a
-repository or expand authority. See [Project portfolio](project-portfolio.md).
+remain valid without either. Project IDs resolve roots only from trusted host
+Portfolio records; raw request paths never select a root. Missing roots remain
+information blockers for that project, with no fallback to another project.
+See [Authority model](authority-recovery.md).
 
 The broker commits jobs to private host SQLite storage outside the checkout.
 Production has no editing fallback or writable host mount. The separate worker
-implements in a real isolated candidate rooted in the fixed jarvis-dev source,
+implements in a real isolated candidate rooted in the registered project source,
 runs baseline and targeted tests, the complete Python suite and UI suite in
 Docker, and requests independent review. Codex is primary; OpenAI is the separate
 review provider. Provider adapters return data and gain no filesystem authority.
@@ -23,8 +24,13 @@ The provider contract and failure schema also support a future Claude adapter
 without changing owner authorization. Provider installation/routing is host-owned.
 
 States are queued, planning, implementing, testing, reviewing,
-waiting_for_approval, completed, blocked and failed. Success stops at
-waiting_for_approval. Candidate apply and deployment are separate human gates.
+waiting_for_approval, completed, blocked and failed. Successful routine candidate
+preparation is `completed`; consequential promotion is `waiting_for_approval`.
+Completion means preparation/tests/review finished, not that the candidate was
+applied. `preview_candidate_apply` and `apply_candidate` finish routine reviewed
+development apply automatically with existing verification and rollback. Major,
+destructive, financial and authority-expanding execution requires approval as
+classified centrally. Production deployment always requires exact commit approval.
 Three worker attempts are initially allowed. After exhaustion, an authenticated
 owner resume grants exactly one additional bounded attempt, recorded as
 `owner_retry_authorized`. Total attempts and prior evidence are never reset;

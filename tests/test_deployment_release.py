@@ -154,6 +154,46 @@ def test_stale_and_wrong_commit_approval(release):
     assert not runtime.calls
 
 
+def test_preparation_without_production_config_or_runtime_access(release, monkeypatch):
+    from core.deployment_release import preparation_service
+    service, runtime, sha = release
+    monkeypatch.delenv('JARVIS_DEPLOY_CONFIG', raising=False)
+    prepared = preparation_service(source=service.config.source, state=service.config.journal.parent)
+    assert prepared.config.source == service.config.source
+    # Existing fresh evidence can be reused; no runtime queries are needed.
+    result = service.prepare()
+    assert result['prepared'] and result['commit'] == sha and not runtime.calls
+
+
+@pytest.mark.parametrize('code,timed_out,kind', [(1, False, 'test_failure'),
+    (2, False, 'test_environment'), (-9, True, 'environment_timeout')])
+def test_validation_failure_is_test_or_harness_evidence(release, monkeypatch, code, timed_out, kind):
+    from tools import CommandResult
+    service, runtime, sha = release
+    monkeypatch.setattr('tools.sandbox.run_tests', lambda *args, **kwargs:
+        CommandResult(('pytest',), code, 'fixture failure', timed_out=timed_out))
+    result = service.validate(sha)
+    assert not result['passed'] and {t['failure_kind'] for t in result['tests']} == {kind}
+    assert service.load()['evidence'][sha] == result
+    assert not runtime.calls
+
+
+@pytest.mark.parametrize('failure', ['fixture', 'backend'])
+def test_broken_harness_is_distinct_from_security_denial(release, monkeypatch, failure):
+    from tools import CommandResult
+    service, runtime, sha = release
+    def run(*args, **kwargs):
+        if failure == 'backend':
+            raise ToolDenied('Sandbox backend unavailable')
+        return CommandResult(('pytest',), 1, 'ERROR at setup of test_fixture')
+    monkeypatch.setattr('tools.sandbox.run_tests', run)
+    result = service.validate(sha)
+    assert not result['passed']
+    assert {r['failure_kind'] for r in result['tests']} == {
+        'test_environment' if failure == 'backend' else 'test_fixture_failure'}
+    assert not runtime.calls
+
+
 def test_concurrent_deployment_rejected(release):
     service, runtime, sha = release
     other = ReleaseService(service.config, runtime)

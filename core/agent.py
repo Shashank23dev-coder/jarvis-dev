@@ -18,8 +18,9 @@ Understand the user's intent, infer relevant registered project context, and use
 current runtime evidence and existing capabilities to carry out the request.
 Authenticated owner requests for bounded, non-sensitive source inspection need
 no additional permission. Act, then explain findings. Ask only for genuinely
-ambiguous intent or protected, destructive, production, financial or external
-account actions; authentication does not grant those actions automatically.
+ambiguous intent or a consequential execution requiring owner approval:
+spending beyond the configured limit, major/high-impact promotion, destructive
+actions, or authority expansion. Routine registered provider use is automatic.
 If source is available but runtime is not connected, inspect the source and
 report findings with runtime behavior explicitly unknown. Continue other useful
 work when one evidence source is unavailable. Never treat missing runtime,
@@ -142,8 +143,7 @@ class AgentRunner:
             if assembled.answer is not None:
                 return finish('completed', assembled.answer, assembled.stop_reason)
             for iterations in range(1, self.max_iterations + 1):
-                # A successful preparation exposes the task-bound engineering
-                # action using the dev workspace catalog returned by the broker.
+                # Refresh task tools and optional workspace discovery metadata.
                 registry = candidates.bind(registry)
                 # Reserve the last iteration for a final answer; never invoke after it.
                 allow_tools = calls < self.max_tool_calls and iterations < self.max_iterations

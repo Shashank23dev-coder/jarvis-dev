@@ -153,10 +153,9 @@ Single-process ownership avoids adding concurrent writers across app replicas.
 
 ## Candidate/self-edit support
 
-In a supported Jarvis maintenance checkout, candidate test snapshots receive only
-fixed deployment runtime modules and their regression test, checked byte-for-byte
-against the trusted running version. This follows the existing protected-policy
-dependency mechanism; candidate reads/edits of deployment controls remain denied.
+Candidate source may include policy and deployment code for isolated preparation
+and testing. The running host policy and sandbox supervisor remain trusted;
+changed boundary code cannot be promoted without explicit owner approval.
 Test environment clearing still excludes API/authentication secrets and state.
 
 The production image is an immutable application, **not a writable Git checkout**.

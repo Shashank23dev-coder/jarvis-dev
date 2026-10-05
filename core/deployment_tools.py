@@ -35,8 +35,9 @@ Use deployment_status for current identity and latest release, deployment_histor
 and inspect_deployment for prior results. Never read protected repository paths
 for deployment information. Production uses a timestamped controller snapshot;
 report its observation time and unknown eligibility, not a live health claim.
-For a deployment request, inspect the current revision and prepare a successful
-preview before asking for the exact commit approval. A missing controller
+For a release preparation or deployment request, call prepare_release first.
+Prepare and validate the current revision before asking for exact commit
+approval. A missing controller
 snapshot is a connection blocker, not a grant of deployment authority. Explain
 that blocker and do not ask for approval of an unverified release.
 '''
@@ -46,6 +47,7 @@ that blocker and do not ask for approval of an unverified release.
         self.reader = (lambda: ControllerInspector(factory())) if factory else configured_inspector
         self.approved = approved_commit(goal)
         self.result = None
+        self.preparation = None
         self.blockers = {}
 
     def _read(self, operation, *arguments):
@@ -66,9 +68,12 @@ that blocker and do not ask for approval of an unverified release.
         import os
         if os.environ.get('JARVIS_MODE') == 'production' and self.factory is configured_service:
             from .candidate_bridge import CandidateClient
-            return json.dumps(CandidateClient(self.goal, self.source_context).invoke('release_prepare', {}))
-        service = self.factory()
-        return json.dumps(service.prepare())
+            self.preparation = CandidateClient(self.goal, self.source_context).invoke('release_prepare', {})
+        else:
+            from .deployment_release import preparation_service
+            service = preparation_service() if self.factory is configured_service else self.factory()
+            self.preparation = service.prepare()
+        return json.dumps(self.preparation)
 
     def inspect(self, deployment_id):
         return self._read('inspect', deployment_id)
@@ -112,6 +117,10 @@ that blocker and do not ask for approval of an unverified release.
 
     def final_response(self, original):
         if self.result is None:
+            if self.preparation and self.preparation['prepared']:
+                return (f"Release {self.preparation['commit']} is prepared and its validation passed. "
+                        'Nothing was deployed. Production execution requires your approval: '
+                        + self.preparation['required_confirmation'])
             if self.blockers and re.search(r'\bdeploy\b', self.goal, re.I):
                 return ('I could not prepare deployment. ' + ' '.join(dict.fromkeys(self.blockers.values())) +
                         ' Deployment requires a verified preview and your approval for the exact commit. Nothing was deployed.')

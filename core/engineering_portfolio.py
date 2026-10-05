@@ -185,9 +185,13 @@ class Portfolio:
         # Upgrade only the previous native seed's obsolete description. Existing
         # host records, roots, baselines and read-only flags remain authoritative.
         for project in self.projects():
-            old = 'Metadata inspection only; no file changes, credentials, runtime or service operations.'
-            if project['project_id'] == 'trading-bot' and old in project['limitations']:
-                project['limitations'] = [projects[1]['limitations'][0] if limit == old else limit for limit in project['limitations']]
+            obsolete = {
+                'Metadata inspection only; no file changes, credentials, runtime or service operations.': projects[1]['limitations'][0],
+                'Bounded read-only repository inspection; no file changes, credentials, runtime or service operations.': projects[1]['limitations'][0],
+                'Apply and deployment require separate human approval.': projects[0]['limitations'][0],
+            }
+            if project['project_id'] in {'trading-bot', 'jarvis-core'} and any(limit in obsolete for limit in project['limitations']):
+                project['limitations'] = [obsolete.get(limit, limit) for limit in project['limitations']]
                 self.register_project(project, replace=True)
         capabilities = [
             ('codex-engineering', 'Codex engineering', 'engineering_provider', 'codex', 'external', ['code', 'documentation'], ['Live provider evidence required.']),
