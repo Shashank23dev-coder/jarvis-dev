@@ -23,7 +23,14 @@ from test_agent import call, final
 from test_brain import ScriptedProvider
 from test_self_edit import setup, git
 from test_candidate_apply import apply_service
-from test_deployment_release import release
+from test_deployment_release import release as release_fixture
+
+
+@pytest.fixture
+def release(tmp_path):
+    root = tmp_path / 'release-fixture'
+    root.mkdir()
+    return release_fixture.__wrapped__(root)
 
 
 def submit(setup, monkeypatch, provider, goal):

@@ -71,3 +71,81 @@ Evidence: `/tmp/jarvis-authority-resume_partial.txt` and `.xml`. Source inspecti
 continued through missing runtime evidence, project clarification remained
 concise, protected paths stayed blocked, and child-process fixture failures
 returned errors promptly instead of leaving requests waiting.
+
+Checkpoint 4: release harness plus the new authority/provider regressions passed
+**184**, with **1** opt-in integration skipped. The group initially had one
+obsolete expectation that unavailable test setup must raise a policy denial;
+its focused rerun passed after expecting explicit failed harness evidence.
+Artifacts: `/tmp/jarvis-authority-resume_release*`. Production secret/context
+checks, exact-SHA approval, clean checkout, evidence freshness and rollback checks
+remain enforced.
+
+Checkpoint 5: all **eight authenticated UI/task/Brain acceptance scenarios**
+passed using deterministic provider responses and real execution adapters.
+The routine fixture fix was tested, applied and committed without an approval
+phrase. Release preparation and deployment requests prepared existing exact-SHA
+fixture evidence with zero production runtime mutations. Two fixture directory
+collisions were corrected and those two cases rerun successfully. Evidence:
+`/tmp/jarvis-authority-resume_acceptance*`. Compilation and `git diff --check`
+passed. Live-provider acceptance and exact-current-commit readiness are separate
+checks, driven by `tests/live_authority_acceptance.py`; deterministic providers
+are not presented as evidence of live model/provider availability.
+
+## Governing behavior
+
+Authenticated owner plus trusted registered project is normal operational scope.
+The existing `engineering_authority` module supplies one consequence assessment;
+it does not introduce a second permission system. Preparation/workspace discovery,
+conversation identity, advisory preflight outcomes, stale capability observations
+and the legacy project `read_only` observation no longer require owner permission
+for ordinary isolated source work. Existing IDs, tables, queues, leases, provider
+routing, conversations and candidate audits are retained.
+
+Normal operations include repository inspection, registered provider use, research,
+candidate/job creation, isolated implementation/testing/review, reversible reviewed
+development apply, project observations and release preparation. An available
+adapter is still needed: registration does not invent runtime connectivity, an
+external database connection, or access to another account.
+
+Only consequential execution escalates:
+
+1. **Financial:** compare trusted adapter amounts and currency against
+   `JARVIS_AUTONOMOUS_FINANCIAL_LIMIT` and
+   `JARVIS_AUTONOMOUS_FINANCIAL_CURRENCY`. At/below a valid limit proceeds;
+   above it, missing/invalid limits, unknown costs or mismatched currency need
+   approval. There is no invented limit or exchange rate. Existing configured
+   provider use remains normal; no new purchase/transfer executor was added.
+2. **Major:** design, isolated development, tests and release preparation proceed;
+   high-impact execution/promotion and production deployment require approval.
+3. **Destructive:** inspect consequences and prepare recovery automatically;
+   destructive/hard-to-reverse execution requires approval. Arbitrary production
+   commands remain unavailable through repository tools.
+4. **Authority expansion:** changing limits, privileges, permissions or approval
+   boundaries requires explicit owner approval. Candidate preparation may touch
+   authority source inside isolation; its promotion needs exact candidate approval.
+
+Candidate apply still checks immutable reviewed/tested evidence, the actual diff,
+clean matching baseline, source identity, locking, verification and rollback.
+Production deploy still requires current-message approval for the exact clean
+commit and independently enforces all production safety checks. Path traversal,
+symlink/hardlink escape, arbitrary roots, secret disclosure and credential leakage
+remain protected. No production deployment is part of this work.
+
+Project names resolve naturally (`my trading bot`, `Jarvis itself`, `CreatorOS`);
+root selection is host Portfolio metadata, never request-supplied filesystem paths.
+Ambiguous registered references produce one clarification. Missing registered
+roots return a specific unknown instead of selecting another project. Legacy
+native seed wording is upgraded without changing operator roots or custom notes.
+Unavailable Windows/runtime/provider observations do not cancel usable source
+inspection. Assistant guidance asks for findings, observed limitations and useful
+next actions instead of policy diagnostics or repeated permission requests.
+
+Release validation exports exact Git blobs and tests in the existing sandbox.
+Fixture source/state identity is explicit; child failures receive mailbox replies.
+Validation evidence distinguishes application test failures, fixture failures,
+test-environment failures, timeouts and output limits. Passing evidence is revoked
+before a rerun, and failed harness evidence cannot authorize deployment. Production
+context checks still run separately and retain their hard denials. Secret-marker
+fixtures construct synthetic markers at runtime; whole-file hash exemptions were
+removed. Full Python, UI and live-provider/readiness evidence is saved under `/tmp`
+and reported against the final commit after the checks finish.

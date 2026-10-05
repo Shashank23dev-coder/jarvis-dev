@@ -440,9 +440,10 @@ def test_validation_binds_complete_suites_to_git_snapshot_and_invalidates_on_err
     def fail(*args, **kwargs):
         raise ToolDenied('validation setup failed')
     monkeypatch.setattr('tools.sandbox.run_tests', fail)
-    with pytest.raises(ToolDenied):
-        service.validate(sha)
-    assert sha not in service.load()['evidence']
+    failed = service.validate(sha)
+    assert not failed['passed']
+    assert all(t['failure_kind'] == 'test_environment' for t in failed['tests'])
+    assert service.load()['evidence'][sha] == failed
 
 
 def test_known_baseline_changed_files(release):
