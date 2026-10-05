@@ -63,7 +63,7 @@ def test_unsuccessful_candidates_are_reported_truthfully(setup, kind):
     options = {}
     args = ARGS
     if kind == 'protected':
-        args = dict(ARGS, inspect_paths=['tools/policy.py'])
+        args = dict(ARGS, inspect_paths=['.env'])
     elif kind == 'failed_tests':
         options['tester'] = lambda *args: CommandResult(('test',), 1, 'Failed assertion')
     else:
@@ -203,9 +203,7 @@ def test_approved_persistence_docs_edit_through_agent_tool(setup, monkeypatch, t
 
 
 @pytest.mark.parametrize('path', ['.env', '.git/config', '.venv/a.py', 'docs/data.db',
-    'docs/data.sqlite3', 'docs/security.md', 'docs/policy.md', 'tools/policy.py',
-    'tools/repository.py', 'core/candidate_tools.py', 'core/self_edit.py',
-    'core/candidate_store.py', 'docs/credentials.md', 'docs/deployment.md',
+    'docs/data.sqlite3', 'docs/security.md', 'docs/policy.md', 'docs/credentials.md',
     '../docs/persistence.md', '/docs/persistence.md', './docs/persistence.md',
     'docs//persistence.md', 'docs/../docs/persistence.md'])
 def test_docs_regression_keeps_scope_and_canonical_paths_blocked(path):

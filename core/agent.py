@@ -108,6 +108,7 @@ class AgentRunner:
         registry = candidates.bind(self.registry)
         from .deployment_tools import DeploymentTools
         deployments = DeploymentTools(goal)
+        deployments.source_context = candidates.source_context
         registry = deployments.bind(registry)
         from .brain_status import BrainStatusTools
         brain_status = BrainStatusTools(task_store, task_id, goal=goal)
@@ -147,6 +148,10 @@ class AgentRunner:
                 # Reserve the last iteration for a final answer; never invoke after it.
                 allow_tools = calls < self.max_tool_calls and iterations < self.max_iterations
                 instructions = INSTRUCTIONS + candidates.instructions + deployments.instructions + brain_status.instructions + (RECALL_INSTRUCTIONS if recall is not None else '')
+                from .engineering_authority import request_consequence
+                consequence = request_consequence(goal)
+                if consequence and consequence.approval_required:
+                    instructions += '\n' + consequence.message + ' Complete useful preparation; never claim execution without tool evidence.'
                 if candidates.implementation_pending:
                     instructions += '\n' + candidates.CONTINUE_ENGINEERING
                 if experiences and experiences['results']:

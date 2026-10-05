@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 from tools.schemas import StrictModel
-from .candidate_provider import ProviderFailure, ProposalProvider
+from .candidate_provider import ProviderFailure, ProposalProvider, ProviderId
 from .database import timestamp
 
 State = Literal['available', 'unavailable', 'not_authenticated', 'quota_blocked',
@@ -58,7 +58,7 @@ class ProviderBlocker(StrictModel):
     code: Literal['engineering_providers_blocked'] = 'engineering_providers_blocked'
     stage: Literal['implementing', 'reviewing']
     reasons: list[ProviderState]
-    excluded_providers: list[Literal['codex', 'openai', 'claude_code']] = Field(default_factory=list)
+    excluded_providers: list[ProviderId] = Field(default_factory=list)
     budget_exhausted: bool = False
 
 
@@ -109,7 +109,7 @@ class EngineeringRegistry:
              dotenv_values(Path(__file__).resolve().parents[1] / '.env').get('OPENAI_API_KEY')))
         return cls(database, [Registration(ProposalProvider('codex', transport), 'api', configured),
             Registration(ClaudeCodeProvider(transport), 'cli', bool(claude_executable())),
-            Registration(ProposalProvider('openai', transport), 'api', configured)])
+            Registration(ProposalProvider('openai', transport), 'api', configured, capabilities=('reviewing',))])
 
     def observe(self, provider, state, source, scope, code=None, *, stage=None):
         if provider not in self.registrations:
@@ -164,10 +164,12 @@ class EngineeringRegistry:
                     'provider_authentication' if state == 'not_authenticated' else
                     'provider_unavailable' if state == 'unavailable' else None)
 
-    def complete(self, payload, instructions, timeout, *, stage, task_type='code', exclude=(), validate=lambda x: x):
+    def complete(self, payload, instructions, timeout, *, stage, task_type='code', exclude=(), validate=lambda x: x, preferred=None):
         import time
         deadline = time.monotonic() + timeout
         order = ('codex', 'claude_code') if stage == 'implementing' else ('openai', 'claude_code', 'codex')
+        order = list(dict.fromkeys(([preferred] if preferred in self.registrations else []) +
+            list(order) + list(self.registrations)))
         reasons = []
         for name in order:
             if name in exclude or name not in self.registrations:

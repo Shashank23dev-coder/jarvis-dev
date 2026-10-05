@@ -33,6 +33,15 @@ def confirmation(identifier):
     return f'Approve and apply candidate {identifier} to main'
 
 
+def authority_candidate(factory):
+    service = factory()
+    candidate = start(service)
+    record = service.store.get(candidate['id'], internal=True)
+    record['goal'] = 'Increase Jarvis authority'
+    service.store.save(record)
+    return candidate
+
+
 def test_success_and_idempotency_restart(setup):
     source, database, factory = setup
     candidate = start(factory())
@@ -95,7 +104,7 @@ def test_staged_executable_change_still_rolls_back(setup):
     'Do not approve and apply candidate {id} to main', 'Approve and apply candidate ' + str(uuid4()) + ' to main'])
 def test_explicit_current_uuid_required(setup, approval_text):
     source, _, factory = setup
-    candidate = start(factory())
+    candidate = authority_candidate(factory)
     before = tree_bytes(source)
     with pytest.raises(ToolDenied):
         apply_service(factory).apply(candidate['id'], approval_text.format(id=candidate['id']))
@@ -164,11 +173,14 @@ def test_failed_verification_rolls_back(setup, phase):
 
 def test_http_approval_preview_and_audit(setup):
     _, database, factory = setup
-    candidate = start(factory())
-    application = main.create_app(database.path)
+    candidate = authority_candidate(factory)
+    from core.deployment import Settings
+    token = 'candidate-apply-owner-' * 3
+    application = main.create_app(settings=Settings(mode='development', database_path=database.path,
+        state_dir=Path(database.path).parent, auth_token=token))
     application.dependency_overrides[main.get_self_edit] = lambda: apply_service(factory).service
     url = '/candidates/' + candidate['id'] + '/apply'
-    with TestClient(application) as client:
+    with TestClient(application, headers={'Authorization': 'Bearer ' + token}) as client:
         assert client.get(url + '/preview').json()['eligible']
         assert client.post(url, json={'confirmation': 'looks good'}).status_code == 409
         assert client.post(url, json={'confirmation': confirmation(candidate['id']), 'force': True}).status_code == 422
@@ -184,7 +196,7 @@ def test_agent_approval_not_inferred_and_wrong_id_blocked(setup):
     store = TaskStore(database.path)
     for goal in ('looks good', 'continue', 'Please improve your code'):
         tools = CandidateTools(goal, database).bind(ToolRegistry()).model_tools()
-        assert 'approve_and_apply_candidate' not in {t['name'] for t in tools}
+        assert 'apply_candidate' in {t['name'] for t in tools}
     goal = confirmation(candidate['id'])
     task = store.create_task(goal)
     adapter = CandidateTools(goal, database, lambda db: apply_service(factory).service)
@@ -267,14 +279,14 @@ def test_previous_turn_approval_does_not_authorize_current_chat(setup):
     from core.agent import AgentRunner
     from test_agent import ScriptedModel, call, final
     _, database, factory = setup
-    candidate = start(factory())
+    candidate = authority_candidate(factory)
     store = TaskStore(database.path)
     first = store.create_task(confirmation(candidate['id']))
     current = store.create_task('looks good', conversation_id=first['conversation_id'])
     model = ScriptedModel(call('approve_and_apply_candidate', {'candidate_id': candidate['id']}), final('Denied'))
-    runner = AgentRunner(model=model, candidate_service_factory=lambda db: pytest.fail('No approval'))
+    runner = AgentRunner(model=model, candidate_service_factory=lambda db: apply_service(factory).service)
     runner.run(current['goal'], task_id=current['id'], task_store=store)
-    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'unknown_tool'
+    assert json.loads(model.requests[1]['input'][-1]['output'])['error']['code'] == 'denied'
 
 
 @pytest.mark.parametrize('content', ['New docs\n', ''])
@@ -435,12 +447,16 @@ def test_agent_exact_approval_applies_and_duplicate_is_idempotent(setup):
     'Show the apply eligibility preview for candidate {id}. Do not apply it.'])
 def test_agent_unapproved_apply_not_exposed_or_invoked(setup, goal):
     source, _, factory = setup
-    candidate = start(factory())
+    candidate = authority_candidate(factory)
     before = tree_bytes(source)
     _, output, names = agent_apply_request(setup, goal.format(id=candidate['id']),
         'approve_and_apply_candidate', candidate['id'])
-    assert 'approve_and_apply_candidate' not in names
-    assert output['error']['code'] == 'unknown_tool'
+    if 'Do not apply' in goal:
+        assert 'approve_and_apply_candidate' not in names
+        assert output['error']['code'] == 'unknown_tool'
+    else:
+        assert 'apply_candidate' in names
+        assert output['error']['reason'] == 'approval_required'
     assert tree_bytes(source) == before
 
 

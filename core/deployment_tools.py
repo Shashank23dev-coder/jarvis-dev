@@ -60,6 +60,16 @@ that blocker and do not ask for approval of an unverified release.
     def preview(self, commit):
         return self._read('preview', commit)
 
+    def prepare(self):
+        from .engineering_authority import authorize
+        authorize('release_prepare')
+        import os
+        if os.environ.get('JARVIS_MODE') == 'production' and self.factory is configured_service:
+            from .candidate_bridge import CandidateClient
+            return json.dumps(CandidateClient(self.goal, self.source_context).invoke('release_prepare', {}))
+        service = self.factory()
+        return json.dumps(service.prepare())
+
     def inspect(self, deployment_id):
         return self._read('inspect', deployment_id)
 
@@ -82,6 +92,11 @@ that blocker and do not ask for approval of an unverified release.
             return registry
         scoped = copy.copy(registry)
         definitions = dict(registry._definitions)
+        from .engineering_authority import current_owner
+        if current_owner.get() is not None:
+            definitions['prepare_release'] = ToolDefinition(
+                'Prepare the latest exact HEAD release: validate clean Git source and complete isolated tests. Never deploys. No approval needed.',
+                StrictModel, TextResult, self.prepare)
         for name, arguments, handler, description in (
             ('deployment_status', HistoryArguments, self.status, 'Read current production identity and latest release with observation time.'),
             ('preview_deployment', CommitArguments, self.preview, 'Read a clean commit deployment preview and required approval.'),

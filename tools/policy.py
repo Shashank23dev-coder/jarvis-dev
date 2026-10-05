@@ -12,6 +12,7 @@ class ToolDenied(ToolError):
 
     # Closed diagnostics only. Exception prose can contain paths or credentials.
     reasons = {
+        'approval_required': 'owner_escalation',
         'owner_required': 'owner_authentication',
         'relative_path_required': 'repository_path',
         'path_escape': 'repository_path',
@@ -54,6 +55,7 @@ class ToolDenied(ToolError):
 
     def public_error(self):
         messages = {
+            'approval_required': 'This action needs your approval before execution. I can prepare it first.',
             'owner_required': 'Sign in as the owner to inspect registered project source.',
             'relative_path_required': 'Choose a file within the registered project using a relative path.',
             'path_escape': 'I can inspect files inside the registered project; that path goes outside it.',
@@ -116,11 +118,12 @@ class ToolPolicy:
             if (name in self._directories or name in self._files
                     or name == ".env" or name.startswith(".env.")
                     or name.startswith(".env-") or name.startswith(".env_")
-                    or stem in {"security", "policy", "policies"}
-                    or name.startswith(("security_", "security-", "policy_", "policy-"))
+                    or (not name.endswith('.py') and (stem in {"security", "policy", "policies"}
+                        or name.startswith(("security_", "security-", "policy_", "policy-"))))
                     or any(word in name for word in ("credential", "secret", "private_key", "private-key"))
+                    or (not name.endswith('.py') and any(word in name for word in ('password', 'token')))
                     or any(suffix in name for suffix in (".sqlite", ".db", ".p12", ".pfx", ".kdbx"))
-                    or name.endswith(("_policy.py", "-policy.json", ".pem", ".key"))):
+                    or name.endswith(("-policy.json", ".pem", ".key"))):
                 raise ToolDenied("Protected repository path", reason='protected_path')
         if any(parts[:len(prefix)] == prefix for prefix in self._additional):
             raise ToolDenied("Protected repository path", reason='protected_path')

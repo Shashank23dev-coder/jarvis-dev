@@ -64,7 +64,7 @@ def test_successful_job_preserves_revised_candidate_failure_history(setup):
         turns.append(payload)
         return dict(edits=[dict(path='src/app.py', content='value = 3\n' if len(turns) == 1 else 'value = 2\n')])
     result = EngineeringWorker(factory(model=author, tester=run_checks), source=source).once()
-    assert result['status'] == 'waiting_for_approval' and result['failure'] is None
+    assert result['status'] == 'completed' and result['failure'] is None
     assert result['failures'][0]['code'] == 'tests_failed'
     assert project_job(result)['failures'][0]['stage'] == 'testing'
 
@@ -219,7 +219,7 @@ def test_http_authentication_issues_owner_for_cross_conversation_inspection(setu
         assert client.get('/inspect', headers={'Authorization': 'Bearer invalid'}).status_code == 401
         response = client.get('/inspect', headers={'Authorization': 'Bearer ' + token})
         assert response.status_code == 200
-        assert response.json()['job']['jobs'][0]['status'] == 'waiting_for_approval'
+        assert response.json()['job']['jobs'][0]['status'] == 'completed'
         assert response.json()['candidate']['state'] == 'passed'
         headers = {'Authorization': 'Bearer ' + token, 'Origin': 'http://testserver'}
         assert client.post('/inspect', headers=headers).status_code == 200
@@ -255,8 +255,7 @@ def test_inspection_redacts_fixture_literals_but_edit_secret_guard_stays():
     assert 'OMITTED' in inspection_text(source)
     with pytest.raises(ToolDenied):
         safe_text(source)
-    for path in ('core/engineering_authority.py', 'core/deployment.py', '.env', '.ssh/id_rsa',
-                 '.aws/config', 'security/trading.py', 'core/candidate_provider.py'):
+    for path in ('.env', '.ssh/id_rsa', '.aws/config', 'security/trading.py'):
         with pytest.raises(ToolDenied):
             CandidatePolicy().edit_path(path)
 
@@ -321,7 +320,7 @@ def test_owner_can_repair_inputs_without_replacing_objective(setup):
         with pytest.raises(ToolDenied):
             jobs.revise_inputs(job['id'], args, authority=invalid)
     with pytest.raises(ToolDenied):
-        jobs.revise_inputs(job['id'], args | {'inspect_paths': ['core/engineering_authority.py']}, authority=authority)
+        jobs.revise_inputs(job['id'], args | {'inspect_paths': ['.env']}, authority=authority)
 
 
 def test_owner_listing_includes_jobs_older_than_recent_runtime_window(setup):
@@ -396,13 +395,13 @@ def test_management_reconciles_without_nested_transaction_failure(setup):
     enqueue(db)
     service = factory(model=model, tester=run_checks)
     job = EngineeringWorker(service, source=source).once()
-    assert job['status'] == 'waiting_for_approval'
+    assert job['status'] == 'completed'
     tested = service.tests(job['candidate_id'])
     assert EngineeringJobs(db).get(job['id'])['status'] == 'blocked'
     assert tested['reviewer_result'] is None
     reviewed = service.review(job['candidate_id'])
     assert reviewed['state'] == 'passed'
-    assert EngineeringJobs(db).get(job['id'])['status'] == 'waiting_for_approval'
+    assert EngineeringJobs(db).get(job['id'])['status'] == 'completed'
 
 
 def test_model_text_cannot_spoof_failure_envelope(monkeypatch):

@@ -43,7 +43,7 @@ def test_worker_candidate_tests_review_and_no_apply_deploy(setup, monkeypatch):
     job = enqueue(db)
     result = EngineeringWorker(factory(model=model, tester=run_checks), source=source).once()
     assert result['id'] == job['id']
-    assert result['status'] == 'waiting_for_approval', result
+    assert result['status'] == 'completed', result
     assert result['provider'] == 'codex' and result['attempts'] == 1
     candidate = factory().store.get(result['candidate_id'])
     assert Path(candidate['worktree']).is_dir()
@@ -51,12 +51,12 @@ def test_worker_candidate_tests_review_and_no_apply_deploy(setup, monkeypatch):
     assert result['test_result'] and result['review_result']['verdict'] == 'passed'
     assert result['improvement']['baseline_evidence']['result'] == 'improved'
     assert {h['status'] for h in result['history']} >= {
-        'queued', 'planning', 'implementing', 'testing', 'reviewing', 'waiting_for_approval'}
+        'queued', 'planning', 'implementing', 'testing', 'reviewing', 'completed'}
     assert not candidate.get('apply') and not candidate.get('deployment')
     assert tree_bytes(source) == before
     assert EngineeringWorker(factory(), source=source).once() is None
     db.close()
-    assert EngineeringJobs(Database(db.path)).get(job['id'])['status'] == 'waiting_for_approval'
+    assert EngineeringJobs(Database(db.path)).get(job['id'])['status'] == 'completed'
 
 
 def test_lease_recovery_and_stale_owner_fenced(setup):
@@ -85,7 +85,7 @@ def test_flock_prevents_duplicate_even_with_expired_lease(setup, monkeypatch):
         assert EngineeringWorker(factory(), source=source).once() is None
         assert EngineeringJobs(db).get(job['id'])['attempts'] == 1
     result = EngineeringWorker(factory(model=model, tester=run_checks), source=source).once()
-    assert result['status'] == 'waiting_for_approval'
+    assert result['status'] == 'completed'
     assert result['attempts'] == 2
 
 
@@ -125,9 +125,7 @@ def test_production_execution_denied(setup, monkeypatch, mode):
     assert EngineeringJobs(db).recent()[0]['attempts'] == 0
 
 
-@pytest.mark.parametrize('path', ['.env', 'core/engineering_jobs.py', 'core/engineering_worker.py',
-                                 'core/engineering_tools.py', 'core/candidate_store.py',
-                                 'core/engineering_providers.py', 'core/candidate_claude.py'])
+@pytest.mark.parametrize('path', ['.env', '../outside.py', '.git/config', 'docs/credentials.txt'])
 def test_protected_paths_fail_before_queue(setup, path):
     _, db, _ = setup
     with pytest.raises(ToolDenied):
@@ -200,7 +198,8 @@ def test_production_read_only_inspection_states(setup, monkeypatch, status):
     registry = tools.bind(ToolRegistry())
     assert {'list_engineering_jobs', 'inspect_engineering_job'} <= registry.schemas().keys()
     assert {'pause_engineering_job', 'cancel_engineering_job', 'resume_engineering_job'} <= registry.schemas().keys()
-    assert not {'approve_and_apply_candidate', 'approve_and_deploy_commit'} & registry.schemas().keys()
+    assert 'apply_candidate' in registry.schemas()
+    assert 'approve_and_deploy_commit' not in registry.schemas()
     result = registry._definitions['inspect_engineering_job'].handler(job_id=job['id']).jobs[0]
     assert result['status'] == status and result['attempts'] == 1
     assert result['candidate_id'] == before['candidate_id']

@@ -4,11 +4,12 @@ Keep adapters under the candidate protected-path boundary, without filesystem au
 """
 from dataclasses import dataclass
 from typing import Protocol
-from typing import Literal
+from typing import Literal, Annotated
 from pydantic import Field
 from tools.schemas import StrictModel
 
 PROVIDERS = {'codex', 'openai', 'claude_code'}
+ProviderId = Annotated[str, Field(pattern=r'^[a-z][a-z0-9_]{0,63}$')]
 FAILURES = {
     'provider_authentication': (False, 'Configure the development provider credential.'),
     'provider_quota': (False, 'Restore provider quota, then resume the job.'),
@@ -32,7 +33,7 @@ FAILURES = {
 
 
 class FailureEvidence(StrictModel):
-    provider: Literal['codex', 'openai', 'claude_code']
+    provider: ProviderId
     code: str
     retryable: bool
     stage: Literal['planning', 'implementing', 'testing', 'reviewing']
@@ -67,7 +68,7 @@ class ProviderFailure(RuntimeError):
 
 
 class ProviderResult(StrictModel):
-    provider: Literal['codex', 'openai', 'claude_code']
+    provider: ProviderId
     stage: Literal['implementing', 'reviewing']
     attempt: int = Field(ge=1)
     iteration: int = Field(ge=1, le=4)
@@ -83,8 +84,8 @@ def project_provider_results(values):
 
 class WorkAttribution(StrictModel):
     outcome: Literal['codex_autonomous', 'claude_autonomous', 'multi_provider', 'operator_assisted', 'unknown']
-    implementation_providers: list[Literal['codex', 'claude_code', 'openai']]
-    review_providers: list[Literal['codex', 'claude_code', 'openai']]
+    implementation_providers: list[ProviderId]
+    review_providers: list[ProviderId]
     operator_assisted: bool
 
 

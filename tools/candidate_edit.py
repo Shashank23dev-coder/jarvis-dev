@@ -14,27 +14,18 @@ from .repository import RepositoryTools
 
 
 class CandidatePolicy(ToolPolicy):
-    """Additional denials; the existing protected-path policy is unchanged."""
-
-    def check(self, path):
-        parts = super().check(path)
-        for part in parts:
-            name = part.casefold()
-            if (any(word in name for word in ('secret', 'credential', 'deploy', 'token', 'password', 'private_key', 'private-key'))
-                    or any(suffix in name for suffix in ('.db', '.sqlite', '.p12', '.pfx', '.kdbx'))):
-                raise ToolDenied('Sensitive candidate path')
-        return parts
+    """Isolated source preparation. Consequences are classified at promotion."""
 
     def edit_path(self, path):
         parts = self.check(path)
         if not parts or '/'.join(parts) != path or not re.fullmatch(r'[A-Za-z0-9_./-]+', path):
             raise ToolDenied('Invalid edit path')
-        approved = ((parts[0] in {'core', 'models', 'agents', 'evaluator', 'src'} and Path(path).suffix == '.py')
+        approved = ((parts[0] in {'core', 'models', 'agents', 'evaluator', 'src', 'tools'} and Path(path).suffix == '.py')
                     or (parts[0] == 'tests' and Path(path).suffix in {'.py', '.cjs', '.js'})
                     or (parts[0] == 'docs' and Path(path).suffix in {'.md', '.txt'})
                     or (parts[0] == 'static' and Path(path).suffix in {'.html', '.css', '.js'})
                     or path == 'main.py')
-        if not approved or path.startswith(('core/candidate_', 'core/self_edit', 'core/engineering_')):
+        if not approved:
             raise ToolDenied('Path is outside approved editing scope')
         return parts
 

@@ -149,7 +149,7 @@ def test_stale_and_wrong_commit_approval(release):
     new = git(service.config.source, 'rev-parse', 'HEAD')
     with pytest.raises(ToolDenied, match='stale'):
         service.deploy(sha, approval(sha))
-    with pytest.raises(ToolDenied, match='current-message'):
+    with pytest.raises(ToolDenied, match='approval'):
         service.deploy(new, approval(sha))
     assert not runtime.calls
 
@@ -642,7 +642,7 @@ def test_unapproved_key_material_rejected_in_every_scope(release, tmp_path, key_
 
 @pytest.mark.parametrize('fixture_path', ['tests/test_self_edit.py', 'tests/test_recall.py'])
 @pytest.mark.parametrize('change', ['append_key', 'one_byte', 'relocate'])
-def test_synthetic_exception_requires_exact_blob_and_path(release, tmp_path, fixture_path, change):
+def test_fixture_changes_are_independent_of_production_key_protection(release, tmp_path, fixture_path, change):
     service, _, _ = release
     content = (Path(__file__).resolve().parents[1] / fixture_path).read_bytes()
     if change == 'append_key':
@@ -658,5 +658,9 @@ def test_synthetic_exception_requires_exact_blob_and_path(release, tmp_path, fix
     git(service.config.source, 'commit', '-m', 'Altered synthetic fixture')
     export = tmp_path / 'export'
     export.mkdir()
-    with pytest.raises(ToolDenied, match='Private key material'):
+    if change == 'append_key':
+        with pytest.raises(ToolDenied, match='Private key material'):
+            service.snapshot(git(service.config.source, 'rev-parse', 'HEAD'), export)
+    else:
         service.snapshot(git(service.config.source, 'rev-parse', 'HEAD'), export)
+        assert (export / fixture_path).read_bytes() == content

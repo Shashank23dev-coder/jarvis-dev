@@ -146,9 +146,14 @@ class CandidateApply:
             with self._lock():
                 # Preview never recovers interrupted mutations or changes main.
                 self._eligible()
+                from .engineering_authority import assess_action
+                authority = assess_action('candidate_apply', goal=self.record['goal'],
+                    changed_paths=self.record['files_changed'])
                 return {'candidate_id': candidate_id, 'eligible': True,
                         'files_changed': self.record['files_changed'], 'diff_summary': self.record['diff_summary'],
-                        'required_confirmation': f'Approve and apply candidate {candidate_id} to main'}
+                        'authority': authority.model_dump(),
+                        'required_confirmation': (f'Approve and apply candidate {candidate_id} to main'
+                                                  if authority.approval_required else None)}
         except (ToolDenied, OSError, ValueError):
             return {'candidate_id': candidate_id, 'eligible': False,
                     'reason': 'Requires passed, unexpired, unchanged evidence and a clean matching baseline'}
@@ -276,10 +281,12 @@ class CandidateApply:
         return {'candidate_id': self.record['id'], 'apply':
                 {key: value for key, value in audit.items() if key != 'patch'} if audit else None}
 
-    def apply(self, candidate_id, current_request):
-        if approved_id(current_request) != candidate_id:
-            raise ToolDenied('Explicit current-request approval for this UUID is required')
+    def apply(self, candidate_id, current_request='', *, authority=None):
+        from .engineering_authority import authorize
         self._setup(candidate_id)
+        authorize('candidate_apply', authority=authority,
+            approved=approved_id(current_request) == candidate_id,
+            goal=self.record['goal'], changed_paths=self.record['files_changed'])
         if self.record.get('busy'):
             raise ToolDenied('Candidate is busy')
         self.store.claim(candidate_id)
@@ -297,6 +304,11 @@ class CandidateApply:
                         commit=None, error='Eligibility validation failed', rollback=False)
                     self._save('apply_denied')
                     return self._public()
+                # _eligible recomputes the actual diff from immutable review
+                # evidence. Reclassify those verified paths before mutation.
+                authorize('candidate_apply', authority=authority,
+                    approved=approved_id(current_request) == candidate_id,
+                    goal=self.record['goal'], changed_paths=self.record['files_changed'])
                 audit = self.record['apply'] = dict(status='applying', candidate_id=candidate_id,
                     approval=current_request, requested_at=timestamp(), files_changed=list(self.record['files_changed']),
                     patch=self.record['diff'], patch_hash=digest(self.record['diff'].encode()),

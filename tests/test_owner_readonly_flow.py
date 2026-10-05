@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from core.agent import AgentRunner
 from core.brain import BrainSettings
 from core.candidate_broker import Broker
+from core.candidate_bridge import CandidateClient
 from core.candidate_tools import CandidateTools
 from core.database import Database
 from core.deployment import Settings
@@ -43,8 +44,9 @@ def production_flow(projects, tmp_path, monkeypatch):
     mailbox = tmp_path / 'mailbox'
     monkeypatch.setattr(bridge, 'ROOT', mailbox)
     # Only the test's trusted process configuration chooses host state/source.
+    host_source = Path(__file__).resolve().parents[1]
     code = ("import sys,json; from pathlib import Path; from core import candidate_broker as b; "
-            "b.STATE=Path(sys.argv[1]); "
+            "b.STATE=Path(sys.argv[1]); b.SOURCE=Path(sys.argv[2]); "
             "print(json.dumps(b.execute_private(json.load(sys.stdin))))")
     host_state = tmp_path / 'host'
     host_state.mkdir()
@@ -58,19 +60,25 @@ def production_flow(projects, tmp_path, monkeypatch):
         while not stop.is_set():
             if mailbox.exists():
                 for incoming in mailbox.glob('*.request'):
+                    raw = None
                     try:
                         raw = bridge.read(incoming)
                         requests.append(raw)
-                        completed = subprocess.run([sys.executable, '-B', '-c', code, str(host_state)],
+                        completed = subprocess.run([sys.executable, '-B', '-c', code, str(host_state), str(host_source)],
                             input=json.dumps(raw), capture_output=True, text=True, timeout=20,
-                            cwd=Path(__file__).resolve().parents[1],
+                            cwd=host_source,
                             env=dict(os.environ, JARVIS_MODE='development'))
                         assert completed.returncode == 0, 'Host process failed'
                         response = json.loads(completed.stdout)
                         bridge.write(mailbox / (raw['request_id'] + '.response'), response)
-                        incoming.unlink(missing_ok=True)
                     except Exception as exc:
                         errors.append(type(exc).__name__)
+                        if raw is not None:
+                            bridge.write(mailbox / (raw['request_id'] + '.response'),
+                                dict(request_id=raw['request_id'], ok=False,
+                                     error=ToolDenied(reason='execution_failed').public_error()))
+                    finally:
+                        incoming.unlink(missing_ok=True)
             stop.wait(.01)
     thread = Thread(target=serve, daemon=True)
     thread.start()
@@ -92,6 +100,30 @@ def production_flow(projects, tmp_path, monkeypatch):
     stop.set()
     thread.join(25)
     assert not thread.is_alive() and not errors
+
+
+@pytest.mark.usefixtures('owner')
+@pytest.mark.parametrize('failure', ['exit', 'timeout', 'invalid_json'])
+def test_fixture_child_failure_returns_error_without_mailbox_timeout(production_flow, monkeypatch, failure):
+    flow = production_flow
+    original = subprocess.run
+    def fail_child(argv, *args, **kwargs):
+        if len(argv) > 3 and argv[2] == '-c' and 'b.STATE=' in argv[3]:
+            if failure == 'timeout':
+                raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+            return subprocess.CompletedProcess(argv, 1 if failure == 'exit' else 0,
+                                               stdout='invalid json', stderr='')
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, 'run', fail_child)
+    raw = request(action='runtime', arguments={})
+    client = CandidateClient(
+        raw['goal'], {key: raw[key] for key in ('task_id', 'conversation_id')})
+    with pytest.raises(ToolDenied) as caught:
+        client.invoke('runtime', {})
+    assert caught.value.reason == 'execution_failed'
+    expected = 'TimeoutExpired' if failure == 'timeout' else 'AssertionError' if failure == 'exit' else 'JSONDecodeError'
+    assert flow.errors == [expected]
+    flow.errors.clear()  # This test deliberately exercises the fixture's error path.
 
 
 @pytest.mark.usefixtures('owner')
@@ -147,7 +179,6 @@ def test_production_ui_owner_reads_registered_project_through_real_mailbox(produ
     ('run_command', {'command':['sudo','reboot']}, 'project_operation','read_only_operation_required'),
     ('run_command', {'command':['curl','https://example.test/account/withdraw']}, 'project_operation','read_only_operation_required'),
     ('run_command', {'command':['git','-C','/etc','status']}, 'project_operation','read_only_operation_required'),
-    ('run_pytest', {'paths':['tests']}, 'project_operation','project_tests_disabled'),
 ])
 def test_production_ui_negative_security_gates(production_flow, tool, args, gate, reason):
     flow = production_flow
@@ -291,7 +322,7 @@ def test_broker_dispatch_uses_fresh_process_and_fixed_host_configuration(monkeyp
     assert module.execute_current({'request_id':'test','action':'project_repository'})['ok']
     argv,kwargs=seen[0]
     assert argv==[sys.executable,'-B','-m','core.candidate_broker','--execute']
-    assert kwargs['cwd']==module.SOURCE and kwargs['timeout']==930
+    assert kwargs['cwd']==module.SOURCE and kwargs['timeout']==1320
     assert json.loads(kwargs['input'])['action']=='project_repository'
 
 

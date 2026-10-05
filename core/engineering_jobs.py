@@ -100,10 +100,17 @@ class EngineeringJobs:
         from .candidate_tools import EngineeringArguments
         from tools.candidate_edit import CandidatePolicy, safe_text
         text_value(goal)
+        if action is None:
+            from .candidate_action import goal_digest
+            action = dict(provider='codex', scope='code', task_id=context.get('task_id'),
+                conversation_id=context.get('conversation_id'), goal_digest=goal_digest(goal))
         action = EngineeringAction.model_validate(action).check(goal, context)
         if not all(valid_id(context.get(key)) for key in ('task_id', 'conversation_id')):
             raise ToolDenied('Invalid job source')
         args = EngineeringArguments.model_validate(arguments).model_dump(exclude_none=True)
+        from .engineering_decision import associate
+        from .engineering_portfolio import Portfolio
+        project_id = associate(goal, Portfolio(self.database).projects(), args.get('project_id'))
         policy = CandidatePolicy()
         for path in args['inspect_paths']:
             policy.edit_path(path)
@@ -137,8 +144,8 @@ class EngineeringJobs:
                     raise ToolDenied('Engineering job source mismatch')
                 return self.get(job['id'])
             job = dict(id=str(uuid4()), type='engineering', goal=goal, source=source,
-                project_id=decision['project_id'], decision=decision,
-                status='queued', provider='codex', created_at=timestamp(), started_at=None,
+                project_id=project_id or decision['project_id'], decision=decision,
+                status='queued', provider=action.provider, created_at=timestamp(), started_at=None,
                 completed_at=None, current_stage='queued', attempts=0, candidate_id=None,
                 candidate_ids=[], test_result=[], review_result=None, error=None,
                 block_reason=None, control=None, lease_owner=None, lease_until=0,
@@ -314,11 +321,16 @@ class EngineeringJobs:
             passed = bool(candidate and candidate['state'] == 'passed' and not candidate.get('busy')
                           and candidate.get('tested_fingerprint') == candidate.get('reviewed_fingerprint')
                           and (candidate.get('reviewer_result') or {}).get('verdict') == 'passed')
-            status = 'waiting_for_approval' if passed else ('failed' if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS) else 'blocked')
+            from .engineering_authority import assess_action
+            consequence = assess_action('candidate_apply', goal=candidate['goal'],
+                changed_paths=candidate['files_changed']) if passed else None
+            status = ('waiting_for_approval' if consequence.approval_required else 'completed') if passed else (
+                'failed' if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS) else 'blocked')
+            job['authority'] = consequence.model_dump() if consequence else None
             job.update(status=status, current_stage=status, lease_owner=None, lease_until=0,
                        error=None if passed else 'Candidate execution did not pass tests and review',
                        block_reason=None if passed else 'Explicit retry required',
-                       completed_at=timestamp() if status == 'failed' else None)
+                       completed_at=timestamp() if status in {'failed', 'completed'} else None)
             if candidate:
                 self._merge_candidate_failures(job, candidate)
                 improvement = candidate.get('improvement', {})
@@ -348,7 +360,8 @@ class EngineeringJobs:
 
 def project_job(job):
     """Closed production projection: no paths, model prose, logs or host config."""
-    from .candidate_provider import PROVIDERS, project_failure
+    from .candidate_provider import ProviderId, project_failure
+    from pydantic import TypeAdapter
     from .candidate_provider import WorkAttribution, project_provider_results, work_attribution
     from .engineering_providers import ProviderBlocker
     failures = job.get('failures', [])
@@ -356,8 +369,12 @@ def project_job(job):
     if type(failure_count) is not int or failure_count < len(failures):
         raise ToolDenied('Invalid engineering failure count')
     failures = [project_failure(item) for item in failures[-FAILURE_PROJECTION_LIMIT:]]
-    if not valid_id(job.get('id')) or job.get('status') not in STATES or job.get('provider') not in PROVIDERS:
+    if not valid_id(job.get('id')) or job.get('status') not in STATES:
         raise ToolDenied('Invalid engineering job result')
+    try:
+        TypeAdapter(ProviderId).validate_python(job.get('provider'))
+    except ValueError:
+        raise ToolDenied('Invalid engineering provider') from None
     from datetime import datetime
     stage = job.get('current_stage')
     attempts = job.get('attempts')

@@ -24,9 +24,9 @@ Use the existing capability before proposing replacement infrastructure. For new
 engineering, inspect portfolio and persist decide_engineering rationale first.
 Authenticated owner + trusted registered project + bounded read-only operation
 permits repository inspection. Capability inventory and baseline drift are not
-read permissions. Project references grant no writes, process, external account
-access or trading authority.
-Candidate apply and production deployment require separate human approval.'''
+read permissions. Registered source supports isolated development and testing;
+external accounts, live runtime and trading require their own available adapters.
+Routine reviewed development apply is autonomous. Consequential promotion and production deployment require owner approval.'''
 
 def observed_time(value):
     try:
@@ -121,7 +121,7 @@ class SelfState:
             portfolio=None, pre_engineering_decisions=[],
             providers=dict(configured=self.configured, configured_route=self.route,
                 active=brain['provider_used'] if brain['route_status'] in {'started','completed'} else None, availability={}, observations=[]),
-            approvals=dict(candidate_apply='human_required', production_deploy='human_required'))
+            approvals=dict(candidate_apply='consequence_based', production_deploy='human_required'))
         availability, observations = result['providers']['availability'], result['providers']['observations']
         for provider in set(self.configured or []) | ({self.route, 'codex'} - {None}):
             availability[provider] = dict(status='unknown', current_usability='unknown', as_of=None, scope='unobserved', source=None)

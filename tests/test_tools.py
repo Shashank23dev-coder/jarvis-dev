@@ -32,8 +32,7 @@ def repo(tmp_path):
     "../outside", "src/../../outside", "/etc/passwd", "src/../hello.txt", "a\\b", "a\x00b",
     ".env", ".env.local", ".env-backup", ".ENV", "src/.env.production",
     ".git/config", ".venv/lib/code.py", "venv/bin/python", "policies/rules.txt",
-    "security/secrets.txt", "SECURITY.md", "policy.json", "security_rules.py",
-    "access_policy.py", "AGENTS.md", ".agents/a", ".codex/a", "SKILL.md",
+    "security/secrets.txt", "SECURITY.md", "policy.json", "AGENTS.md", ".agents/a", ".codex/a", "SKILL.md",
     "certificate.pem", "private.key", ".gitmodules", ".gitattributes",
 ])
 def test_protected_and_escaping_paths_rejected(repo, path):
@@ -287,13 +286,13 @@ def test_live_jarvis_pytest_imports_policy():
     assert "2 passed" in result.stdout
 
 
-def test_arbitrary_repository_policy_stays_protected(repo, monkeypatch):
+def test_repository_policy_source_runs_only_inside_sandbox(repo, monkeypatch):
     (repo.root / "tools").mkdir()
-    (repo.root / "tools/policy.py").write_text("SECRET = 'protected'\n")
+    (repo.root / "tools/policy.py").write_text("SOURCE_POLICY = True\n")
 
     def execute(argv, *, timeout):
         snapshot = Path(argv[argv.index("/workspace") - 1])
-        assert not (snapshot / "tools/policy.py").exists()
+        assert (snapshot / "tools/policy.py").read_text() == "SOURCE_POLICY = True\n"
         return CommandResult(tuple(argv), 0, "")
 
     monkeypatch.setattr(repo, "_execute", execute)

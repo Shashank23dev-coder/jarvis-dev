@@ -166,7 +166,7 @@ def test_engineering_job_routes_and_durable_attribution(setup, monkeypatch, mode
         assert result['provider_blocker']['stage'] == 'implementing'
         assert [r['state'] for r in result['provider_blocker']['reasons']] == ['quota_blocked', 'not_authenticated']
     else:
-        assert result['status'] == 'waiting_for_approval', candidate
+        assert result['status'] == 'completed', candidate
         assert candidate['improvement']['implementation_provider'] == provider
         assert result['attribution']['review_providers'] == ['openai']
         assert all(r['execution_origin'] == 'provider' for r in candidate['provider_results'])
@@ -182,7 +182,7 @@ def test_injected_adapter_is_operator_assisted_not_provider_autonomous(setup, mo
     source, database, factory = setup
     enqueue(database)
     result = EngineeringWorker(factory(model=model, tester=run_checks), source=source).once()
-    assert result['status'] == 'waiting_for_approval'
+    assert result['status'] == 'completed'
     assert result['attribution'] == dict(outcome='operator_assisted', operator_assisted=True,
                                       implementation_providers=[], review_providers=[])
 

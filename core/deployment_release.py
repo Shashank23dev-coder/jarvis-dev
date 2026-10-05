@@ -21,15 +21,7 @@ from tools.policy import ToolDenied
 SHA = re.compile(r'[0-9a-f]{40}')
 TERMINAL = {'deployed', 'rolled_back', 'failed', 'rollback_failed'}
 
-# Reviewed synthetic negative-test fixtures only. Bind exceptions to the entire
-# Git blob AND its path: changing even one byte requires a new explicit review.
-# These files contain marker-only strings, not encoded private-key material.
-# This exception applies only to the private-key marker check below; all other
-# context restrictions and application secret detectors remain in force.
-SYNTHETIC_KEY_FIXTURES = {
-    'tests/test_self_edit.py': '5d9a0e4611115fe1f3be0d659f3ac029d0c1ecc2e86c57532122d8d8e9dfe4bf',
-    'tests/test_recall.py': 'f9bb6152a50086a2551a69e10836fbece689dc182b61c6a129efaa9b9081a5d4',
-}
+# Test fixtures construct secret markers at runtime; production context has no fixture exemptions.
 
 
 def now():
@@ -184,8 +176,7 @@ class ReleaseService:
             if kind != 'blob' or mode not in {'100644', '100755'}:
                 raise ToolDenied('Release context cannot contain links or submodules')
             content = self.git('cat-file', 'blob', blob)
-            if (re.search(rb'-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----', content) and
-                    hashlib.sha256(content).hexdigest() != SYNTHETIC_KEY_FIXTURES.get(path)):
+            if re.search(rb'-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----', content):
                 raise ToolDenied('Private key material is forbidden in release context')
             total += len(content)
             if len(content) > 1_000_000 or total > 50_000_000:
@@ -216,8 +207,14 @@ class ReleaseService:
                 repository = RepositoryTools(root, pytest_timeout=600)
                 for phase, paths, ui in [('python', ['tests'], False), ('ui', ['tests/ui.test.cjs'], True)]:
                     result = run_tests(repository, root, paths, ui=ui)
+                    summary = re.findall(r'(?:\d+ (?:passed|failed|skipped|errors?)\b|# (?:tests|pass|fail|skipped) \d+)', result.stdout)
                     results.append(dict(phase=phase, passed=not (result.returncode or result.timed_out or result.truncated),
-                                        returncode=result.returncode, sandbox=result.sandbox))
+                                        returncode=result.returncode, sandbox=result.sandbox,
+                                        summary=summary[-8:],
+                                        failure_kind=('environment_timeout' if result.timed_out else
+                                            'environment_output_limit' if result.truncated else
+                                            'test_failure' if result.returncode == 1 else
+                                            'test_environment' if result.returncode else None)))
                 self.clean(sha)
                 data = self.load()
                 evidence = dict(commit=sha, at=now(), tests=results,
@@ -226,6 +223,17 @@ class ReleaseService:
                 data['evidence'][sha] = evidence
                 self.save(data)
                 return evidence
+
+    def prepare(self):
+        """Preparation is autonomous; existing exact-commit evidence is reusable."""
+        sha = self.git('rev-parse', 'HEAD').decode().strip()
+        self.clean(sha)
+        evidence = self.load()['evidence'].get(sha)
+        if not (evidence and evidence.get('passed') and
+                0 <= (datetime.now(timezone.utc) - datetime.fromisoformat(evidence['at'])).total_seconds() < 86400):
+            evidence = self.validate(sha)
+        return dict(commit=sha, prepared=evidence['passed'], evidence=evidence,
+            required_confirmation=approval(sha))
 
     def preview(self, sha):
         self.clean(sha)
@@ -250,7 +258,8 @@ class ReleaseService:
 
     def deploy(self, sha, current_message):
         if approved_commit(current_message) != sha:
-            raise ToolDenied('Exact current-message approval for this commit is required')
+            from .engineering_authority import assess_action, EscalationRequired
+            raise EscalationRequired(assess_action('production_deploy'))
         with self.lock():
             data = self.load()
             pending = [r for r in data['records'] if r['status'] not in TERMINAL]

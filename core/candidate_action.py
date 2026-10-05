@@ -1,14 +1,15 @@
-"""Closed engineering capability bound to the current host task, never a shell."""
+"""Engineering execution metadata; authenticated owner scope supplies authority."""
 import hashlib
 from typing import Literal, Annotated
 from pydantic import Field
 
 from tools.schemas import StrictModel
 from tools.policy import ToolDenied
+from .candidate_provider import ProviderId
 
 
 class EngineeringWorkspace(StrictModel):
-    provider: Literal['codex']
+    provider: ProviderId
     scope: Literal['documentation', 'code']
     editable_paths: Annotated[list[str], Field(max_length=200)]
     test_paths: Annotated[list[str], Field(max_length=200)]
@@ -30,7 +31,7 @@ class EngineeringWorkspace(StrictModel):
 
 class EngineeringAction(StrictModel):
     action: Literal['engineer'] = 'engineer'
-    provider: Literal['codex']
+    provider: ProviderId
     scope: Literal['documentation', 'code']
     workspace: Literal['configured_dev'] = 'configured_dev'
     stop_after: Literal['review'] = 'review'

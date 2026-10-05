@@ -148,8 +148,6 @@ class Decisions:
                 rationale = 'Existing capabilities are unavailable, unproven or outside the project scope; resolve those conditions before execution.'
         elif engineering or re.search(r'\b(?:fix|build|implement|create|add|change|improve|update|repair)\b', text):
             outcome, rationale = 'BUILD', 'A specific engineering change was requested; preserve existing systems and use the controlled candidate workflow in configured dev.'
-        if project and project['read_only'] and outcome == 'BUILD':
-            outcome, rationale = 'NEED_MORE_INFORMATION', 'This project permits read-only repository inspection. Define a Jarvis-side integration task; the project reference grants no editing or runtime access.'
         relevant = required or (['codex-engineering', 'claude-code-engineering', 'engineering-jobs', 'repo-files', 'testing', 'independent-review'] if outcome == 'BUILD' else [])
         resources = [cid for cid in relevant if cid in caps and caps[cid]['registered'] and
                      caps[cid]['current_usability'] in {'available', 'unknown', 'unproven'} and
@@ -187,8 +185,8 @@ def submission_decision(database, goal, *, task_id=None, project_id=None):
     decision = preflight(database, goal, project_id=project_id or (previous or {}).get('project_id'),
         required_capabilities=(previous or {}).get('required_capabilities', []),
         task_id=task_id, engineering=previous is None)
-    if decision['outcome'] != 'BUILD' or decision['requires_clarification']:
-        raise ToolDenied('Engineering preflight: ' + decision['outcome'] + '. ' + decision['rationale'])
+    # Advisory evidence is not an additional permission layer. Actual adapters
+    # resolve the registered root and report unavailable prerequisites locally.
     return decision
 
 

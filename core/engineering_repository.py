@@ -14,7 +14,7 @@ from tools.schemas import StrictModel, PathArgument, ProcessResult
 from .database import timestamp
 from .engineering_portfolio import Identifier, Portfolio, RepositoryObservation
 
-Operation = Literal['inspect', 'list_files', 'read_text', 'search_text', 'git_status', 'git_diff', 'git_log', 'git_revision']
+Operation = Literal['inspect', 'list_files', 'read_text', 'search_text', 'git_status', 'git_diff', 'git_log', 'git_revision', 'run_pytest']
 
 
 class RepositoryArguments(StrictModel):
@@ -23,12 +23,14 @@ class RepositoryArguments(StrictModel):
     path: PathArgument | None = None
     query: str | None = Field(default=None, min_length=1, max_length=256)
     staged: bool = False
+    paths: list[PathArgument] | None = Field(default=None, min_length=1, max_length=8)
 
     def checked(self):
         if ((self.operation == 'read_text' and self.path is None)
                 or (self.operation == 'search_text') != (self.query is not None)
                 or (self.operation in {'inspect', 'git_status', 'git_log', 'git_revision'} and self.path is not None)
-                or (self.operation != 'git_diff' and self.staged)):
+                or (self.operation != 'git_diff' and self.staged)
+                or (self.operation != 'run_pytest' and self.paths is not None)):
             raise ToolDenied('Invalid project repository operation', reason='invalid_read_operation')
         # File safety belongs to RepositoryTools, once the registered root is known.
         return self
@@ -155,6 +157,10 @@ def inspect_repository(database, **arguments):
                 stderr='', timed_out=raw.timed_out, truncated=raw.truncated).model_dump()
         elif args.operation == 'git_revision':
             result['text'] = repository.git_revision()
+        elif args.operation == 'run_pytest':
+            raw = repository.run_pytest(args.paths or ['tests'])
+            result['process'] = ProcessResult(returncode=raw.returncode, stdout=public_text(raw.stdout),
+                stderr='', timed_out=raw.timed_out, truncated=raw.truncated).model_dump()
         elif args.operation in {'git_status', 'git_diff', 'git_log'}:
             raw = (repository.git_status() if args.operation == 'git_status' else
                    repository.git_log() if args.operation == 'git_log' else
@@ -181,7 +187,7 @@ def bind_project_tools(tools, registry):
             raise ToolDenied('Project catalog could not be observed', reason='project_context_unavailable')
         return tools.project_id
     definitions['inspect_project_repository'] = ToolDefinition(
-        'Authenticated owner reads are allowed for trusted registered project IDs. Operations: inspect Git identity, list_files, read_text, literal search_text, filtered git_status/git_diff, bounded git_log and git_revision. Relative paths only; no root override, execution, tests, writes or services. Capability inventory and baseline drift are observations, not read permissions.',
+        'Inspect trusted registered project source or run isolated pytest. Roots come from Portfolio metadata; relative paths only. Capability inventory and baseline drift are observations. Tests run without host runtime or secrets.',
         RepositoryArguments, RepositoryResult, tools.inspect_repository)
     if tools.authority is not None:
         for name in ('list_files', 'read_text', 'git_status', 'git_diff'):
@@ -229,11 +235,34 @@ def bind_project_tools(tools, registry):
             native['run_command'].arguments, RepositoryResult | native['run_command'].result, command)
         def tests(**arguments):
             project_id = selected()
-            if project_id is not None and project_id != 'jarvis-core':
-                raise ToolDenied('External projects are inspection-only', reason='project_tests_disabled')
+            if project_id is not None:
+                return tools.inspect_repository(project_id=project_id, operation='run_pytest', **arguments)
             return native['run_pytest'].handler(**arguments)
         previous = native['run_pytest']
-        definitions['run_pytest'] = ToolDefinition('Run isolated tests only in configured Jarvis dev; child projects permit source inspection.',
-            previous.arguments, previous.result, tests)
+        definitions['run_pytest'] = ToolDefinition('Run tests in a secret-free sandbox of the registered project. No host runtime access.',
+            previous.arguments, RepositoryResult | previous.result, tests)
     scoped._definitions = MappingProxyType(definitions)
     return scoped
+
+
+def development_service(service, project_id=None, *, candidate_id=None):
+    """Select a registered source for isolated development; never accept a raw root."""
+    if candidate_id:
+        record = service.store.get(candidate_id, internal=True, recover=False)
+        if not record:
+            raise ToolDenied('Candidate unavailable')
+        project_id = record.get('source_context', {}).get('project_id')
+    selected = service
+    if project_id and project_id != 'jarvis-core':
+        evidence, repository = resolve_repository(service.store.database, project_id)
+        if repository is None:
+            raise ToolDenied('Registered project source is unavailable', reason='project_context_unavailable')
+        from .self_edit import SelfEditService
+        selected = SelfEditService(service.store.database, source_root=repository.root,
+            candidate_root=service.root, limits=service.limits if service.explicit_limits else None,
+            model=service.model, tester=service.tester)
+        if hasattr(service, 'engineering_lock_fd'):
+            selected.engineering_lock_fd = service.engineering_lock_fd
+    if candidate_id and record.get('source_root') != str(selected.source):
+        raise ToolDenied('Registered candidate source has changed')
+    return selected

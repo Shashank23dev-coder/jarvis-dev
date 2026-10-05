@@ -55,10 +55,10 @@ def test_action_binding_and_closed_authority(change):
     elif change == 'goal':
         raw['goal'] = 'A different request'
     elif change == 'action':
-        raw['action'] = 'discard'
+        raw['action'] = 'deploy'
         raw['arguments'] = {'candidate_id': str(uuid4())}
     else:
-        raw['engineering_action'][change] = {'provider': 'unknown', 'workspace': '/tmp', 'stop_after': 'deploy'}[change]
+        raw['engineering_action'][change] = {'provider': '../unknown', 'workspace': '/tmp', 'stop_after': 'deploy'}[change]
     with pytest.raises((ToolDenied, ValueError)):
         Request.model_validate(raw).checked()
 
@@ -90,8 +90,7 @@ def test_workspace_catalog_is_read_only_scoped_and_requires_action(setup):
     before = tree_bytes(source)
     broker = Broker(factory(), source=source)
     raw = request('workspace', EXACT, {})
-    with pytest.raises(ToolDenied):
-        broker.execute(raw)
+    assert 'src/app.py' in broker.execute(raw)['editable_paths']
     raw['engineering_action'] = bound(raw, 'documentation').model_dump()
     result = broker.execute(raw)
     assert result['editable_paths'] == ['docs/readme.md']

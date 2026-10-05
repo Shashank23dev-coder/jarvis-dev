@@ -9,7 +9,7 @@ from uuid import uuid4
 from pydantic import Field
 from tools.schemas import StrictModel
 from tools.policy import ToolDenied
-from .candidate_tools import CreateArguments, CandidateArguments, EngineeringArguments
+from .candidate_tools import CreateArguments, CandidateArguments, EngineeringArguments, PrepareEngineeringArguments
 from .database import valid_id
 from .candidate_action import EngineeringAction, EngineeringWorkspace
 from .engineering_authority import OwnerDevAuthority, require_owner
@@ -41,20 +41,16 @@ class Request(StrictModel):
         from .engineering_portfolio import ProjectArguments
         from .engineering_repository import RepositoryArguments
         schema = (RepositoryArguments if self.action == 'project_repository' else ProjectArguments if self.action == 'project_inspect' else DecisionArguments if self.action == 'decision' else JobListArguments if self.action == 'job_list' else
-                  StrictModel if self.action in {'workspace', 'runtime'} else
+                  PrepareEngineeringArguments if self.action == 'workspace' else StrictModel if self.action in {'runtime', 'release_prepare'} else
                   EngineeringArguments if self.action in {'engineer', 'job_create'} else
                   JobArguments if self.action.startswith('job_') else
                   CreateArguments if self.action == 'create' else CandidateArguments)
         if self.action not in {'create', 'workspace', 'engineer', 'inspect', 'tests', 'review', 'discard', 'runtime',
-                              'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume', 'decision', 'project_inspect', 'project_repository'}:
+                              'job_create', 'job_list', 'job_inspect', 'job_pause', 'job_cancel', 'job_resume', 'decision', 'project_inspect', 'project_repository', 'preview', 'audit', 'apply', 'release_prepare'}:
             raise ToolDenied('Unsupported candidate operation', reason='unsupported_action')
         schema.model_validate(self.arguments)
         if self.engineering_action is not None:
-            if self.action not in {'workspace', 'engineer', 'job_create', 'inspect', 'tests', 'review'}:
-                raise ToolDenied('Engineering action cannot authorize this operation')
             self.engineering_action.check(self.goal, self.model_dump())
-        elif self.action in {'workspace', 'job_create'}:
-            raise ToolDenied('Workspace requires a typed engineering action')
         return self
 
 
@@ -115,7 +111,7 @@ class CandidateClient:
         outgoing = directory / (request.request_id + '.response')
         write(incoming, request.model_dump())
         try:
-            deadline = time.monotonic() + 310
+            deadline = time.monotonic() + (1300 if action == 'release_prepare' else 310)
             while time.monotonic() < deadline:
                 if outgoing.exists():
                     result = read(outgoing)
@@ -134,6 +130,9 @@ class CandidateClient:
                     if action == 'runtime':
                         from .engineering_tools import project_runtime
                         return project_runtime(result['record'])
+                    if action == 'release_prepare':
+                        from .candidate_broker import ReleasePreparation
+                        return ReleasePreparation.model_validate(result['record']).model_dump()
                     if action == 'decision':
                         from .engineering_decision import Decision
                         return Decision.model_validate(result['record']).model_dump()
@@ -147,6 +146,9 @@ class CandidateClient:
                         from .engineering_jobs import project_job
                         return ([project_job(j) for j in result['record']] if action == 'job_list'
                                 else project_job(result['record']))
+                    if action in {'preview', 'audit', 'apply'}:
+                        from .candidate_broker import project_apply
+                        return project_apply(result['record'])
                     return (EngineeringWorkspace.model_validate(result['record']).checked().model_dump()
                             if action == 'workspace' else project(result['record']))
                 time.sleep(.2)
@@ -213,9 +215,11 @@ def project(record):
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)
     if record.get('improvement'):
         improvement = record['improvement']
-        if (improvement.get('implementation_provider') not in {'codex', 'claude_code'}
-                or improvement.get('review_provider') not in {'openai', 'codex', 'claude_code'}
-                or improvement.get('implementation_provider') == improvement.get('review_provider')):
+        from pydantic import TypeAdapter
+        from .candidate_provider import ProviderId
+        for field in ('implementation_provider', 'review_provider'):
+            TypeAdapter(ProviderId).validate_python(improvement.get(field))
+        if improvement.get('implementation_provider') == improvement.get('review_provider'):
             raise ToolDenied('Invalid engineering provider evidence')
         comparison = improvement.get('baseline_comparison', {}).get('result')
         if comparison not in {'not_run', 'not_compared', 'inconclusive', 'regressed', 'improved', 'unchanged_pass', 'unchanged_failure', 'changed_test_suite'}:

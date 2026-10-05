@@ -49,7 +49,7 @@ def test_owner_health_privacy_tools_and_no_mutation(setup,worker,owner):
     assert result['engineering']['worker'] == (worker if owner else 'unknown')
     assert bool(result['engineering']['jobs']) == owner and bool(reads) == owner
     assert result['available_tools'] == ['read_text'] and 'HIDDEN' not in json.dumps(result)
-    assert set(result['approvals'].values()) == {'human_required'} and store.get_task(task['id'])['activity'] == before
+    assert result['approvals'] == dict(candidate_apply='consequence_based', production_deploy='human_required') and store.get_task(task['id'])['activity'] == before
     assert result['providers']['availability']['local']['status'] == 'unknown'
 @pytest.mark.parametrize('code,expected',[('provider_quota','quota_blocked'),('provider_unavailable','unavailable'),('provider_rate_limit','unknown')])
 def test_historical_provider_evidence_is_ordered_and_never_current(setup,code,expected):

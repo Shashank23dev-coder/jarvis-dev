@@ -117,7 +117,7 @@ def test_ordinary_production_chat_routes_to_dev_and_audits(setup, tmp_path, monk
     outcome = runner.run(GOAL, task_id=task['id'], task_store=store)
     assert 'passed' in outcome.response and 'Applied and deployed' not in outcome.response
     names = {t['name'] for t in model.requests[0]['tools']}
-    assert CANDIDATE_TOOLS | READ_ONLY_TOOLS == names
+    assert CANDIDATE_TOOLS | READ_ONLY_TOOLS | PREPARATION_TOOLS == names
     assert not names & {'approve_and_apply_candidate', 'approve_and_deploy_commit'}
     data = json.loads(model.requests[1]['input'][-1]['output'])['data']
     record = factory().store.get(data['candidate_id'], internal=True)
@@ -135,7 +135,7 @@ def test_ordinary_production_chat_routes_to_dev_and_audits(setup, tmp_path, monk
     assert 'worktree' not in project(record)
 
 
-@pytest.mark.parametrize('action', ['apply', 'deploy', 'command', 'start'])
+@pytest.mark.parametrize('action', ['deploy', 'command', 'start'])
 def test_bridge_has_no_privileged_operations(setup, action):
     with pytest.raises(ToolDenied):
         Broker(setup[2](), source=setup[0]).execute(request(action))
@@ -185,7 +185,14 @@ def test_mailbox_round_trip_and_links(tmp_path, monkeypatch):
 def test_production_approval_does_not_enable_local_apply(setup, monkeypatch):
     monkeypatch.setenv('JARVIS_MODE', 'production')
     adapter = CandidateTools(f'approve and apply candidate {uuid4()} to main', setup[1])
-    assert 'approve_and_apply_candidate' not in adapter.bind(ToolRegistry()).schemas()
+    calls = []
+    def invoke(client, action, arguments):
+        calls.append(action)
+        return dict(candidate_id=arguments['candidate_id'], apply=None)
+    monkeypatch.setattr(CandidateClient, 'invoke', invoke)
+    monkeypatch.setattr('core.candidate_apply.CandidateApply', lambda *args: pytest.fail('Local apply forbidden'))
+    adapter.apply(str(uuid4()))
+    assert calls == ['apply']
 
 
 @pytest.mark.skipif(os.environ.get('JARVIS_DOCKER_TESTS') != '1', reason='Opt-in Docker integration')
@@ -213,6 +220,8 @@ def test_broker_create_rerun_review_discard_real_docker(setup, monkeypatch):
 
 CANDIDATE_TOOLS = {'decide_engineering', 'inspect_portfolio_project', 'inspect_project_repository', 'create_self_edit_candidate', 'inspect_self_edit_candidate',
                    'rerun_candidate_tests', 'review_self_edit_candidate', 'discard_self_edit_candidate'}
+PREPARATION_TOOLS = {'research_web', 'prepare_release', 'create_engineering_job', 'engineer_candidate',
+                     'preview_candidate_apply', 'inspect_candidate_apply'}
 READ_ONLY_TOOLS = {'list_files', 'read_text', 'git_status', 'git_diff', 'run_pytest',
                    'run_command', 'deployment_status', 'preview_deployment',
                    'inspect_deployment', 'deployment_history', 'inspect_current_brain',
@@ -244,7 +253,10 @@ def test_fresh_production_http_turn_exposes_candidates_without_cached_authority(
             assert result.status_code == 200, result.text
             conversation = result.json()['conversation_id']
             names = {t['name'] for t in model.requests[-1]['tools']}
-            assert names == READ_ONLY_TOOLS | CANDIDATE_TOOLS
+            expected = READ_ONLY_TOOLS | CANDIDATE_TOOLS | PREPARATION_TOOLS
+            if goal != GOAL:
+                expected |= {'apply_candidate', 'approve_and_apply_candidate'}
+            assert names == expected
     assert set(runner.registry.schemas()) == READ_ONLY_TOOLS - {
         'deployment_status', 'preview_deployment', 'inspect_deployment', 'deployment_history', 'inspect_current_brain',
         'list_engineering_jobs', 'inspect_engineering_job', 'pause_engineering_job',

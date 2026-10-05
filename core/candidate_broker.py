@@ -8,6 +8,8 @@ import time
 import sys
 
 from tools.policy import ToolDenied
+from tools.schemas import StrictModel
+from pydantic import Field
 from .candidate_bridge import Request, project, MAX_BYTES
 from .database import Database
 from .self_edit import SelfEditService
@@ -15,6 +17,13 @@ from .self_edit import SelfEditService
 SOURCE = Path('/home/ubuntu/jarvis-dev')
 STATE = Path('/home/ubuntu/.local/state/jarvis-chat-candidates')
 CONTAINER = 'jarvis-jarvis-1'
+
+
+class ReleasePreparation(StrictModel):
+    commit: str = Field(pattern=r'^[0-9a-f]{40}$')
+    prepared: bool
+    evidence: dict
+    required_confirmation: str
 
 
 class Broker:
@@ -43,6 +52,12 @@ class Broker:
         from .engineering_authority import current_owner, require_owner
         authority = require_owner(authority if authority is not None else current_owner.get())
         request = Request.model_validate(raw).checked()
+        if request.action == 'release_prepare':
+            from .deployment_release import configured_service, ReleaseService, ReleaseConfig
+            # Validation needs source + a private journal, not production access.
+            service = (configured_service() if os.environ.get('JARVIS_DEPLOY_CONFIG') else
+                ReleaseService(ReleaseConfig(SOURCE, STATE / 'release-preparation', STATE / 'production.env')))
+            return ReleasePreparation.model_validate(service.prepare()).model_dump()
         # Registered reads are authorized by owner + host Portfolio + native
         # read operation. Candidate workspace eligibility is unrelated.
         if request.action == 'project_repository':
@@ -64,7 +79,7 @@ class Broker:
             from .engineering_jobs import EngineeringJobs, project_job
             jobs = EngineeringJobs(self.service.store.database)
             if request.action == 'job_create':
-                return project_job(jobs.create(request.goal, request.engineering_action.model_dump(),
+                return project_job(jobs.create(request.goal, request.engineering_action.model_dump() if request.engineering_action else None,
                     request.arguments, request.model_dump()))
             if request.action == 'job_list':
                 return [project_job(j) for j in jobs.recent(before=request.arguments.get('before'))]
@@ -80,8 +95,19 @@ class Broker:
         # The caller authenticates the channel separately from request data.
         # Text and conversation identity are audit metadata, never authority.
         if request.action == 'workspace':
-            return self.service.engineering_workspace(request.engineering_action.scope)
+            from .engineering_repository import development_service
+            from .candidate_tools import PrepareEngineeringArguments
+            args = PrepareEngineeringArguments(**request.arguments)
+            service = development_service(self.service, args.project_id)
+            result = service.engineering_workspace(request.engineering_action.scope if request.engineering_action else args.scope)
+            result['provider'] = request.engineering_action.provider if request.engineering_action else args.provider
+            return result
         if request.action in {'create', 'engineer'}:
+            from .engineering_decision import associate
+            from .engineering_portfolio import Portfolio
+            from .engineering_repository import development_service
+            project_id = associate(request.goal, Portfolio(self.database).projects(), request.arguments.get('project_id'))
+            self.service = development_service(self.service, project_id)
             # Durable idempotency by source task, including crash/retry requests.
             with self.service.store.database.transaction() as db:
                 rows = db.execute("SELECT record FROM candidates WHERE json_extract(record, '$.source_context.task_id') = ? LIMIT 1", (request.task_id,)).fetchall()
@@ -89,7 +115,7 @@ class Broker:
                 existing = json.loads(row['record'])
                 prior = existing.get('source_context', {})
                 if prior.get('source') == 'production_chat' and prior.get('task_id') == request.task_id:
-                    if existing.get('source_root') != str(self.source):
+                    if existing.get('source_root') != str(self.service.source):
                         raise ToolDenied('Candidate source mismatch')
                     if prior.get('conversation_id') != request.conversation_id:
                         raise ToolDenied('Source task mismatch')
@@ -98,8 +124,8 @@ class Broker:
                     return project(self.service.store.get(existing['id']))
             from .engineering_decision import submission_decision
             decision = submission_decision(self.service.store.database, request.goal,
-                task_id=request.task_id, project_id=request.arguments.get('project_id'))
-            context.update(project_id=decision['project_id'], decision_id=decision['id'])
+                task_id=request.task_id, project_id=project_id)
+            context.update(project_id=project_id, decision_id=decision['id'])
             handler = self.service.engineer if request.action == 'engineer' else self.service.start
             options = ({'engineering_action': request.engineering_action.model_dump()}
                        if request.engineering_action else {})
@@ -107,11 +133,20 @@ class Broker:
             record = handler(request.goal, **arguments, source_context=context, **options)
         else:
             identifier = request.arguments['candidate_id']
+            from .engineering_repository import development_service
+            self.service = development_service(self.service, candidate_id=identifier)
             existing = self.service.store.get(identifier, internal=True)
             if not existing:
                 raise ToolDenied('Candidate unavailable')
             if existing.get('source_root') != str(self.service.source):
                 raise ToolDenied('Candidate source mismatch')
+            if request.action in {'preview', 'audit', 'apply'}:
+                from .candidate_apply import CandidateApply
+                apply = CandidateApply(self.service)
+                result = (apply.preview(identifier) if request.action == 'preview' else
+                    apply.inspect(identifier, read_only=True) if request.action == 'audit' else
+                    apply.apply(identifier, request.goal, authority=authority))
+                return project_apply(result)
             if request.action == 'inspect':
                 return project(self.service.inspect(identifier))
             operations = existing.setdefault('chat_operations', [])
@@ -125,6 +160,31 @@ class Broker:
                        'review': self.service.review, 'discard': self.service.discard}[request.action]
             record = handler(identifier)
         return project(record)
+
+
+def project_apply(result):
+    """Bounded apply evidence for the private mailbox; no patch or host paths."""
+    from .database import valid_id
+    from .engineering_authority import AuthorityDecision
+    if not valid_id(result.get('candidate_id')):
+        raise ToolDenied('Invalid apply evidence')
+    value = dict(candidate_id=result['candidate_id'])
+    if 'eligible' in result:
+        value.update(eligible=result['eligible'] is True,
+            required_confirmation=result.get('required_confirmation'))
+        if result.get('authority'):
+            value['authority'] = AuthorityDecision.model_validate(result['authority']).model_dump()
+        if not value['eligible']:
+            value['reason'] = 'Tests, review, or the clean baseline need refreshing before apply.'
+    else:
+        audit = result.get('apply')
+        if audit is None:
+            value['apply'] = None
+        else:
+            if audit.get('status') not in {'denied', 'applying', 'verifying', 'committing', 'applied', 'rolling_back', 'rolled_back', 'rollback_failed'}:
+                raise ToolDenied('Invalid apply status')
+            value['apply'] = {key: audit.get(key) for key in ('status', 'commit', 'rollback', 'post_apply_verified')}
+    return value
 
 
 def transport(operation, payload=None):
@@ -170,7 +230,7 @@ def execute_current(raw):
     No request selects its executable, checkout, environment or service.
     """
     result = subprocess.run([sys.executable, '-B', '-m', 'core.candidate_broker', '--execute'],
-        input=json.dumps(raw).encode(), capture_output=True, timeout=930, cwd=SOURCE)
+        input=json.dumps(raw).encode(), capture_output=True, timeout=1320, cwd=SOURCE)
     if result.returncode or len(result.stdout) > MAX_BYTES:
         return dict(request_id=raw['request_id'], ok=False,
                     error=ToolDenied(reason='unavailable').public_error())

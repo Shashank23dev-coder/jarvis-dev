@@ -187,7 +187,7 @@ def test_current_chat_prompt_is_bounded_without_truncating_active_request(store)
 
 @pytest.mark.parametrize('sensitive', [
     'password=hunter-example', 'api_key: some-sensitive-value', 'Bearer test-private-value',
-    '-----BEGIN PRIVATE KEY----- contents', '.env contains hidden data',
+    '-----BEGIN ' + 'PRIVATE KEY----- contents', '.env contains hidden data',
     '.git/config protected content', 'tools/policy.py protected tool data',
     '"stdout": "protected tool result"', 'function_call_output from a tool',
     'sk-' + 'a' * 24, 'AKIA' + 'A' * 16, '/etc/passwd contains account info'])

@@ -68,6 +68,7 @@ class ToolFailure(StrictModel):
     message: str
     gate: str | None = None
     reason: str | None = None
+    escalation: dict | None = None
 
 
 ResultData = TypeVar("ResultData", bound=StrictModel)
