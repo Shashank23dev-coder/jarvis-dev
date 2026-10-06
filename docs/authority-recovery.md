@@ -225,3 +225,13 @@ writable non-Jarvis registered projects remain autonomous, but only into that
 project's own registered root: the apply refuses a root that changed since the
 candidate, belongs to Jarvis, or overlaps an executing checkout or another
 registered project.
+
+R1-5 fixes the misleading "prepared" release message. Broker preparation (no
+`JARVIS_DEPLOY_CONFIG`) writes to a private `release-preparation` journal that
+the deploy controller does not read. Its result now carries
+`controller_validated: false` and no `required_confirmation`; the chat reply
+says validation passed in isolated preparation, nothing was deployed, and the
+deployment controller must re-validate the exact commit on the host before an
+approval can be accepted. Only a controller-recorded result offers the exact
+approval phrase. The broker still receives no production credentials or
+controller journal.

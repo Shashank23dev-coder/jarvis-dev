@@ -23,7 +23,8 @@ class ReleasePreparation(StrictModel):
     commit: str = Field(pattern=r'^[0-9a-f]{40}$')
     prepared: bool
     evidence: dict
-    required_confirmation: str
+    controller_validated: bool = False
+    required_confirmation: str | None = None
 
 
 class Broker:

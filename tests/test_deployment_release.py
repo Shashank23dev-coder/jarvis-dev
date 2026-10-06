@@ -165,6 +165,37 @@ def test_preparation_without_production_config_or_runtime_access(release, monkey
     assert result['prepared'] and result['commit'] == sha and not runtime.calls
 
 
+def test_broker_preparation_is_truthful_about_controller_validation(release, monkeypatch):
+    """R1-5: private preparation evidence is not the controller journal deploy reads."""
+    from core.deployment_release import preparation_service
+    service, runtime, sha = release
+    monkeypatch.delenv('JARVIS_DEPLOY_CONFIG', raising=False)
+    private = preparation_service(source=service.config.source, state=service.config.journal.parent / 'private')
+    private.config.journal.mkdir(mode=0o700, parents=True)
+    private.save(dict(service.load(), records=[]))  # Copy fresh passing evidence only.
+    result = private.prepare()
+    assert result['prepared'] and not result['controller_validated']
+    assert result['required_confirmation'] is None
+    from core.candidate_broker import ReleasePreparation
+    assert ReleasePreparation.model_validate(result).required_confirmation is None
+    tools = DeploymentTools('Prepare the latest release', lambda: private)
+    tools.preparation = result
+    response = tools.final_response('Release ready.')
+    assert 'passed validation in isolated preparation' in response
+    assert 'Nothing was deployed' in response and 're-validate' in response
+    assert approval(sha) not in response and 'prepared and its validation passed' not in response
+    # The deploy controller's own journal never received the private evidence.
+    other = ReleaseService(ReleaseConfig(service.config.source, service.config.journal.parent / 'controller-journal',
+        service.config.env_file), runtime)
+    with pytest.raises(ToolDenied, match='Fresh passing validation'):
+        other.deploy(sha, approval(sha))
+    # Controller-recorded evidence is the only state that offers the exact phrase.
+    controller = service.prepare()
+    assert controller['controller_validated'] and controller['required_confirmation'] == approval(sha)
+    tools.preparation = controller
+    assert approval(sha) in tools.final_response('Release ready.')
+
+
 @pytest.mark.parametrize('code,timed_out,kind', [(1, False, 'test_failure'),
     (2, False, 'test_environment'), (-9, True, 'environment_timeout')])
 def test_validation_failure_is_test_or_harness_evidence(release, monkeypatch, code, timed_out, kind):

@@ -118,8 +118,14 @@ that blocker and do not ask for approval of an unverified release.
     def final_response(self, original):
         if self.result is None:
             if self.preparation and self.preparation['prepared']:
-                return (f"Release {self.preparation['commit']} is prepared and its validation passed. "
-                        'Nothing was deployed. Production execution requires your approval: '
+                if not (self.preparation.get('controller_validated') and self.preparation.get('required_confirmation')):
+                    # Truthful about which journal holds the evidence; no premature approval phrase.
+                    return (f"Release {self.preparation['commit']} passed validation in isolated preparation. "
+                            'Nothing was deployed. The deployment controller has not yet validated this exact '
+                            'commit; it must re-validate it on the host before a deployment approval can be '
+                            'accepted. I will ask for approval once controller validation is recorded.')
+                return (f"Release {self.preparation['commit']} is prepared and the deployment controller's "
+                        'validation passed. Nothing was deployed. Production execution requires your approval: '
                         + self.preparation['required_confirmation'])
             if self.blockers and re.search(r'\bdeploy\b', self.goal, re.I):
                 return ('I could not prepare deployment. ' + ' '.join(dict.fromkeys(self.blockers.values())) +

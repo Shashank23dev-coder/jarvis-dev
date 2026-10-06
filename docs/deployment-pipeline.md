@@ -31,7 +31,12 @@ backend, limits and timestamp, not potentially sensitive test output. A rerun
 invalidates prior evidence before starting. Both suites must pass within 24 hours.
 The authenticated `prepare_release` tool delegates this source validation to the
 host and reuses fresh evidence for the exact commit. Preparation needs no owner
-approval or production credentials; it cannot deploy. Fixture/setup failures,
+approval or production credentials; it cannot deploy. When the broker prepares
+without `JARVIS_DEPLOY_CONFIG`, its evidence lives in a private preparation
+journal that deploy does not read: the result reports `controller_validated:
+false`, says validation passed in isolated preparation, and withholds the
+approval phrase until the host controller (`validate SHA`) has recorded its own
+evidence for the exact commit. Fixture/setup failures,
 backend failures, timeouts and application test failures have separate evidence
 categories. All prevent passing readiness; they do not mislabel source as unsafe.
 Git-context security failures remain separate hard denials. Synthetic test secret

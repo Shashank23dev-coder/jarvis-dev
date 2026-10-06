@@ -64,6 +64,9 @@ class ReleaseConfig:
 
 
 class ReleaseService:
+    # True only for the configured deployment controller, whose journal deploy reads.
+    controller = True
+
     def __init__(self, config, runtime=None):
         self.config = config
         if runtime is None:
@@ -242,8 +245,11 @@ class ReleaseService:
         if not (evidence and evidence.get('passed') and
                 0 <= (datetime.now(timezone.utc) - datetime.fromisoformat(evidence['at'])).total_seconds() < 86400):
             evidence = self.validate(sha)
+        # Private preparation evidence is not the controller journal that deploy
+        # reads, so it never offers the approval phrase as if deploy were ready.
+        ready = bool(evidence['passed'] and self.controller)
         return dict(commit=sha, prepared=evidence['passed'], evidence=evidence,
-            required_confirmation=approval(sha))
+            controller_validated=ready, required_confirmation=approval(sha) if ready else None)
 
     def preview(self, sha):
         self.clean(sha)
@@ -350,8 +356,10 @@ def preparation_service(*, source=None, state=None):
     if os.environ.get('JARVIS_DEPLOY_CONFIG'):
         return configured_service()
     from .candidate_broker import SOURCE, STATE
-    return ReleaseService(ReleaseConfig(source or SOURCE,
+    service = ReleaseService(ReleaseConfig(source or SOURCE,
         (state or STATE) / 'release-preparation', (state or STATE) / 'production.env'))
+    service.controller = False  # Private journal; the controller re-validates.
+    return service
 
 
 def configured_service():
