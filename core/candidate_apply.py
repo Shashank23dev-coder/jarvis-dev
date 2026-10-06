@@ -60,6 +60,23 @@ class CandidateApply:
         self.service.originals = {}
         return record
 
+    def _project(self):
+        """The candidate's registered project from host Portfolio metadata."""
+        from .engineering_portfolio import Portfolio
+        projects = Portfolio(self.store.database).projects()
+        pid = self.record.get('source_context', {}).get('project_id')
+        if pid is None:
+            # Legacy records: only a unique registered root identifies the project.
+            matches = [p for p in projects if p.get('repository') and
+                       Path(p['repository']).resolve() == self.service.source]
+            return matches[0] if len(matches) == 1 else None
+        return next((p for p in projects if p['project_id'] == pid), None)
+
+    def _read_only(self):
+        # Unresolvable projects are treated as read-only: escalate, never assume writable.
+        project = self._project()
+        return project is None or bool(project.get('read_only'))
+
     def _target(self):
         """Only host Portfolio metadata selects an integration destination.
 
@@ -91,7 +108,16 @@ class CandidateApply:
                 raise ToolDenied('Integration cannot target an executing or registered project checkout')
             self.source, self.target_branch = target, 'refs/heads/' + branch
         else:
-            self.source = self.service.source
+            # Other projects apply only into their own registered root, never
+            # into Jarvis's executing checkouts or another project's root.
+            project, source = self._project(), self.service.source
+            others = (live - {source}) | {Path(p['repository']).resolve() for p in projects
+                if p.get('repository') and p['project_id'] != (project or {}).get('project_id')}
+            if (project is None or project['project_id'] == 'jarvis-core' or not project.get('repository')
+                    or Path(project['repository']).resolve() != source
+                    or any(source == path or source.is_relative_to(path) or path.is_relative_to(source) for path in others)):
+                raise ToolDenied('Apply target must be the registered project root', reason='unknown_project')
+            self.source = source
         audit = self.record.get('apply')
         if audit and audit.get('target_root', str(self.service.source)) != str(self.source):
             raise ToolDenied('Apply journal target changed; host recovery required')
@@ -194,7 +220,7 @@ class CandidateApply:
                 self._eligible()
                 from .engineering_authority import assess_action
                 authority = assess_action('candidate_apply', goal=self.record['goal'],
-                    changed_paths=self.record['files_changed'])
+                    changed_paths=self.record['files_changed'], read_only_target=self._read_only())
                 return {'candidate_id': candidate_id, 'eligible': True,
                         'files_changed': self.record['files_changed'], 'diff_summary': self.record['diff_summary'],
                         'authority': authority.model_dump(),
@@ -336,7 +362,8 @@ class CandidateApply:
             # can never approve; only the host controller channel can.
             return authorize('candidate_apply', authority=authority,
                 approved=not relayed and approved_id(current_request) == self.record['id'],
-                goal=self.record['goal'], changed_paths=self.record['files_changed'])
+                goal=self.record['goal'], changed_paths=self.record['files_changed'],
+                read_only_target=self._read_only())
         except EscalationRequired as exc:
             if relayed:
                 raise HostApprovalRequired(exc.decision) from None

@@ -82,7 +82,7 @@ def _money(value):
 
 
 def assess_action(action: Action, *, phase='execute', amount=None, currency=None,
-                  goal='', changed_paths=(), financial_config=None):
+                  goal='', changed_paths=(), financial_config=None, read_only_target=False):
     """One classification used by executors. Tool callers cannot label effects safe.
 
     Ordinary configured provider calls use existing operator-provisioned access.
@@ -127,7 +127,9 @@ def assess_action(action: Action, *, phase='execute', amount=None, currency=None
             reasons.append('authority_expansion')
         if (paths & {'core/database.py', 'dockerfile', 'compose.yaml'} or
                 any(p.startswith(('migrations/', 'core/deployment')) for p in paths) or
-                re.search(r'\b(?:major architecture|architecture migration|replace.{0,30}persist|destructive migration)\b', goal, re.I)):
+                re.search(r'\b(?:major architecture|architecture migration|replace.{0,30}persist|destructive migration)\b', goal, re.I)
+                # Operator-set host Portfolio metadata, never request input.
+                or read_only_target):
             reasons.append('major_change')
     descriptions = {
         'financial_limit': ('Financial execution needs your approval: '

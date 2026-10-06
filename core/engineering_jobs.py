@@ -314,6 +314,8 @@ class EngineeringJobs:
         job['attribution'] = merge_attribution(job.get('attribution'), work_attribution(candidate))
 
     def finish(self, identifier, owner, candidate=None, *, failure=None):
+        from .engineering_portfolio import Portfolio
+        read_only = {p['project_id'] for p in Portfolio(self.database).projects() if p.get('read_only')}
         with self.database.transaction() as db:
             job = self._get(db, identifier)
             if job['lease_owner'] != owner:
@@ -323,7 +325,8 @@ class EngineeringJobs:
                           and (candidate.get('reviewer_result') or {}).get('verdict') == 'passed')
             from .engineering_authority import assess_action
             consequence = assess_action('candidate_apply', goal=candidate['goal'],
-                changed_paths=candidate['files_changed']) if passed else None
+                changed_paths=candidate['files_changed'],
+                read_only_target=job.get('project_id') in read_only) if passed else None
             status = ('waiting_for_approval' if consequence.approval_required else 'completed') if passed else (
                 'failed' if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS) else 'blocked')
             job['authority'] = consequence.model_dump() if consequence else None

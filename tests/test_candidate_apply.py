@@ -668,6 +668,54 @@ def test_host_approval_entrypoint_refuses_non_interactive_callers(monkeypatch):
         broker.approve_main(str(uuid4()))
 
 
+def test_read_only_project_apply_requires_owner_approval(setup):
+    """R1-4: operator read_only metadata gates apply, not inspection or candidates."""
+    from core.engineering_authority import EscalationRequired
+    from core.engineering_portfolio import Portfolio
+    source, database, factory = setup
+    portfolio = Portfolio(database)
+    fixture = next(p for p in portfolio.projects() if p['project_id'] == 'fixture')
+    portfolio.register_project(fixture | dict(read_only=True), replace=True)
+    candidate = start(factory())
+    assert candidate['state'] == 'passed'
+    preview = apply_service(factory).preview(candidate['id'])
+    assert preview['eligible'] and preview['authority']['escalation'] == ['major_change']
+    before = tree_bytes(source)
+    with pytest.raises(EscalationRequired) as caught:
+        apply_service(factory).apply(candidate['id'], 'Apply candidate ' + candidate['id'])
+    assert caught.value.decision.escalation == ['major_change']
+    assert tree_bytes(source) == before
+    result = apply_service(factory).apply(candidate['id'], confirmation(candidate['id']))
+    assert result['apply']['status'] == 'applied' and result['apply']['target_root'] == str(source)
+
+
+def test_writable_project_routine_apply_stays_in_its_own_root(setup, tmp_path):
+    from core.engineering_portfolio import Portfolio
+    source, database, factory = setup
+    candidate = start(factory())
+    result = apply_service(factory).apply(candidate['id'], 'Apply candidate ' + candidate['id'])
+    assert result['apply']['status'] == 'applied' and result['apply']['target_root'] == str(source)
+    # A changed or foreign registration can never redirect an apply.
+    other = start(factory())
+    portfolio = Portfolio(database)
+    fixture = next(p for p in portfolio.projects() if p['project_id'] == 'fixture')
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    portfolio.register_project(fixture | dict(repository=str(elsewhere)), replace=True)
+    before = tree_bytes(source)
+    with pytest.raises(ToolDenied):
+        apply_service(factory).apply(other['id'], 'Apply candidate ' + other['id'])
+    assert tree_bytes(source) == before
+
+
+def test_read_only_target_classification_is_host_metadata_only():
+    from core.engineering_authority import assess_action
+    assert assess_action('candidate_apply', changed_paths=['src/app.py']).allowed
+    decision = assess_action('candidate_apply', changed_paths=['src/app.py'], read_only_target=True)
+    assert decision.approval_required and decision.escalation == ['major_change']
+    assert assess_action('candidate_apply', phase='prepare', read_only_target=True).allowed
+
+
 def test_routine_mailbox_apply_needs_no_approval(tmp_path, monkeypatch):
     from core.candidate_broker import Broker
     from test_candidate_bridge import request

@@ -212,3 +212,16 @@ It refuses non-interactive stdin, a different checkout or a non-development
 mode, then runs the same CandidateApply checks (integration target only for
 Jarvis, evidence, locking, verification, rollback). The container has no path
 to invoke it, analogous to the deployment controller's host `deploy` prompt.
+
+R1-4 enforces the operator-set `read_only` Portfolio flag again, as an apply
+gate rather than an inspection gate. Read-only projects (trading-bot by default)
+can still be inspected and get isolated candidates, tests and review. Applying a
+change to one is classified by `assess_action(..., read_only_target=True)` as
+`major_change` and needs owner approval (through the host channel when the
+request arrives via the mailbox, see R1-3). Engineering jobs for such projects
+finish as `waiting_for_approval`. The flag comes only from host Portfolio
+metadata; an unresolvable project is treated as read-only. Routine applies to
+writable non-Jarvis registered projects remain autonomous, but only into that
+project's own registered root: the apply refuses a root that changed since the
+candidate, belongs to Jarvis, or overlaps an executing checkout or another
+registered project.

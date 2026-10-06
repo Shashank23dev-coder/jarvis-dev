@@ -180,7 +180,7 @@ class Portfolio:
             category='trading', status='unproven', repository='/srv/jarvis/projects/trading-bot',
             baseline_commit='e03c307c64fdaaf267ecb7be3898325af555f966', read_only=True,
             runtime_notes=['Windows runtime is external; Linux compatibility and runtime are unproven.'],
-            limitations=['Registered source supports inspection and isolated development; Windows runtime is unverified; credentials remain protected.']),
+            limitations=['Registered source supports inspection and isolated development; applying changes requires owner approval (read-only); Windows runtime is unverified; credentials remain protected.']),
             dict(project_id='creator-os', name='CreatorOS', description='Creator operating-system project; conceptual identity only.',
             category='creator', status='needs_discovery', limitations=['Authoritative repository, location and runtime unknown.'])]
         for project in projects:
@@ -191,6 +191,7 @@ class Portfolio:
             obsolete = {
                 'Metadata inspection only; no file changes, credentials, runtime or service operations.': projects[1]['limitations'][0],
                 'Bounded read-only repository inspection; no file changes, credentials, runtime or service operations.': projects[1]['limitations'][0],
+                'Registered source supports inspection and isolated development; Windows runtime is unverified; credentials remain protected.': projects[1]['limitations'][0],
                 'Apply and deployment require separate human approval.': projects[0]['limitations'][0],
             }
             if project['project_id'] in {'trading-bot', 'jarvis-core'} and any(limit in obsolete for limit in project['limitations']):
