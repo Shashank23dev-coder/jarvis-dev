@@ -122,3 +122,8 @@ broker, worker or application checkout. Missing integration configuration leaves
 the candidate prepared, with its test/review evidence available. Provisioning the
 standalone integration clone and promoting its reviewed commit into the live
 checkout are separate owner steps; see [authority recovery](authority-recovery.md).
+
+Revision R1-3: production chat cannot approve escalated applies. The broker
+treats mailbox text as untrusted; authority, major-change or other escalated
+applies require the owner to run `python -m core.candidate_broker --approve-apply
+<ID>` interactively on the host. Routine applies are unchanged.

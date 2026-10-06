@@ -150,9 +150,11 @@ class Broker:
             if request.action in {'preview', 'audit', 'apply'}:
                 from .candidate_apply import CandidateApply
                 apply = CandidateApply(service)
-                result = (apply.preview(identifier) if request.action == 'preview' else
+                # request.goal is container-authored: it identifies the candidate
+                # but never approves. See approve_on_host for that channel.
+                result = (apply.preview(identifier, relayed=True) if request.action == 'preview' else
                     apply.inspect(identifier, read_only=True) if request.action == 'audit' else
-                    apply.apply(identifier, request.goal, authority=authority))
+                    apply.apply(identifier, request.goal, authority=authority, relayed=True))
                 return project_apply(result)
             if request.action == 'inspect':
                 return project(service.inspect(identifier))
@@ -266,10 +268,39 @@ def execute_private(raw):
     return dict(request_id=raw['request_id'], ok=False, error=error)
 
 
+def approve_on_host(candidate_id, confirmation, *, service=None, database=None, source=SOURCE):
+    """Owner approval for escalated applies, typed on the host controller.
+
+    The production container can only write mailbox requests; it cannot invoke
+    this entrypoint, so text it relays is never treated as approval here.
+    """
+    from .candidate_apply import CandidateApply
+    from .engineering_authority import OwnerDevAuthority
+    from .engineering_repository import development_service
+    broker = Broker(service, source=source, database=database)
+    if broker.service is None:
+        broker.service = SelfEditService(broker.database, source_root=broker.source, candidate_root=STATE / 'candidates')
+    broker.check_source()
+    selected = development_service(broker.service, candidate_id=candidate_id)
+    return CandidateApply(selected).apply(candidate_id, confirmation, authority=OwnerDevAuthority())
+
+
+def approve_main(candidate_id):
+    from .database import valid_id
+    if (os.environ.get('JARVIS_MODE') != 'development' or Path(__file__).resolve().parents[1] != SOURCE
+            or not valid_id(candidate_id) or not sys.stdin.isatty()):
+        raise ToolDenied('Host approval requires an interactive owner terminal on the configured host')
+    confirmation = input(f'Type exactly "Approve and apply candidate {candidate_id} to main": ')
+    result = approve_on_host(candidate_id, confirmation, database=Database(STATE / 'candidates.sqlite3'))
+    print(json.dumps(project_apply(result)))
+
+
 if __name__ == '__main__':
     if sys.argv[1:] == ['--execute']:
         raw = json.loads(sys.stdin.buffer.read(MAX_BYTES + 1))
         print(json.dumps(execute_private(raw)))
+    elif sys.argv[1:2] == ['--approve-apply'] and len(sys.argv) == 3:
+        approve_main(sys.argv[2])
     elif not sys.argv[1:]:
         main()
     else:

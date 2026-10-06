@@ -15,6 +15,7 @@ class ToolDenied(ToolError):
         'candidate_id_required': 'candidate_apply',
         'integration_not_configured': 'candidate_apply',
         'approval_required': 'owner_escalation',
+        'host_approval_required': 'owner_escalation',
         'owner_required': 'owner_authentication',
         'relative_path_required': 'repository_path',
         'path_escape': 'repository_path',
@@ -61,6 +62,8 @@ class ToolDenied(ToolError):
             'candidate_id_required': 'Name the exact candidate ID in the current request before applying it.',
             'integration_not_configured': 'The candidate is prepared; integration is not configured. Its tests and review remain available. No source checkout was changed.',
             'approval_required': 'This action needs your approval before execution. I can prepare it first.',
+            'host_approval_required': ('This change is prepared and needs owner approval on the host controller '
+                '(python -m core.candidate_broker --approve-apply <candidate ID>). Approval typed in chat is not accepted for it.'),
             'owner_required': 'Sign in as the owner to inspect registered project source.',
             'relative_path_required': 'Choose a file within the registered project using a relative path.',
             'path_escape': 'I can inspect files inside the registered project; that path goes outside it.',

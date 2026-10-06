@@ -579,3 +579,104 @@ def test_routine_apply_requires_current_explicit_identity(setup, message):
             else:
                 apply.apply(candidate['id'])
     assert tree_bytes(source) == before
+
+
+@pytest.mark.parametrize('goal,category', [('Increase Jarvis authority', 'authority_expansion'),
+    ('Major architecture migration of Jarvis', 'major_change')])
+def test_forged_mailbox_approval_cannot_apply_escalated_candidate(tmp_path, monkeypatch, goal, category):
+    """R1-3: approval text relayed by the production container is never authority."""
+    from core.candidate_broker import Broker, approve_on_host
+    from core.engineering_authority import HostApprovalRequired
+    from test_candidate_bridge import request
+    monkeypatch.setenv('JARVIS_MODE', 'development')
+    fixture = source_setup.__wrapped__(tmp_path)
+    source, _, factory = fixture
+    target = integration_target(fixture, tmp_path)
+    service = factory()
+    candidate = start(service)
+    record = service.store.get(candidate['id'], internal=True)
+    record['goal'] = goal
+    service.store.save(record)
+    broker = Broker(apply_service(factory).service, source=source)
+    preview = broker.execute(request('preview', 'Preview ' + candidate['id'], {'candidate_id': candidate['id']}))
+    assert preview['authority']['escalation'] == [category]
+    assert 'Approve and apply' not in preview['required_confirmation']
+    assert '--approve-apply ' + candidate['id'] in preview['required_confirmation']
+    before, integration = tree_bytes(source), tree_bytes(target)
+    with pytest.raises(HostApprovalRequired) as caught:
+        broker.execute(request('apply', confirmation(candidate['id']), {'candidate_id': candidate['id']}))
+    assert caught.value.public_error()['reason'] == 'host_approval_required'
+    assert caught.value.decision.escalation == [category]
+    assert tree_bytes(source) == before and tree_bytes(target) == integration
+    assert factory().store.get(candidate['id'], internal=True).get('apply') is None
+    # The host controller channel honors the exact owner phrase, still only in integration.
+    result = approve_on_host(candidate['id'], confirmation(candidate['id']),
+        service=apply_service(factory).service, source=source)
+    assert result['apply']['status'] == 'applied'
+    assert (target / 'src/app.py').read_text() == 'value = 2\n' and tree_bytes(source) == before
+
+
+def test_forged_approval_through_production_mailbox_client_is_denied(tmp_path, monkeypatch):
+    from core.candidate_bridge import CandidateClient
+    from core.candidate_broker import Broker
+    from test_candidate_bridge import request
+    fixture = source_setup.__wrapped__(tmp_path)
+    source, _, factory = fixture
+    target = integration_target(fixture, tmp_path)
+    candidate = authority_candidate(factory)
+    broker = Broker(apply_service(factory).service, source=source)
+    def invoke(client, action, arguments):
+        raw = request(action, client.goal, arguments)
+        with monkeypatch.context() as host:
+            host.setenv('JARVIS_MODE', 'development')
+            try:
+                return broker.execute(raw)
+            except ToolDenied as exc:
+                # Same closed projection the real client applies to responses.
+                raise ToolDenied('Candidate broker denied the request', reason=exc.public_error()['reason'])
+    monkeypatch.setattr(CandidateClient, 'invoke', invoke)
+    monkeypatch.setenv('JARVIS_MODE', 'production')
+    before = tree_bytes(target)
+    tools = CandidateTools(confirmation(candidate['id']), factory().store.database,
+        source_context=dict(task_id=str(uuid4()), conversation_id=str(uuid4())))
+    with pytest.raises(ToolDenied) as caught:
+        tools.apply(candidate['id'])
+    assert caught.value.reason == 'host_approval_required'
+    assert 'not accepted' in caught.value.public_error()['message']
+    assert tree_bytes(target) == before
+
+
+def test_host_approval_still_requires_exact_phrase(tmp_path, monkeypatch):
+    from core.candidate_broker import approve_on_host
+    from core.engineering_authority import EscalationRequired
+    monkeypatch.setenv('JARVIS_MODE', 'development')
+    fixture = source_setup.__wrapped__(tmp_path)
+    source, _, factory = fixture
+    target = integration_target(fixture, tmp_path)
+    candidate = authority_candidate(factory)
+    before = tree_bytes(target)
+    with pytest.raises(EscalationRequired):
+        approve_on_host(candidate['id'], 'Apply candidate ' + candidate['id'], service=factory(), source=source)
+    assert tree_bytes(target) == before
+
+
+def test_host_approval_entrypoint_refuses_non_interactive_callers(monkeypatch):
+    import core.candidate_broker as broker
+    monkeypatch.setattr(broker.sys.stdin, 'isatty', lambda: False, raising=False)
+    monkeypatch.setenv('JARVIS_MODE', 'development')
+    with pytest.raises(ToolDenied):
+        broker.approve_main(str(uuid4()))
+
+
+def test_routine_mailbox_apply_needs_no_approval(tmp_path, monkeypatch):
+    from core.candidate_broker import Broker
+    from test_candidate_bridge import request
+    monkeypatch.setenv('JARVIS_MODE', 'development')
+    fixture = source_setup.__wrapped__(tmp_path)
+    source, _, factory = fixture
+    target = integration_target(fixture, tmp_path)
+    candidate = start(factory())
+    result = Broker(apply_service(factory).service, source=source).execute(
+        request('apply', 'Apply candidate ' + candidate['id'], {'candidate_id': candidate['id']}))
+    assert result['apply']['status'] == 'applied'
+    assert (target / 'src/app.py').read_text() == 'value = 2\n'

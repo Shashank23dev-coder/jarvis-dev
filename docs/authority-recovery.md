@@ -195,3 +195,20 @@ are blocked by the worker. Unnamed read-only inspection keeps the native
 read-only registry. Preflight for an unproven read-only project (e.g. "Fix my
 trading bot") returns NEED_MORE_INFORMATION again; an explicit job submission
 for it may still build an isolated candidate (applying is gated, see R1-4).
+
+R1-3 removes the mailbox as an approval channel. Every broker `preview`/`apply`
+request is marked as relayed: `request.goal` is written by the production
+container, so it may name the candidate but is never approval. A relayed apply
+that `assess_action` escalates (authority_expansion, major_change or any other
+category) raises `host_approval_required` before any mutation, and relayed
+previews show the host command instead of a chat phrase. Routine applies still
+proceed without approval. The only channel that honors the exact phrase
+`Approve and apply candidate <ID> to main` for an escalated apply is the host
+controller entrypoint, run by the owner in an interactive terminal on the host:
+
+    JARVIS_MODE=development python -m core.candidate_broker --approve-apply <ID>
+
+It refuses non-interactive stdin, a different checkout or a non-development
+mode, then runs the same CandidateApply checks (integration target only for
+Jarvis, evidence, locking, verification, rollback). The container has no path
+to invoke it, analogous to the deployment controller's host `deploy` prompt.

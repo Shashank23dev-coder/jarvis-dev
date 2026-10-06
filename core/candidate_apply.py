@@ -181,7 +181,7 @@ class CandidateApply:
         self.expected_files = {path: current[path] for path in r['files_changed']}
         return branch
 
-    def preview(self, candidate_id):
+    def preview(self, candidate_id, *, relayed=False):
         self._setup(candidate_id)
         self._target()
         if self.record.get('busy'):
@@ -198,8 +198,9 @@ class CandidateApply:
                 return {'candidate_id': candidate_id, 'eligible': True,
                         'files_changed': self.record['files_changed'], 'diff_summary': self.record['diff_summary'],
                         'authority': authority.model_dump(),
-                        'required_confirmation': (f'Approve and apply candidate {candidate_id} to main'
-                                                  if authority.approval_required else None)}
+                        'required_confirmation': (None if not authority.approval_required else
+                            f'On the host run: python -m core.candidate_broker --approve-apply {candidate_id}' if relayed else
+                            f'Approve and apply candidate {candidate_id} to main')}
         except (ToolDenied, OSError, ValueError):
             return {'candidate_id': candidate_id, 'eligible': False,
                     'reason': 'Requires passed, unexpired, unchanged evidence and a clean matching baseline'}
@@ -328,13 +329,23 @@ class CandidateApply:
         return {'candidate_id': self.record['id'], 'apply':
                 {key: value for key, value in audit.items() if key != 'patch'} if audit else None}
 
-    def apply(self, candidate_id, current_request='', *, authority=None):
-        from .engineering_authority import authorize
+    def _authorize(self, current_request, authority, relayed):
+        from .engineering_authority import authorize, EscalationRequired, HostApprovalRequired
+        try:
+            # Relayed (mailbox) text is authored by the production container and
+            # can never approve; only the host controller channel can.
+            return authorize('candidate_apply', authority=authority,
+                approved=not relayed and approved_id(current_request) == self.record['id'],
+                goal=self.record['goal'], changed_paths=self.record['files_changed'])
+        except EscalationRequired as exc:
+            if relayed:
+                raise HostApprovalRequired(exc.decision) from None
+            raise
+
+    def apply(self, candidate_id, current_request='', *, authority=None, relayed=False):
         require_candidate_id(current_request, candidate_id)
         self._setup(candidate_id)
-        authorize('candidate_apply', authority=authority,
-            approved=approved_id(current_request) == candidate_id,
-            goal=self.record['goal'], changed_paths=self.record['files_changed'])
+        self._authorize(current_request, authority, relayed)
         self._target()
         if self.record.get('busy'):
             raise ToolDenied('Candidate is busy')
@@ -355,9 +366,7 @@ class CandidateApply:
                     return self._public()
                 # _eligible recomputes the actual diff from immutable review
                 # evidence. Reclassify those verified paths before mutation.
-                authorize('candidate_apply', authority=authority,
-                    approved=approved_id(current_request) == candidate_id,
-                    goal=self.record['goal'], changed_paths=self.record['files_changed'])
+                self._authorize(current_request, authority, relayed)
                 audit = self.record['apply'] = dict(status='applying', candidate_id=candidate_id,
                     approval=current_request, requested_at=timestamp(), files_changed=list(self.record['files_changed']),
                     patch=self.record['diff'], patch_hash=digest(self.record['diff'].encode()),

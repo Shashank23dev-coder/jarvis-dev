@@ -156,6 +156,18 @@ class EscalationRequired(ToolDenied):
                     message=self.decision.message, escalation=self.decision.model_dump())
 
 
+class HostApprovalRequired(EscalationRequired):
+    """Mailbox text is container-authored; only the host controller can approve."""
+    def __init__(self, decision):
+        ToolDenied.__init__(self, decision.message, reason='host_approval_required')
+        self.decision = decision
+
+    def public_error(self):
+        return dict(code='denied', gate='owner_escalation', reason='host_approval_required',
+                    message=ToolDenied(reason='host_approval_required').public_error()['message'],
+                    escalation=self.decision.model_dump())
+
+
 def authorize(action, *, authority=None, approved=False, **facts):
     require_owner(authority if authority is not None else current_owner.get())
     decision = assess_action(action, **facts)
