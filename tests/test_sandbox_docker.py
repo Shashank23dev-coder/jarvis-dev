@@ -182,7 +182,14 @@ finally:
 @live
 @pytest.mark.parametrize('failure_phase', [None, 'targeted', 'full_python', 'full_ui'])
 def test_live_candidate_and_apply_through_docker(setup, monkeypatch, failure_phase):
-    source, _, factory = setup
+    source, database, factory = setup
+    # R1-1: Jarvis applies only into a host-configured integration checkout, so
+    # this end-to-end check applies a writable external registered project.
+    from core.engineering_portfolio import Portfolio
+    portfolio = Portfolio(database)
+    jarvis = next(p for p in portfolio.projects() if p['project_id'] == 'jarvis-core')
+    portfolio.register_project(jarvis | dict(repository=None), replace=True)
+    portfolio.register_project(jarvis | dict(project_id='fixture', name='Fixture', repository=str(source)))
     original = RepositoryTools.__init__
     def init(self, *args, **kwargs):
         original(self, *args, **kwargs)

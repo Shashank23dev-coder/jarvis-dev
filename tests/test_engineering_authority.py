@@ -1,5 +1,6 @@
 """Authenticated owner capabilities are independent of wording and conversation."""
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -419,3 +420,102 @@ def test_model_text_cannot_spoof_failure_envelope(monkeypatch):
     envelope = json.loads(result.getvalue())
     assert envelope['ok'] is True
     assert json.loads(envelope['text'])['code'] == 'provider_quota'
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_every_runtime_loaded_module_is_protected_from_routine_apply(tmp_path):
+    """R1-6: the protected set is the import closure, checked against real imports."""
+    import os, subprocess, sys
+    from core.engineering_authority import RUNTIME_ENTRYPOINTS, assess_action, loaded_modules
+    code = ('import importlib, json, sys\n'
+            'for name in %r: importlib.import_module(name)\n'
+            'print(json.dumps(sorted(getattr(m, "__file__", None) or "" for m in list(sys.modules.values()))))'
+            % (list(RUNTIME_ENTRYPOINTS),))
+    result = subprocess.run([sys.executable, '-B', '-c', code], cwd=ROOT, capture_output=True, text=True, timeout=120,
+        env=dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), PYTHONPATH=str(ROOT), HOME=str(tmp_path),
+                 JARVIS_DB_PATH=str(tmp_path / 'jarvis.sqlite3')))
+    assert result.returncode == 0, result.stderr[-2000:]
+    files = [Path(f).resolve() for f in json.loads(result.stdout) if f]
+    actual = {str(f.relative_to(ROOT)) for f in files if f.is_relative_to(ROOT)
+              and f.relative_to(ROOT).parts[0] in {'main.py', 'core', 'tools', 'models'}}
+    assert 'core/candidate_broker.py' in actual
+    assert actual <= loaded_modules(), sorted(actual - loaded_modules())
+    for path in sorted(loaded_modules()):
+        decision = assess_action('candidate_apply', changed_paths=[path])
+        assert decision.approval_required and 'authority_expansion' in decision.escalation, path
+
+
+@pytest.mark.parametrize('path', ['core/recall.py', 'core/experience.py', 'core/experience_evaluation.py',
+    'core/task_store.py', 'core/memory.py', 'core/brain_status.py', 'core/task_context.py',
+    'core/candidate_store.py', 'tools/policy.py', 'main.py'])
+def test_previously_unprotected_broker_import_path_is_in_closure(path):
+    from core.engineering_authority import loaded_modules
+    assert path in loaded_modules()
+
+
+def test_stale_protected_entries_removed():
+    import inspect
+    from core import engineering_authority
+    assert 'core/agent_runner.py' not in inspect.getsource(engineering_authority)
+    assert not (ROOT / 'core/agent_runner.py').exists()
+
+
+@pytest.mark.parametrize('path', ['tests/conftest.py', 'tests/test_tools.py', 'tests/test_authority_model.py',
+    'tests/test_authority_acceptance.py', 'tests/test_candidate_apply.py', 'tests/test_candidate_tools.py',
+    'tests/test_engineering_authority.py', 'tests/test_owner_readonly_flow.py', 'tests/test_deployment.py',
+    'tests/test_deployment_status.py', 'tests/test_sandbox_docker.py', 'tests/test_sandbox_imports.py'])
+def test_security_tests_escalate_on_apply_but_remain_editable_in_isolation(path):
+    from core.engineering_authority import assess_action
+    CandidatePolicy().edit_path(path)  # Preparation in an isolated candidate stays allowed.
+    assert assess_action('candidate_apply', phase='prepare', changed_paths=[path]).allowed
+    decision = assess_action('candidate_apply', changed_paths=[path])
+    assert decision.approval_required and decision.escalation == ['authority_expansion']
+
+
+@pytest.mark.parametrize('path', ['src/app.py', 'docs/readme.md', 'tests/test_app.py', 'static/app.js',
+    'docs/deployment.md', 'tests/test_recall.py'])
+def test_unloaded_routine_paths_stay_autonomous(path):
+    from core.engineering_authority import assess_action
+    assert assess_action('candidate_apply', changed_paths=[path]).allowed
+
+
+# Restored coverage for protection cases removed by 9b872a1..084807b, adapted to
+# the new design: preparation is allowed in isolation; applying escalates;
+# secrets and path escapes stay hard denials.
+@pytest.mark.parametrize('path', ['security_rules.py', 'access_policy.py', 'tools/policy.py',
+    'tools/repository.py', 'core/candidate_tools.py', 'core/self_edit.py', 'core/candidate_store.py',
+    'core/engineering_jobs.py', 'core/engineering_worker.py', 'core/engineering_tools.py',
+    'core/engineering_providers.py', 'core/candidate_claude.py'])
+def test_restored_protected_paths_escalate_on_apply(path):
+    from core.engineering_authority import assess_action
+    try:
+        CandidatePolicy().edit_path(path)  # Isolated preparation may proceed...
+    except ToolDenied:
+        pass  # ...or the candidate policy may still hard-deny it (stricter).
+    decision = assess_action('candidate_apply', changed_paths=[path])
+    assert decision.approval_required and 'authority_expansion' in decision.escalation
+
+
+@pytest.mark.parametrize('path', ['.env', '.env.local', '../outside.py', '/etc/passwd', '.git/config',
+    'docs/credentials.md', 'private.key', 'docs/../docs/persistence.md'])
+def test_restored_secret_and_escape_paths_still_denied(path):
+    with pytest.raises(ToolDenied):
+        CandidatePolicy().edit_path(path)
+
+
+@pytest.mark.parametrize('path', ['core/engineering_jobs.py', 'core/engineering_worker.py',
+    'core/engineering_tools.py', 'core/candidate_store.py', 'core/engineering_providers.py', 'core/candidate_claude.py'])
+def test_restored_protected_job_paths_queue_but_completion_waits_for_approval(setup, path):
+    db = setup[1]
+    job = enqueue(db, inspect_paths=[path])
+    assert job['status'] == 'queued'
+    jobs = EngineeringJobs(db)
+    jobs.claim('worker')
+    candidate = dict(id=str(uuid4()), state='passed', busy=False, goal=job['goal'], files_changed=[path],
+        tested_fingerprint='f', reviewed_fingerprint='f', reviewer_result={'verdict': 'passed'},
+        test_results=[], failures=[])
+    finished = jobs.finish(job['id'], 'worker', candidate)
+    assert finished['status'] == 'waiting_for_approval'
+    assert finished['authority']['escalation'] == ['authority_expansion']

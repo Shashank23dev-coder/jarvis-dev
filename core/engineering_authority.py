@@ -4,9 +4,13 @@ The authenticated HTTP perimeter issues this context. Trusted operator processes
 may issue it explicitly. The private broker mailbox is a host-to-host transport,
 not a public API; the broker additionally pins every operation to configured dev.
 """
+import ast
 from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation
+from fnmatch import fnmatch
+from functools import lru_cache
 import os
+from pathlib import Path
 import re
 from typing import Literal, get_args
 
@@ -81,6 +85,64 @@ def _money(value):
         return None
 
 
+# Processes the host and container execute: app, broker, worker, deployment.
+RUNTIME_ENTRYPOINTS = ('main', 'core.candidate_broker', 'core.candidate_bridge', 'core.engineering_worker',
+    'core.deployment_server', 'core.deployment_release', 'core.deployment_healthcheck')
+LOCAL_PACKAGES = ('main', 'core', 'tools', 'models')
+# Weakening these would silently remove security regression coverage.
+SECURITY_TESTS = ('tests/conftest.py', 'tests/test_tools.py', 'tests/test_authority*.py',
+    'tests/test_candidate_*.py', 'tests/test_engineering_authority.py', 'tests/test_owner_readonly_flow.py',
+    'tests/test_deployment*.py', 'tests/test_sandbox*.py')
+
+
+@lru_cache(maxsize=4)
+def loaded_modules(root=None):
+    """Relative paths of every local module in the runtime import closure.
+
+    Parsed (never imported) from the trusted executing tree, including imports
+    inside functions. A candidate cannot extend this set without editing a
+    module already in it, which itself escalates.
+    """
+    root = Path(root) if root else Path(__file__).resolve().parents[1]
+
+    def path_of(name):
+        base = root.joinpath(*name.split('.'))
+        for candidate in (base.with_suffix('.py'), base / '__init__.py'):
+            if candidate.is_file():
+                return candidate
+        return None
+
+    found, pending = {}, list(RUNTIME_ENTRYPOINTS)
+    while pending:
+        name = pending.pop()
+        if name in found or name.split('.')[0] not in LOCAL_PACKAGES:
+            continue
+        path = path_of(name)
+        if path is None:
+            continue
+        found[name] = path
+        parts = name.split('.')
+        pending.extend('.'.join(parts[:i]) for i in range(1, len(parts)))  # Package __init__ files.
+        package = parts if path.name == '__init__.py' else parts[:-1]
+        for node in ast.walk(ast.parse(path.read_bytes(), str(path))):
+            if isinstance(node, ast.Import):
+                pending.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base = package[:len(package) - node.level + 1]
+                    module = '.'.join(base + ([node.module] if node.module else []))
+                else:
+                    module = node.module or ''
+                pending.append(module)
+                pending.extend(module + '.' + alias.name for alias in node.names)
+    return frozenset(str(path.relative_to(root)) for path in found.values())
+
+
+def protected_apply_path(path):
+    """True when applying a change to this path alters loaded code or security tests."""
+    return path in loaded_modules() or any(fnmatch(path, pattern) for pattern in SECURITY_TESTS)
+
+
 def assess_action(action: Action, *, phase='execute', amount=None, currency=None,
                   goal='', changed_paths=(), financial_config=None, read_only_target=False):
     """One classification used by executors. Tool callers cannot label effects safe.
@@ -114,13 +176,13 @@ def assess_action(action: Action, *, phase='execute', amount=None, currency=None
             'core/deployment_runtime.py', 'core/engineering_repository.py', 'core/self_edit.py',
             'core/engineering_worker.py', 'core/candidate_tools.py', 'core/engineering_jobs.py',
             'core/engineering_portfolio.py', 'core/engineering_decision.py', 'core/candidate_action.py',
-            'core/self_state.py', 'core/agent_runner.py', 'core/brain.py', 'main.py',
+            'core/self_state.py', 'core/brain.py', 'main.py',
             'tools/repository.py', 'tools/sandbox.py', 'tools/schemas.py',
             'core/agent.py', 'core/orchestrator.py', 'core/candidate_store.py',
             'core/candidate_worker.py', 'core/candidate_model.py', 'core/candidate_claude.py',
             'core/engineering_providers.py', 'core/candidate_provider.py',
             'core/deployment_tools.py', 'core/deployment_status.py', 'core/engineering_tools.py'}
-        if paths & authority_paths or any(p.startswith(('sandbox/', 'deployment/', 'models/')) or
+        if paths & authority_paths or any(protected_apply_path(p) or p.startswith(('sandbox/', 'deployment/', 'models/')) or
                 re.search(r'(?:^|[/_-])(?:security|policy|policies|authority|permissions?)(?:[._/-]|$)', p)
                 or p.endswith('/__init__.py') for p in paths) or re.search(
                 r'\b(?:permissions?|privileges?|authority|spending limit|financial limit)\b', goal, re.I):

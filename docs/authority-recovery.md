@@ -235,3 +235,20 @@ deployment controller must re-validate the exact commit on the host before an
 approval can be accepted. Only a controller-recorded result offers the exact
 approval phrase. The broker still receives no production credentials or
 controller journal.
+
+R1-6 derives the protected set instead of hand-maintaining it.
+`loaded_modules()` parses (never imports) the trusted executing tree and returns
+the local import closure of the runtime entrypoints (`main`,
+`core.candidate_broker`, `core.candidate_bridge`, `core.engineering_worker`,
+`core.deployment_server`, `core.deployment_release`,
+`core.deployment_healthcheck`), including imports inside functions and package
+`__init__` files. Every module in it (for example core/recall.py,
+core/experience*.py, core/task_store.py, core/memory.py, core/brain_status.py,
+core/task_context.py, tools/policy.py) is protected: applying a change escalates
+as `authority_expansion`. The security tests (tests/conftest.py,
+tests/test_tools.py, tests/test_authority*.py, tests/test_candidate_*.py,
+tests/test_engineering_authority.py, tests/test_owner_readonly_flow.py,
+tests/test_deployment*.py, tests/test_sandbox*.py) escalate the same way. They
+remain editable inside isolated candidates. The stale core/agent_runner.py entry
+was removed. A test imports the entrypoints in a subprocess and fails if any
+actually loaded local module is missing from the closure or applies routinely.
