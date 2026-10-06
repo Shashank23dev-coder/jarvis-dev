@@ -2,6 +2,7 @@
 import base64
 import json
 import logging
+import os
 from pathlib import Path
 import secrets
 
@@ -227,9 +228,23 @@ def test_startup_rejects_corrupt_database(production):
 
 
 def test_container_paths_and_deployment_controls_remain_protected():
+    from core.engineering_authority import assess_action
     root = Path(main.__file__).parent
-    for path in ('core/deployment.py', 'core/deployment_server.py', 'core/deployment_healthcheck.py',
-                 'Dockerfile', 'compose.yaml', '../var/lib/jarvis/jarvis.sqlite3', '/var/lib/jarvis'):
+    # Deployment controls are editable only inside an isolated candidate;
+    # applying or promoting them always needs owner approval.
+    for path in ('core/deployment.py', 'core/deployment_server.py', 'core/deployment_healthcheck.py'):
+        CandidatePolicy().edit_path(path)
+        assert assess_action('candidate_apply', phase='prepare', changed_paths=[path]).allowed
+        decision = assess_action('candidate_apply', changed_paths=[path])
+        assert decision.approval_required and 'authority_expansion' in decision.escalation
+    # Container build files stay outside the candidate edit scope entirely, and
+    # would be major_change if any other path ever applied them.
+    for path in ('Dockerfile', 'compose.yaml'):
+        with pytest.raises(ToolDenied):
+            CandidatePolicy().edit_path(path)
+        assert 'major_change' in assess_action('candidate_apply', changed_paths=[path]).escalation
+    assert assess_action('production_promote').escalation == ['major_change']
+    for path in ('../var/lib/jarvis/jarvis.sqlite3', '/var/lib/jarvis', 'core/../../var/lib/jarvis'):
         with pytest.raises(ToolDenied):
             CandidatePolicy().edit_path(path)
     dockerfile = (root / 'Dockerfile').read_text()
@@ -421,15 +436,21 @@ def test_candidate_snapshot_provisions_only_verified_deployment_dependencies(tmp
         path = worktree / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+    # A candidate tests its own (possibly edited) copies in the sandbox; the host
+    # never injects trusted runtime bytes into it, and nothing reaches the host.
     repository = CandidateRepository(worktree, source_root=root, check=lambda: 30)
-    assert repository._runtime_deployment_files() == expected
-    for name in expected:
-        with pytest.raises(ToolDenied):
-            repository.read_text(name)
+    assert repository._runtime_deployment_files() == {}
+    for name, data in expected.items():
+        assert repository.read_text(name).encode() == data
     (worktree / 'core/deployment.py').write_text('# modified deployment perimeter\n')
-    with pytest.raises(ToolDenied, match='differ from the trusted runtime'):
-        repository._runtime_deployment_files()
+    assert repository.read_text('core/deployment.py') == '# modified deployment perimeter\n'
+    assert (root / 'core/deployment.py').read_bytes() == expected['core/deployment.py']
+    from core.engineering_authority import assess_action
+    decision = assess_action('candidate_apply', changed_paths=list(expected))
+    assert decision.approval_required and 'authority_expansion' in decision.escalation
     assert CandidateRepository(worktree, source_root=tmp_path, check=lambda: 30)._runtime_deployment_files() == {}
+    # Non-root repositories still receive no deployment dependencies.
+    assert RepositoryTools(worktree)._runtime_deployment_files() == {}
 
 
 def test_candidate_deployment_dependency_links_are_denied(tmp_path):
@@ -443,5 +464,16 @@ def test_candidate_deployment_dependency_links_are_denied(tmp_path):
     path = tmp_path / 'core/deployment.py'
     path.unlink()
     path.symlink_to(root / 'core/deployment.py')
+    repository = CandidateRepository(tmp_path, source_root=root, check=lambda: 30)
+    # Linked deployment files are never read, snapshotted or followed to the host.
     with pytest.raises(ToolDenied):
-        CandidateRepository(tmp_path, source_root=root, check=lambda: 30)._runtime_deployment_files()
+        repository.read_text('core/deployment.py')
+    with pytest.raises(ToolDenied):
+        repository._read_bytes('core/deployment.py')
+    # Hardlink a tmp-local copy; never link (and so mutate nlink of) the source tree.
+    outside = tmp_path / 'outside_deployment_server.py'
+    hard = tmp_path / 'core/deployment_server.py'
+    hard.rename(outside)
+    os.link(outside, hard)
+    with pytest.raises(ToolDenied):
+        repository.read_text('core/deployment_server.py')

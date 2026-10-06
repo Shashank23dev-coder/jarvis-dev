@@ -142,8 +142,15 @@ def test_projection_bounds_history_and_discards_sensitive_strings():
 def test_status_dependencies_remain_trusted_and_candidate_protected():
     from core.self_edit import CandidatePolicy
     repository = RepositoryTools(Path(__file__).resolve().parents[1])
+    from core.engineering_authority import assess_action
     for path in ('core/deployment_status.py', 'tests/test_deployment_status.py'):
+        # Host test snapshots still provision the trusted runtime copy.
         assert path in repository._runtime_deployment_files()
+        # Editable only in an isolated candidate; applying it needs approval.
+        CandidatePolicy().check(path)
+        decision = assess_action('candidate_apply', changed_paths=[path])
+        assert decision.approval_required and 'authority_expansion' in decision.escalation
+    for path in ('../core/deployment_status.py', '/var/lib/jarvis/status.json'):
         with pytest.raises(ToolDenied):
             CandidatePolicy().check(path)
 
