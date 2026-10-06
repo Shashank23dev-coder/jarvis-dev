@@ -127,3 +127,8 @@ Revision R1-3: production chat cannot approve escalated applies. The broker
 treats mailbox text as untrusted; authority, major-change or other escalated
 applies require the owner to run `python -m core.candidate_broker --approve-apply
 <ID>` interactively on the host. Routine applies are unchanged.
+
+Revisions R1-4 and R1-6: applying to a read-only project (for example the
+trading bot) needs owner approval. So does any change to a module the
+app/broker/worker/deployment processes import, or to the security test files.
+Such changes can still be prepared and tested in isolated candidates.

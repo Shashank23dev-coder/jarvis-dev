@@ -252,3 +252,35 @@ tests/test_deployment*.py, tests/test_sandbox*.py) escalate the same way. They
 remain editable inside isolated candidates. The stale core/agent_runner.py entry
 was removed. A test imports the entrypoints in a subprocess and fails if any
 actually loaded local module is missing from the closure or applies routinely.
+
+Held deployment tests now assert the candidate design rather than the old
+hard denials: deployment perimeter modules (core/deployment*.py and their
+tests) are editable only inside an isolated candidate, which tests its own
+copies in the sandbox; applying them escalates. Dockerfile and compose.yaml
+remain outside the candidate edit scope. Escape paths (for example
+`../var/lib/jarvis/jarvis.sqlite3`, `/var/lib/jarvis`) and symlinked or
+hardlinked deployment files are still denied. Host test snapshots still
+provision trusted runtime deployment bytes.
+
+Protection cases removed by 9b872a1..084807b were restored in adapted form
+(tests/test_engineering_authority.py, tests/test_candidate_apply.py): protected
+paths may be prepared in isolation but escalate on apply, jobs touching them
+finish `waiting_for_approval`, and secret/escape paths remain hard denials.
+The forged-approval tests replace the old "bridge has no apply" case. Read-only
+project tests are no longer disabled: R1-4 keeps isolated tests for them and
+gates only apply.
+
+### Remaining owner approvals and host steps
+
+- Provision the standalone Jarvis integration clone and register
+  `integration_repository` / `integration_branch` (`jarvis/integration...`) for
+  jarvis-core in host Portfolio metadata. Until then Jarvis candidates stay
+  prepared and tested, and apply reports that integration is not configured.
+- Promote reviewed integration commits into the live broker/worker/app
+  checkout. This is `production_promote` (major_change). It has no executor and
+  remains a manual owner operation.
+- Approve escalated applies (authority paths, loaded runtime modules, security
+  tests, major changes, read-only projects) only on the host with
+  `python -m core.candidate_broker --approve-apply <ID>`.
+- Run host controller validation (`validate SHA`) before production deployment
+  approval; broker preparation alone does not satisfy deploy.
