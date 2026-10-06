@@ -12,6 +12,8 @@ class ToolDenied(ToolError):
 
     # Closed diagnostics only. Exception prose can contain paths or credentials.
     reasons = {
+        'candidate_id_required': 'candidate_apply',
+        'integration_not_configured': 'candidate_apply',
         'approval_required': 'owner_escalation',
         'owner_required': 'owner_authentication',
         'relative_path_required': 'repository_path',
@@ -55,6 +57,8 @@ class ToolDenied(ToolError):
 
     def public_error(self):
         messages = {
+            'candidate_id_required': 'Name the exact candidate ID in the current request before applying it.',
+            'integration_not_configured': 'The candidate is prepared; integration is not configured. Its tests and review remain available. No source checkout was changed.',
             'approval_required': 'This action needs your approval before execution. I can prepare it first.',
             'owner_required': 'Sign in as the owner to inspect registered project source.',
             'relative_path_required': 'Choose a file within the registered project using a relative path.',

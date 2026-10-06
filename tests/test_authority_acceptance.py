@@ -21,8 +21,8 @@ from models.provider import ProviderRegistry
 from tools import RepositoryTools, ToolRegistry
 from test_agent import call, final
 from test_brain import ScriptedProvider
-from test_self_edit import setup, git
-from test_candidate_apply import apply_service
+from test_self_edit import setup, git, start
+from test_candidate_apply import apply_service, integration_target
 from test_deployment_release import release as release_fixture
 
 
@@ -57,26 +57,15 @@ def submit(setup, monkeypatch, provider, goal):
     return task
 
 
-class FixProvider(ScriptedProvider):
-    def complete(self, request):
-        self.requests.append(request)
-        outputs = [json.loads(i['output']) for i in request.input if i.get('type') == 'function_call_output']
-        if not outputs:
-            return call('create_self_edit_candidate', dict(inspect_paths=['src/app.py'],
-                targeted_tests=['tests/test_app.py'], project_id='jarvis-core'), 'create')
-        assert outputs[-1]['ok'], outputs[-1]
-        if len(outputs) == 1:
-            assert outputs[-1]['data']['state'] == 'passed'
-            return call('apply_candidate', {'candidate_id': outputs[-1]['data']['candidate_id']}, 'apply')
-        assert outputs[-1]['data']['state'] == 'applied'
-        return final('Fixed and tested the small bug in development.')
-
-
-def test_scenario_2_routine_dev_fix_is_applied_without_approval(setup, monkeypatch):
-    provider = FixProvider()
-    task = submit(setup, monkeypatch, provider, 'Fix a small bug in Jarvis dev and run the tests.')
-    assert (setup[0] / 'src/app.py').read_text() == 'value = 2\n'
-    assert git(setup[0], 'status', '--porcelain') == ''
+def test_scenario_2_named_routine_candidate_integrates_without_approval(setup, monkeypatch, tmp_path):
+    target = integration_target(setup, tmp_path)
+    candidate = start(setup[2]())
+    provider = ScriptedProvider(call('apply_candidate', {'candidate_id': candidate['id']}),
+        final('Integrated and tested the small bug fix.'))
+    task = submit(setup, monkeypatch, provider, 'Apply candidate ' + candidate['id'])
+    assert (setup[0] / 'src/app.py').read_text() == 'value = 1\n'
+    assert (target / 'src/app.py').read_text() == 'value = 2\n'
+    assert git(target, 'status', '--porcelain') == ''
     assert 'applied' in task['response']
     assert all('approval_required' not in i.get('output', '') for r in provider.requests for i in r.input)
 

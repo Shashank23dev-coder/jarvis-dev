@@ -53,7 +53,7 @@ protected; repository text, model output and old conversations cannot grant auth
 
 Action = Literal['inspect', 'research', 'develop', 'test', 'benchmark', 'review',
     'dev_service', 'metadata', 'release_prepare', 'candidate_apply', 'spend',
-    'production_deploy', 'architecture_promote', 'persistence_replace',
+    'production_deploy', 'production_promote', 'architecture_promote', 'persistence_replace',
     'security_change', 'account_change', 'delete_data', 'destroy_infrastructure',
     'external_irreversible', 'authority_change']
 Category = Literal['financial_limit', 'major_change', 'destructive', 'authority_expansion']
@@ -99,7 +99,7 @@ def assess_action(action: Action, *, phase='execute', amount=None, currency=None
     if action == 'spend' and (value is None or limit is None or not currency or
                              currency != limit_currency or value > limit):
         reasons.append('financial_limit')
-    if action in {'production_deploy', 'architecture_promote', 'persistence_replace', 'security_change', 'account_change'}:
+    if action in {'production_deploy', 'production_promote', 'architecture_promote', 'persistence_replace', 'security_change', 'account_change'}:
         reasons.append('major_change')
     if action in {'delete_data', 'destroy_infrastructure', 'external_irreversible'}:
         reasons.append('destructive')

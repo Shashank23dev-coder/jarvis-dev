@@ -149,3 +149,34 @@ context checks still run separately and retain their hard denials. Secret-marker
 fixtures construct synthetic markers at runtime; whole-file hash exemptions were
 removed. Full Python, UI and live-provider/readiness evidence is saved under `/tmp`
 and reported against the final commit after the checks finish.
+
+## Revision R1 (Claude review)
+
+R1-1 separates reviewed candidate integration from live promotion. Host-only
+Portfolio registration now accepts `integration_repository` and
+`integration_branch` for `jarvis-core`. The destination must be a separate,
+canonical standalone Git checkout on a `jarvis/integration` branch (optional
+suffix allowed), outside every registered project root and every executing
+source root. The standalone checkout requirement retains the existing safe Git
+and locking implementation; this is a separate integration clone, not a linked
+Git worktree. Provisioning it is an owner-approved host step, not an operation
+available to the model or mailbox. No checkout has been provisioned here.
+
+Jarvis apply refuses missing integration configuration and any live-root target,
+even with candidate approval. The original source identity remains bound to the
+candidate; the integration target must have the exact clean baseline. Review,
+test and diff hashes, path checks, locking, post-apply sandbox verification,
+compare-and-swap commit and rollback still apply, with the target recorded in the
+journal. A changed target cannot redirect recovery. Existing audit records remain
+readable; legacy live-checkout recovery requires the host owner.
+
+The current request must name exactly one candidate ID before any apply. Routine
+integration needs no approval phrase. Moving integration changes into the
+broker/worker/app checkout is `production_promote`, classified by `assess_action`
+as `major_change`, and requires explicit owner approval. There is no automatic
+promotion executor. Integration does not run candidate Python on the host.
+
+R1-1 validation: candidate apply/tools/bridge and authority model/acceptance files:
+224 passed, 2 live-sandbox tests skipped. Follow-up promotion and destination
+denial checks: 13 passed. Docker execution was disabled by a temporary validation
+plugin; no host integration checkout or promotion was performed.

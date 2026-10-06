@@ -17,7 +17,33 @@ from core.database import Database
 from core.self_edit import SelfEditService
 from core.task_store import TaskStore
 from tools import ToolRegistry, CommandResult, ToolDenied
-from test_self_edit import setup, start, git, tree_bytes, require_live_sandbox
+from test_self_edit import setup as source_setup, start, git, tree_bytes, require_live_sandbox
+
+
+@pytest.fixture
+def setup(tmp_path):
+    # General apply integrity checks use a writable external project. Jarvis
+    # integration separation is covered explicitly below.
+    source, database, factory = source_setup.__wrapped__(tmp_path)
+    from core.engineering_portfolio import Portfolio
+    portfolio = Portfolio(database)
+    jarvis = next(p for p in portfolio.projects() if p['project_id'] == 'jarvis-core')
+    portfolio.register_project(jarvis | dict(repository=None), replace=True)
+    portfolio.register_project(jarvis | dict(project_id='fixture', name='Fixture', repository=str(source)))
+    return source, database, factory
+
+
+def integration_target(setup, tmp_path):
+    from core.engineering_portfolio import Portfolio
+    source, database, _ = setup
+    target = tmp_path / 'integration'
+    git(tmp_path, 'clone', '--no-hardlinks', '--no-local', str(source), str(target))
+    git(target, 'checkout', '-b', 'jarvis/integration')
+    portfolio = Portfolio(database)
+    project = next(p for p in portfolio.projects() if p['project_id'] == 'jarvis-core')
+    portfolio.register_project(project | dict(integration_repository=str(target),
+        integration_branch='jarvis/integration'), replace=True)
+    return target
 
 
 def apply_service(factory, tester=None):
@@ -456,7 +482,7 @@ def test_agent_unapproved_apply_not_exposed_or_invoked(setup, goal):
         assert output['error']['code'] == 'unknown_tool'
     else:
         assert 'apply_candidate' in names
-        assert output['error']['reason'] == 'approval_required'
+        assert output['error']['reason'] == 'candidate_id_required'
     assert tree_bytes(source) == before
 
 
@@ -498,3 +524,58 @@ def test_agent_apply_tools_missing_or_extra_identity_arguments_fail_closed(setup
     result = adapter.bind(ToolRegistry()).execute(name, json.dumps(arguments),
         task_id=task['id'], task_store=store)
     assert result.error.code == 'invalid_arguments'
+
+
+def test_jarvis_apply_only_changes_host_configured_integration(tmp_path):
+    fixture = source_setup.__wrapped__(tmp_path)
+    source, _, factory = fixture
+    target = integration_target(fixture, tmp_path)
+    candidate = start(factory())
+    before = tree_bytes(source)
+    result = apply_service(factory).apply(candidate['id'], 'Apply candidate ' + candidate['id'])
+    assert result['apply']['status'] == 'applied'
+    assert (target / 'src/app.py').read_text() == 'value = 2\n'
+    assert git(target, 'branch', '--show-current').strip() == 'jarvis/integration'
+    assert tree_bytes(source) == before
+
+
+@pytest.mark.parametrize('target_kind', ['missing', 'source', 'runtime', 'broker', 'symlink', 'wrong_branch'])
+def test_jarvis_integration_fails_closed(tmp_path, target_kind):
+    from core.engineering_portfolio import Portfolio
+    from core.candidate_broker import SOURCE
+    fixture = source_setup.__wrapped__(tmp_path)
+    source, database, factory = fixture
+    target = integration_target(fixture, tmp_path)
+    portfolio = Portfolio(database)
+    project = next(p for p in portfolio.projects() if p['project_id'] == 'jarvis-core')
+    if target_kind == 'symlink':
+        link = tmp_path / 'linked'
+        link.symlink_to(target, target_is_directory=True)
+        target = link
+    chosen = {'missing': None, 'source': str(source), 'runtime': str(Path(__file__).resolve().parents[1]),
+        'broker': str(SOURCE)}.get(target_kind, str(target))
+    portfolio.register_project(project | dict(integration_repository=chosen,
+        integration_branch='jarvis/integration-wrong' if target_kind == 'wrong_branch' else 'jarvis/integration'), replace=True)
+    candidate = start(factory())
+    before = tree_bytes(source)
+    if target_kind == 'wrong_branch':
+        result = apply_service(factory).apply(candidate['id'], confirmation(candidate['id']))
+        assert result['apply']['status'] == 'denied'
+    else:
+        with pytest.raises((ToolDenied, OSError)):
+            apply_service(factory).apply(candidate['id'], confirmation(candidate['id']))
+    assert tree_bytes(source) == before
+
+
+@pytest.mark.parametrize('message', ['', 'continue', 'looks good', 'Apply the candidate', 'Apply candidate ' + str(uuid4())])
+def test_routine_apply_requires_current_explicit_identity(setup, message):
+    source, database, factory = setup
+    candidate = start(factory())
+    before = tree_bytes(source)
+    for apply in (apply_service(factory), CandidateTools(message, database, lambda _: factory())):
+        with pytest.raises(ToolDenied, match='exact candidate ID'):
+            if isinstance(apply, CandidateApply):
+                apply.apply(candidate['id'], message)
+            else:
+                apply.apply(candidate['id'])
+    assert tree_bytes(source) == before

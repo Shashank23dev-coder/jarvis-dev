@@ -115,3 +115,10 @@ not authorize discard during a build request. Apply/deploy schema approval gates
 are unchanged. Broker connection is lazy at invocation; missing/unreachable broker
 requests time out and fail closed, with no local candidate fallback. Read-only
 repository and deployment tools remain available independently of broker health.
+
+Revision R1: applying a Jarvis candidate requires its ID in the current request
+and a host-registered integration checkout/branch. It never writes the running
+broker, worker or application checkout. Missing integration configuration leaves
+the candidate prepared, with its test/review evidence available. Provisioning the
+standalone integration clone and promoting its reviewed commit into the live
+checkout are separate owner steps; see [authority recovery](authority-recovery.md).

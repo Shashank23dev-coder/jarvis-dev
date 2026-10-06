@@ -184,14 +184,15 @@ def test_mailbox_round_trip_and_links(tmp_path, monkeypatch):
 
 def test_production_approval_does_not_enable_local_apply(setup, monkeypatch):
     monkeypatch.setenv('JARVIS_MODE', 'production')
-    adapter = CandidateTools(f'approve and apply candidate {uuid4()} to main', setup[1])
+    identifier = str(uuid4())
+    adapter = CandidateTools(f'approve and apply candidate {identifier} to main', setup[1])
     calls = []
     def invoke(client, action, arguments):
         calls.append(action)
         return dict(candidate_id=arguments['candidate_id'], apply=None)
     monkeypatch.setattr(CandidateClient, 'invoke', invoke)
     monkeypatch.setattr('core.candidate_apply.CandidateApply', lambda *args: pytest.fail('Local apply forbidden'))
-    adapter.apply(str(uuid4()))
+    adapter.apply(identifier)
     assert calls == ['apply']
 
 

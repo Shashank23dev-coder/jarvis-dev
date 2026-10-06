@@ -12,7 +12,7 @@ from core.candidate_broker import Broker
 from tools import ToolDenied, ToolRegistry
 from tools.candidate_edit import CandidatePolicy
 from test_self_edit import setup, start, git
-from test_candidate_apply import apply_service, confirmation
+from test_candidate_apply import apply_service, confirmation, integration_target
 from test_candidate_bridge import request
 from test_project_repository import projects
 
@@ -30,7 +30,7 @@ def test_normal_actions_need_only_owner(action):
         current_owner.reset(token)
 
 
-@pytest.mark.parametrize('action,reason', [('production_deploy', 'major_change'), ('architecture_promote', 'major_change'),
+@pytest.mark.parametrize('action,reason', [('production_deploy', 'major_change'), ('production_promote', 'major_change'), ('architecture_promote', 'major_change'),
     ('security_change', 'major_change'), ('delete_data', 'destructive'), ('destroy_infrastructure', 'destructive'),
     ('authority_change', 'authority_expansion')])
 def test_consequences_only_gate_execution(action, reason):
@@ -70,26 +70,29 @@ def test_hard_boundaries_remain_denials(path):
         CandidatePolicy().edit_path(path)
 
 
-def test_routine_candidate_applies_without_phrase_with_real_integrity_checks(setup):
+def test_routine_candidate_applies_without_phrase_with_real_integrity_checks(setup, tmp_path):
     source, _, factory = setup
     candidate = start(factory())
+    target = integration_target(setup, tmp_path)
     preview = apply_service(factory).preview(candidate['id'])
     assert preview['eligible'] and preview['required_confirmation'] is None
-    result = apply_service(factory).apply(candidate['id'])
+    result = apply_service(factory).apply(candidate['id'], 'Apply candidate ' + candidate['id'])
     assert result['apply']['status'] == 'applied'
-    assert (source / 'src/app.py').read_text() == 'value = 2\n'
+    assert (target / 'src/app.py').read_text() == 'value = 2\n'
+    assert (source / 'src/app.py').read_text() == 'value = 1\n'
     assert git(source, 'status', '--porcelain') == ''
 
 
-def test_authority_candidate_requires_exact_owner_approval(setup):
+def test_authority_candidate_requires_exact_owner_approval(setup, tmp_path):
     source, _, factory = setup
+    integration_target(setup, tmp_path)
     service = factory()
     candidate = start(service)
     record = service.store.get(candidate['id'], internal=True)
     record['goal'] = 'Increase your own authority'
     service.store.save(record)
     for text in ('', 'looks good', confirmation(str(uuid4()))):
-        with pytest.raises(EscalationRequired):
+        with pytest.raises(ToolDenied):
             apply_service(factory).apply(candidate['id'], text)
     assert (source / 'src/app.py').read_text() == 'value = 1\n'
     assert apply_service(factory).apply(candidate['id'], confirmation(candidate['id']))['apply']['status'] == 'applied'

@@ -28,6 +28,13 @@ def approved_id(request):
     return match[1] if match and valid_id(match[1]) else None
 
 
+def require_candidate_id(request, candidate_id):
+    from .database import valid_id
+    ids = set(re.findall(r'(?<![\w-])[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}(?![\w-])', request or '', re.I))
+    if not valid_id(candidate_id) or {i.lower() for i in ids} != {candidate_id}:
+        raise ToolDenied('Name the exact candidate ID in the current request', reason='candidate_id_required')
+
+
 class CandidateApply:
     """No model-supplied roots, commands, patches, budgets or approval strings.
 
@@ -43,7 +50,7 @@ class CandidateApply:
         record = self.store.get(candidate_id, internal=True, recover=not read_only)
         if record is None:
             raise ValueError('Candidate not found')
-        if self.store.database.path == ':memory:' or record.get('source_root') != str(self.source):
+        if self.store.database.path == ':memory:' or record.get('source_root') != str(self.service.source):
             raise ToolDenied('Apply requires durable storage and the original source checkout')
         self.record = record
         self.service.record = record
@@ -52,6 +59,42 @@ class CandidateApply:
         self.service.deadline = self.started + max(0, self.service.limits.seconds - record['elapsed_seconds'])
         self.service.originals = {}
         return record
+
+    def _target(self):
+        """Only host Portfolio metadata selects an integration destination.
+
+        The executing checkout is never an apply target, even with approval.
+        Promotion is a separate owner operation, with no executor here.
+        """
+        from .candidate_broker import SOURCE
+        from .engineering_portfolio import Portfolio
+        projects = Portfolio(self.store.database).projects()
+        live = {SOURCE.resolve(), Path(__file__).resolve().parents[1], self.service.source}
+        jarvis = next(p for p in projects if p['project_id'] == 'jarvis-core')
+        if jarvis.get('repository'):
+            live.add(Path(jarvis['repository']).resolve())
+        pid = self.record.get('source_context', {}).get('project_id')
+        is_jarvis = (pid == 'jarvis-core' or self.service.source in
+            {SOURCE.resolve(), Path(__file__).resolve().parents[1]} or
+            bool(jarvis.get('repository') and self.service.source == Path(jarvis['repository']).resolve()))
+        self.target_branch = None
+        if is_jarvis:
+            root, branch = jarvis.get('integration_repository'), jarvis.get('integration_branch')
+            if not root or not branch:
+                raise ToolDenied('Integration is not configured', reason='integration_not_configured')
+            target = Path(root)
+            if (not target.is_absolute() or target.resolve(strict=True) != target or
+                    not re.fullmatch(r'jarvis/integration(?:[-/][a-zA-Z0-9_-]+)*', branch)):
+                raise ToolDenied('Unsafe integration target')
+            forbidden = live | {Path(p['repository']).resolve() for p in projects if p.get('repository')}
+            if any(target == path or target.is_relative_to(path) or path.is_relative_to(target) for path in forbidden):
+                raise ToolDenied('Integration cannot target an executing or registered project checkout')
+            self.source, self.target_branch = target, 'refs/heads/' + branch
+        else:
+            self.source = self.service.source
+        audit = self.record.get('apply')
+        if audit and audit.get('target_root', str(self.service.source)) != str(self.source):
+            raise ToolDenied('Apply journal target changed; host recovery required')
 
     def _save(self, event):
         self.store.save(self.record, event)
@@ -94,7 +137,7 @@ class CandidateApply:
         r = self.record
         if r['state'] != 'passed' or r.get('apply'):
             raise ToolDenied('Only an unapplied passed candidate is eligible')
-        if r.get('source_root') != str(self.source):
+        if r.get('source_root') != str(self.service.source):
             raise ToolDenied('Source location mismatch')
         reviewed = r.get('reviewed_at')
         if not reviewed or not 0 <= (datetime.now(timezone.utc) - datetime.fromisoformat(reviewed).replace(tzinfo=timezone.utc)).total_seconds() < 86400:
@@ -118,6 +161,8 @@ class CandidateApply:
         branch = self._git('symbolic-ref', 'HEAD').strip()
         if not branch.startswith('refs/heads/'):
             raise ToolDenied('Main must be on a local branch')
+        if self.target_branch and branch != self.target_branch:
+            raise ToolDenied('Integration branch does not match host configuration')
         # Reuses whole-worktree manifest checks, protected path and line/file
         # limits, canonical paths, symlink/hardlink checks, and diff generation.
         if self.service._diff() != expected or r['diff'] != expected_diff or not r['files_changed']:
@@ -138,6 +183,7 @@ class CandidateApply:
 
     def preview(self, candidate_id):
         self._setup(candidate_id)
+        self._target()
         if self.record.get('busy'):
             return {'candidate_id': candidate_id, 'eligible': False, 'reason': 'Candidate is busy'}
         self.store.claim(candidate_id)
@@ -268,6 +314,7 @@ class CandidateApply:
         self._setup(candidate_id, read_only=read_only)
         if read_only:
             return self._public()
+        self._target()
         # Recover interrupted mutations only while holding the source lock.
         with self._lock():
             pending = self.record.get('apply', {}).get('status') in {'applying', 'verifying', 'committing', 'rolling_back'}
@@ -283,10 +330,12 @@ class CandidateApply:
 
     def apply(self, candidate_id, current_request='', *, authority=None):
         from .engineering_authority import authorize
+        require_candidate_id(current_request, candidate_id)
         self._setup(candidate_id)
         authorize('candidate_apply', authority=authority,
             approved=approved_id(current_request) == candidate_id,
             goal=self.record['goal'], changed_paths=self.record['files_changed'])
+        self._target()
         if self.record.get('busy'):
             raise ToolDenied('Candidate is busy')
         self.store.claim(candidate_id)
@@ -300,7 +349,7 @@ class CandidateApply:
                     branch = self._eligible()
                 except Exception:
                     self.record['apply'] = dict(status='denied', candidate_id=candidate_id,
-                        approval=current_request, requested_at=timestamp(), files_changed=[], verification=[],
+                        approval=current_request, target_root=str(self.source), requested_at=timestamp(), files_changed=[], verification=[],
                         commit=None, error='Eligibility validation failed', rollback=False)
                     self._save('apply_denied')
                     return self._public()
@@ -312,7 +361,7 @@ class CandidateApply:
                 audit = self.record['apply'] = dict(status='applying', candidate_id=candidate_id,
                     approval=current_request, requested_at=timestamp(), files_changed=list(self.record['files_changed']),
                     patch=self.record['diff'], patch_hash=digest(self.record['diff'].encode()),
-                    baseline=self.record['base_commit'], branch=branch, verification=[], commit=None,
+                    baseline=self.record['base_commit'], branch=branch, target_root=str(self.source), verification=[], commit=None,
                     expected_files=self.expected_files,
                     rollback=False, post_apply_verified=False)
                 self._save('apply_approved')

@@ -61,6 +61,9 @@ class Project(StrictModel):
     dependencies: Names = Field(default_factory=list)
     capabilities: Names = Field(default_factory=list)
     limitations: Names = Field(default_factory=list)
+    # Host registration only; never accepted in candidate/job request arguments.
+    integration_repository: Text | None = None
+    integration_branch: Text | None = None
     read_only: bool = False
     baseline_commit: Annotated[str, Field(pattern=r'^[0-9a-f]{40}$')] | None = None
     current_commit: Annotated[str, Field(pattern=r'^[0-9a-f]{40}$')] | None = None
