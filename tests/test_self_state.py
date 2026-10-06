@@ -35,7 +35,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(deployment_status,'configured_inspector',lambda:NS(status=lambda:production))
     candidates = CandidateTools(task['goal'], store.database, authority=OwnerDevAuthority())
     candidates.production = False
-    candidates._service = lambda:NS(store=NS(get=lambda *a,**k:record))
+    candidates._service = lambda **_:NS(store=NS(get=lambda *a,**k:record))
     state = self_state.SelfState(store,task['id'],candidates,configured=['local'],route='local')
     return state, store, task, live, record, production, reads
 @pytest.mark.parametrize('worker',['active','inactive','unknown'])

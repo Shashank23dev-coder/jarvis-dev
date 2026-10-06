@@ -197,13 +197,21 @@ def test_job_input_recovery_cannot_change_project(setup):
     assert jobs.get(job['id'])['project_id'] == 'jarvis-core'
 
 
-def test_legacy_candidate_tool_cannot_bypass_existing_capability_preflight(setup, monkeypatch):
+def test_legacy_candidate_tool_fails_closed_without_a_resolved_project(setup, monkeypatch):
     source, db, factory = setup
-    tools = CandidateTools('Add Claude support', db, lambda _: factory())
-    assert tools.create(ARGS['inspect_paths'], ARGS['targeted_tests']).state == 'passed'
     monkeypatch.setenv('JARVIS_MODE', 'development')
-    result = Broker(factory(), source=source).execute(request('create', 'Add Claude support',
-            dict(inspect_paths=ARGS['inspect_paths'], targeted_tests=ARGS['targeted_tests'])))
+    arguments = dict(inspect_paths=ARGS['inspect_paths'], targeted_tests=ARGS['targeted_tests'])
+    # No project named: a clarification, never a Jarvis default.
+    with pytest.raises(ToolDenied) as caught:
+        CandidateTools('Add Claude support', db, lambda _: factory()).create(**arguments)
+    assert caught.value.reason == 'unknown_project'
+    with pytest.raises(ToolDenied):
+        Broker(factory(), source=source).execute(request('create', 'Add Claude support', arguments))
+    with db.transaction() as connection:
+        assert connection.execute('SELECT count(*) FROM candidates').fetchone()[0] == 0
+    # Advisory capability evidence still does not block a uniquely resolved project.
+    assert CandidateTools('Add Claude support to Jarvis', db, lambda _: factory()).create(**arguments).state == 'passed'
+    result = Broker(factory(), source=source).execute(request('create', 'Add Claude support to Jarvis', arguments))
     assert result['state'] == 'passed'
     with db.transaction() as connection:
         assert connection.execute('SELECT count(*) FROM candidates').fetchone()[0] == 2

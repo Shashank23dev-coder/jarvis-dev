@@ -224,7 +224,7 @@ def test_engineering_budget_and_shared_one_candidate_limit(setup):
     candidate = service.engineer('Fix the value', **ARGS)
     assert candidate['state'] != 'passed' and candidate['iterations'] == 0
     from uuid import uuid4
-    tools = CandidateTools('Fix the value', database, lambda db: factory(model=model, tester=run_checks),
+    tools = CandidateTools('Fix the value in Jarvis', database, lambda db: factory(model=model, tester=run_checks),
         source_context=dict(task_id=str(uuid4()), conversation_id=str(uuid4())))
     tools.prepare('codex')
     tools.engineer(**ARGS)
@@ -316,7 +316,7 @@ def test_engineering_broker_rechecks_authority_and_is_idempotent(setup):
     from tools import ToolDenied
     source, _, factory = setup
     broker = Broker(factory(model=model, tester=run_checks), source=source)
-    raw = request('engineer', 'Diagnose and fix the value', ARGS)
+    raw = request('engineer', 'Diagnose and fix the value in Jarvis', ARGS)
     record = broker.execute(raw)
     assert record['state'] == 'passed'
     assert broker.execute(raw) == record
@@ -346,7 +346,7 @@ def test_production_brain_uses_bridge_without_local_authority(setup, tmp_path, m
     monkeypatch.setattr(CandidateClient, 'invoke', invoke)
     monkeypatch.setenv('JARVIS_MODE', 'production')
     store = TaskStore(tmp_path / 'production.db')
-    task = store.create_task('Fix the value')
+    task = store.create_task('Fix the value in Jarvis')
     provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}),
                                 call('engineer_candidate', dict(ARGS, provider='codex'), 'implementation'), final('Applied!'))
     brain = JarvisBrain(AgentRunner(candidate_service_factory=lambda db: pytest.fail('No local writes')),

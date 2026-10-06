@@ -8,8 +8,11 @@ The host action binds submission content for integrity and idempotency; it does
 not restrict later inspection or control to the originating conversation.
 
 `decide_engineering` supplies advisory project/capability observations. New jobs
-support optional `project_id` and persist their decision/rationale; old jobs
-remain valid without either. Project IDs resolve roots only from trusted host
+must resolve to exactly one registered project (named in the goal or by a
+registered `project_id`) and persist their decision/rationale. An unknown or
+ambiguous target is a clarification, never a Jarvis default. Old jobs and
+candidates remain readable; a legacy job without a project is blocked by the
+worker rather than built against Jarvis. Project IDs resolve roots only from trusted host
 Portfolio records; raw request paths never select a root. Missing roots remain
 information blockers for that project, with no fallback to another project.
 See [Authority model](authority-recovery.md).

@@ -183,8 +183,10 @@ def bind_project_tools(tools, registry):
     def selected():
         if tools.ambiguous_projects:
             raise ToolDenied('Choose a project before inspecting its source', reason='project_ambiguous')
-        if not tools.project_id:
-            raise ToolDenied('Choose a registered project', reason='unknown_project' if tools.portfolio_observed else 'project_context_unavailable')
+        if not tools.project_id and not tools.portfolio_observed:
+            raise ToolDenied('Project catalog could not be observed', reason='project_context_unavailable')
+        # Unnamed reads keep the native read-only registry. Mutation and
+        # preparation selectors use resolve_project and never default to Jarvis.
         return tools.project_id
     definitions['inspect_project_repository'] = ToolDefinition(
         'Inspect trusted registered project source or run isolated pytest. Roots come from Portfolio metadata; relative paths only. Capability inventory and baseline drift are observations. Tests run without host runtime or secrets.',

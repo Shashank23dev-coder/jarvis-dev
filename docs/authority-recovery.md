@@ -180,3 +180,18 @@ R1-1 validation: candidate apply/tools/bridge and authority model/acceptance fil
 224 passed, 2 live-sandbox tests skipped. Follow-up promotion and destination
 denial checks: 13 passed. Docker execution was disabled by a temporary validation
 plugin; no host integration checkout or promotion was performed.
+
+R1-2 makes project resolution fail closed. `resolve_project` is the single
+selector for workspace discovery, candidate creation, engineering, job creation,
+broker requests and `development_service`; it returns a project only when the
+goal or a registered `project_id` identifies exactly one registered project.
+Unknown or ambiguous goals raise `unknown_project` / `project_ambiguous` with one
+clarification. Addressing Jarvis ("Jarvis fix the order bug in the trading bot")
+does not select Jarvis over the named project. `submission_decision` also stops
+when the decision has no project or the project has no registered source.
+Stored candidates and jobs remain readable; legacy candidates without a project
+ID resolve only by a unique registered source root, and legacy jobs without one
+are blocked by the worker. Unnamed read-only inspection keeps the native
+read-only registry. Preflight for an unproven read-only project (e.g. "Fix my
+trading bot") returns NEED_MORE_INFORMATION again; an explicit job submission
+for it may still build an isolated candidate (applying is gated, see R1-4).
