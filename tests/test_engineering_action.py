@@ -20,7 +20,7 @@ from test_candidate_bridge import request
 from test_self_edit import setup, tree_bytes
 from test_engineering import ARGS, model, run_checks
 
-EXACT = ('Create a small documentation-only engineering improvement candidate using your engineering workflow. '
+EXACT = ('Create a small documentation-only engineering improvement candidate for Jarvis using your engineering workflow. '
          'Use Codex for implementation, run tests and review, and stop before apply or deployment.')
 
 
@@ -29,8 +29,8 @@ def bound(raw, scope='code'):
         conversation_id=raw['conversation_id'], goal_digest=goal_digest(raw['goal']))
 
 
-@pytest.mark.parametrize('goal', [EXACT, 'Please prepare a candidate that improves the docs.',
-                                'I would like a clearer explanation in the documentation. Implement it in a candidate.'])
+@pytest.mark.parametrize('goal', [EXACT, 'Please prepare a Jarvis candidate that improves the docs.',
+                                'I would like a clearer explanation in the Jarvis documentation. Implement it in a candidate.'])
 def test_typed_action_does_not_reparse_wording(setup, goal):
     source, _, factory = setup
     before = tree_bytes(source)
@@ -67,11 +67,17 @@ def test_owner_preparation_needs_no_classifier(setup):
     from core.candidate_tools import CandidateTools
     from core.engineering_authority import OwnerDevAuthority
     source, db, factory = setup
-    raw = request('workspace', 'Please investigate this and do what is needed.', {})
+    raw = request('workspace', 'Please investigate Jarvis and do what is needed.', {})
+    context = {k: raw[k] for k in ('task_id', 'conversation_id')}
     tools = CandidateTools(raw['goal'], db, lambda db: factory(),
-        authority=OwnerDevAuthority(), source_context={k: raw[k] for k in ('task_id', 'conversation_id')})
+        authority=OwnerDevAuthority(), source_context=context)
     assert tools.prepare('codex').provider == 'codex'
     assert tools.engineering_action.workspace == 'configured_dev'
+    unnamed = CandidateTools('Please investigate this and do what is needed.', db, lambda db: factory(),
+        authority=OwnerDevAuthority(), source_context=context)
+    with pytest.raises(ToolDenied) as denied:
+        unnamed.prepare('codex')
+    assert denied.value.reason == 'unknown_project'
 
 
 def test_documentation_scope_rejects_code_from_codex(setup):
@@ -103,7 +109,7 @@ def test_workspace_catalog_is_read_only_scoped_and_requires_action(setup):
 def test_bad_path_does_not_consume_prepared_candidate_authority(setup):
     from core.candidate_tools import CandidateTools
     source, database, factory = setup
-    raw = request('engineer', 'Improve documentation', {})
+    raw = request('engineer', 'Improve Jarvis documentation', {})
     action = bound(raw, 'documentation')
     tools = CandidateTools(raw['goal'], database, lambda db: factory(),
         engineering_authorizer=lambda provider: action,
