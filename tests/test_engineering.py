@@ -230,14 +230,14 @@ def test_engineering_budget_and_shared_one_candidate_limit(setup):
     tools.engineer(**ARGS)
     from tools import ToolDenied
     with pytest.raises(ToolDenied):
-        tools.create(ARGS['inspect_paths'], ARGS['targeted_tests'])
+        tools.create(ARGS['inspect_paths'], ARGS['targeted_tests'], project_id='jarvis-core')
 
 
 def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(setup):
     source, database, factory = setup
     before = tree_bytes(source)
     store = TaskStore(database.path)
-    task = store.create_task('Diagnose and fix the incorrect value')
+    task = store.create_task('Diagnose and fix the incorrect value in Jarvis')
     provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}),
                                 final('Prepared. Ask me again to implement.'),
                                 call('engineer_candidate', dict(ARGS, provider='codex'), 'implementation'), final('Deployed!'))
@@ -284,10 +284,11 @@ def test_isolated_engineering_available_regardless_of_goal_with_promotion_gated(
     names = {tool['name'] for tool in tools.bind(ToolRegistry()).model_tools()}
     assert {'create_self_edit_candidate', 'engineer_candidate', 'create_engineering_job'} <= names
     assert 'approve_and_deploy_commit' not in names
-    candidate = tools.create(ARGS['inspect_paths'], ARGS['targeted_tests'])
+    candidate = tools.create(ARGS['inspect_paths'], ARGS['targeted_tests'], project_id='jarvis-core')
     assert candidate.state == 'passed'
     assert 'src/permissions.py' in json.loads(candidate.evidence)['files_changed']
     with pytest.raises(EscalationRequired) as caught:
+        tools.goal = 'Apply candidate ' + candidate.candidate_id
         tools.apply(candidate.candidate_id)
     assert caught.value.decision.escalation == ['authority_expansion']
     assert tree_bytes(source) == before

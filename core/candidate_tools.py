@@ -161,7 +161,7 @@ always requires approval for the exact commit and verified release evidence.
                  if p['project_id'] in self.ambiguous_projects]
         return 'Which project should I focus on: ' + ' or '.join(names) + '?'
 
-    def _service(self, project_id=None, candidate_id=None):
+    def _service(self, project_id=None, candidate_id=None, *, stored_only=False):
         if self.production:
             from .candidate_bridge import CandidateClient
             return CandidateClient(self.goal, self.source_context, engineering_action=self.engineering_action)
@@ -172,6 +172,8 @@ always requires approval for the exact commit and verified release evidence.
             from .candidate_broker import Broker
             service = SelfEditService(self.database)
             Broker(service).check_source()
+        if stored_only:
+            return service
         from .engineering_repository import development_service
         return development_service(service, project_id, candidate_id=candidate_id)
 
@@ -198,10 +200,11 @@ always requires approval for the exact commit and verified release evidence.
     def create(self, inspect_paths, targeted_tests, project_id=None):
         if 'create' not in self.allowed or self.created:
             raise ToolDenied('One candidate per explicit request')
+        from .engineering_decision import resolve_project, submission_decision
+        project_id = resolve_project(self.project_reference, self.projects, project_id)
         if not self.production:
-            from .engineering_decision import submission_decision
-            submission_decision(self.database, self.goal, task_id=(self.source_context or {}).get('task_id'))
-        project_id = project_id or self.project_id
+            submission_decision(self.database, self.goal, project_id=project_id,
+                task_id=(self.source_context or {}).get('task_id'))
         self.created = True  # Bound duplicate execution, not owner authority.
         if self.production:
             record = self._service().invoke('create', dict(inspect_paths=inspect_paths,
@@ -214,6 +217,8 @@ always requires approval for the exact commit and verified release evidence.
 
     def prepare(self, provider='codex', scope='code', project_id=None):
         require_owner(self.authority)
+        from .engineering_decision import resolve_project
+        project_id = resolve_project(self.project_reference, self.projects, project_id)
         if self.created:
             raise ToolDenied('Engineering preparation unavailable')
         if self.engineering_action is None:
@@ -250,7 +255,8 @@ always requires approval for the exact commit and verified release evidence.
             self.engineering_action = EngineeringAction(provider=provider, scope='code',
                 task_id=self.source_context['task_id'], conversation_id=self.source_context['conversation_id'],
                 goal_digest=goal_digest(self.goal))
-        project_id = project_id or self.project_id
+        from .engineering_decision import resolve_project
+        project_id = resolve_project(self.project_reference, self.projects, project_id)
         self.created = True
         if self.engineering_action:
             from .engineering_jobs import EngineeringJobs, project_job
@@ -266,7 +272,7 @@ always requires approval for the exact commit and verified release evidence.
             return JobEvidence(jobs=[record])
         options = ({'engineering_action': self.engineering_action.model_dump()}
                    if self.engineering_action and not self.production else {})
-        record = self._service().engineer(self.goal, inspect_paths, targeted_tests, problem_detected, hypothesis, **options)
+        record = self._service(project_id).engineer(self.goal, inspect_paths, targeted_tests, problem_detected, hypothesis, **options)
         self.ids.add(record['id'])
         return self._record(record)
 
@@ -305,6 +311,10 @@ always requires approval for the exact commit and verified release evidence.
         require_owner(self.authority)
         if action not in {'inspect', 'tests', 'review', 'discard'}:
             raise ToolDenied('Unsupported candidate operation')
+        if action == 'inspect':
+            service = self._service(stored_only=True)
+            return self._record(service.inspect(candidate_id) if self.production else
+                service.store.get(candidate_id, recover=False))
         service = self._service(candidate_id=candidate_id)
         handlers = {'inspect': service.inspect, 'tests': service.tests,
                     'review': service.review, 'discard': service.discard}

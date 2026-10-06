@@ -83,7 +83,7 @@ class SelfState:
                 cid = job.get('candidate_id')
                 if not valid_id(cid): continue
                 try:
-                    service = self.candidates._service()
+                    service = self.candidates._service(stored_only=True)
                     # Production reuses explicit inspection evidence; collecting state never acquires candidate leases.
                     live['candidate_records'][cid] = (getattr(self.candidates,'records',{}).get(cid) if self.candidates.production else
                                                        service.store.get(cid, internal=True, recover=False)) or {}

@@ -108,9 +108,9 @@ class EngineeringJobs:
         if not all(valid_id(context.get(key)) for key in ('task_id', 'conversation_id')):
             raise ToolDenied('Invalid job source')
         args = EngineeringArguments.model_validate(arguments).model_dump(exclude_none=True)
-        from .engineering_decision import associate
+        from .engineering_decision import resolve_project
         from .engineering_portfolio import Portfolio
-        project_id = associate(goal, Portfolio(self.database).projects(), args.get('project_id'))
+        project_id = resolve_project(goal, Portfolio(self.database).projects(), args.get('project_id'))
         policy = CandidatePolicy()
         for path in args['inspect_paths']:
             policy.edit_path(path)
@@ -144,7 +144,7 @@ class EngineeringJobs:
                     raise ToolDenied('Engineering job source mismatch')
                 return self.get(job['id'])
             job = dict(id=str(uuid4()), type='engineering', goal=goal, source=source,
-                project_id=project_id or decision['project_id'], decision=decision,
+                project_id=project_id, decision=decision,
                 status='queued', provider=action.provider, created_at=timestamp(), started_at=None,
                 completed_at=None, current_stage='queued', attempts=0, candidate_id=None,
                 candidate_ids=[], test_result=[], review_result=None, error=None,

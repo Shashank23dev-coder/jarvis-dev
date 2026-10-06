@@ -13,7 +13,7 @@ from tools import RepositoryTools, ToolRegistry, CommandResult
 from test_agent import ScriptedModel, call, final
 from test_self_edit import setup, tree_bytes, propose, REVIEW
 
-ARGS = {'inspect_paths': ['src/app.py'], 'targeted_tests': ['tests/test_app.py']}
+ARGS = {'inspect_paths': ['src/app.py'], 'targeted_tests': ['tests/test_app.py'], 'project_id': 'jarvis-core'}
 GOAL = 'Please improve your own code: fix the value in src/app.py.'
 
 
@@ -80,7 +80,7 @@ def test_unsuccessful_candidates_are_reported_truthfully(setup, kind):
 
 def test_manage_scope_rerun_review_discard_and_restart(setup):
     _, database, factory = setup
-    candidate = factory().start(GOAL, **ARGS)
+    candidate = factory().start(GOAL, **{k: v for k, v in ARGS.items() if k != 'project_id'})
     identifier = candidate['id']
     database.close()
     for goal, name, state in [
@@ -112,7 +112,7 @@ def test_mutating_tools_unavailable_even_when_authorized(setup, name):
 
 def test_candidate_ids_and_arguments_cannot_expand_authority(setup):
     _, database, factory = setup
-    existing = factory().start(GOAL, **ARGS)
+    existing = factory().start(GOAL, **{k: v for k, v in ARGS.items() if k != 'project_id'})
     model = ScriptedModel(call('review_self_edit_candidate', {'candidate_id': existing['id']}),
                           call('create_self_edit_candidate', dict(ARGS, goal='override', seconds=999), 'second'),
                           final('Denied'))

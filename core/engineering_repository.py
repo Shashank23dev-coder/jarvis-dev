@@ -183,8 +183,8 @@ def bind_project_tools(tools, registry):
     def selected():
         if tools.ambiguous_projects:
             raise ToolDenied('Choose a project before inspecting its source', reason='project_ambiguous')
-        if not tools.project_id and not tools.portfolio_observed:
-            raise ToolDenied('Project catalog could not be observed', reason='project_context_unavailable')
+        if not tools.project_id:
+            raise ToolDenied('Choose a registered project', reason='unknown_project' if tools.portfolio_observed else 'project_context_unavailable')
         return tools.project_id
     definitions['inspect_project_repository'] = ToolDefinition(
         'Inspect trusted registered project source or run isolated pytest. Roots come from Portfolio metadata; relative paths only. Capability inventory and baseline drift are observations. Tests run without host runtime or secrets.',
@@ -252,6 +252,14 @@ def development_service(service, project_id=None, *, candidate_id=None):
         if not record:
             raise ToolDenied('Candidate unavailable')
         project_id = record.get('source_context', {}).get('project_id')
+        if project_id is None:
+            # Legacy evidence has no project ID. Only a unique registered root
+            # can authorize further operations; never infer Jarvis by default.
+            matches = [p['project_id'] for p in Portfolio(service.store.database).projects()
+                       if p.get('repository') == record.get('source_root')]
+            project_id = matches[0] if len(matches) == 1 else None
+    if project_id is None:
+        raise ToolDenied('Choose a registered project', reason='unknown_project')
     selected = service
     if project_id:
         evidence, repository = resolve_repository(service.store.database, project_id)

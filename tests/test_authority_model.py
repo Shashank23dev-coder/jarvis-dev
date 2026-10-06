@@ -111,7 +111,7 @@ def test_direct_job_creation_without_prepare_or_capability_approval(setup):
 
 def test_broker_workspace_is_discovery_not_permission(setup):
     source, _, factory = setup
-    raw = request('workspace', 'Fix a small bug', {})
+    raw = request('workspace', 'Fix a small bug in Jarvis', {})
     result = Broker(factory(), source=source).execute(raw)
     assert 'src/app.py' in result['editable_paths']
 
@@ -189,3 +189,49 @@ def test_research_adapter_uses_bounded_provider_search(monkeypatch):
     assert 'Framework comparison' in research_web('Compare public agent frameworks')
     assert calls[0]['tools'] == [{'type': 'web_search'}] and calls[0]['tool_choice'] == 'required'
     assert calls[0]['store'] is False
+
+
+@pytest.mark.parametrize('goal', ['Fix the order bug', 'Fix an unregistered widget',
+    'Fix Jarvis and CreatorOS', 'Jarvis fix the order bug in an unknown project'])
+def test_unresolved_projects_fail_before_candidate_or_job_creation(setup, goal):
+    from core.engineering_repository import development_service
+    from core.engineering_decision import submission_decision
+    from test_engineering import ARGS
+    source, database, factory = setup
+    broker = Broker(factory(), source=source)
+    before = git(source, 'status', '--porcelain')
+    for action, arguments in [('workspace', {}), ('create', dict(inspect_paths=['src/app.py'], targeted_tests=['tests/test_app.py'])),
+            ('engineer', ARGS), ('job_create', ARGS)]:
+        with pytest.raises(ToolDenied):
+            broker.execute(request(action, goal, arguments))
+    with pytest.raises(ToolDenied):
+        CandidateTools(goal, database, lambda _: factory()).create(['src/app.py'], ['tests/test_app.py'])
+    with pytest.raises(ToolDenied):
+        development_service(factory(), None)
+    with pytest.raises(ToolDenied):
+        submission_decision(database, goal)
+    assert EngineeringJobs(database).recent() == []
+    with database.transaction() as db:
+        assert db.execute('SELECT COUNT(*) FROM candidates').fetchone()[0] == 0
+    assert git(source, 'status', '--porcelain') == before
+
+
+def test_addressing_jarvis_does_not_select_it_over_named_project(setup):
+    from core.engineering_decision import resolve_project
+    from core.engineering_portfolio import Portfolio
+    assert resolve_project('Jarvis fix the order bug in the trading bot',
+        Portfolio(setup[1]).projects()) == 'trading-bot'
+
+
+def test_legacy_candidate_remains_readable_after_registration_removed(setup):
+    from core.engineering_portfolio import Portfolio
+    source, database, factory = setup
+    candidate = start(factory())
+    portfolio = Portfolio(database)
+    jarvis = next(p for p in portfolio.projects() if p['project_id'] == 'jarvis-core')
+    portfolio.register_project(jarvis | dict(repository=None), replace=True)
+    assert Broker(factory(), source=source).execute(request('inspect', 'Show evidence',
+        {'candidate_id': candidate['id']}))['id'] == candidate['id']
+    assert CandidateTools('Show evidence', database, lambda _: factory()).action('inspect', candidate['id']).candidate_id == candidate['id']
+    with pytest.raises(ToolDenied):
+        CandidateTools('Test it', database, lambda _: factory()).action('tests', candidate['id'])

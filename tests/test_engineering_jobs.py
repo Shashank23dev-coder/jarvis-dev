@@ -17,7 +17,7 @@ from test_self_edit import setup, tree_bytes
 from test_engineering import ARGS, model, run_checks
 
 
-def enqueue(database, goal='Fix the value', **changes):
+def enqueue(database, goal='Fix the value in Jarvis', **changes):
     context = dict(task_id=str(uuid4()), conversation_id=str(uuid4()))
     action = EngineeringAction(provider='codex', scope='code', goal_digest=goal_digest(goal), **context)
     return EngineeringJobs(database).create(goal, action.model_dump(), ARGS | changes, context)
@@ -154,7 +154,7 @@ def test_broker_queue_and_conversation_scope(setup, monkeypatch):
     source, db, factory = setup
     monkeypatch.setenv('JARVIS_MODE', 'development')
     broker = Broker(factory(), source=source)
-    raw = request('job_create', 'Fix the value', ARGS)
+    raw = request('job_create', 'Fix the value in Jarvis', ARGS)
     raw['engineering_action'] = bound(raw).model_dump()
     job = broker.execute(raw)
     assert job['status'] == 'queued'

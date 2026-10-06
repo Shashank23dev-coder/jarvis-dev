@@ -34,13 +34,13 @@ def test_job_project_association_projection_and_reopen(setup):
     assert EngineeringJobs(db).get(job['id'])['project_id'] == 'jarvis-core'
 
 
-def test_unknown_project_default_is_valid_and_explicit_unknown_rejected(setup):
+def test_unknown_project_default_and_explicit_unknown_are_rejected(setup):
     _, db, _ = setup
-    job = enqueue(db)
-    assert job['project_id'] is None and 'project_id' not in job['arguments']
+    with pytest.raises(ToolDenied):
+        enqueue(db, goal='Fix an unknown project')
     with pytest.raises(ToolDenied):
         enqueue(db, project_id='unregistered')
-    assert len(EngineeringJobs(db).recent()) == 1
+    assert EngineeringJobs(db).recent() == []
 
 
 def test_legacy_missing_fields_idempotent_and_worker_compatible(setup, monkeypatch):
@@ -57,7 +57,8 @@ def test_legacy_missing_fields_idempotent_and_worker_compatible(setup, monkeypat
     assert project_job(old)['project_id'] is None and project_job(old)['decision'] is None
     monkeypatch.setenv('JARVIS_MODE', 'development')
     result = EngineeringWorker(factory(model=model, tester=run_checks), source=source).once()
-    assert result['status'] == 'completed'
+    assert result['status'] == 'blocked'
+    assert result['candidate_id'] is None
 
 
 def test_project_reference_is_candidate_context_never_root(setup, monkeypatch):
@@ -78,9 +79,15 @@ def test_project_reference_is_candidate_context_never_root(setup, monkeypatch):
 def test_no_speculative_job_and_refused_rationale_is_persistent(setup, goal, outcome):
     source, db, _ = setup
     before = tree_bytes(source)
-    job = enqueue(db, goal=goal)
-    assert job['status'] == 'queued' and tree_bytes(source) == before
-    assert Decisions(db).recent()[0]['outcome'] == outcome
+    if goal in {'Add Claude support', 'Build CreatorOS'}:
+        with pytest.raises(ToolDenied):
+            enqueue(db, goal=goal)
+    else:
+        job = enqueue(db, goal=goal)
+        assert job['project_id'] != 'jarvis-core'
+        assert Decisions(db).recent()[0]['outcome'] == outcome
+    assert tree_bytes(source) == before
+
 
 
 def test_runtime_includes_closed_portfolio_and_decisions(setup):
@@ -129,7 +136,7 @@ def test_prior_missing_information_cannot_be_bypassed_by_queue_call(setup):
     assert decision.outcome == 'NEED_MORE_INFORMATION'
     from core.candidate_action import EngineeringAction, goal_digest
     action = EngineeringAction(provider='codex', scope='code', goal_digest=goal_digest(job_goal), **context)
-    job = EngineeringJobs(db).create(job_goal, action.model_dump(), ARGS, context)
+    job = EngineeringJobs(db).create(job_goal, action.model_dump(), ARGS | {'project_id': 'jarvis-core'}, context)
     assert job['status'] == 'queued'
     assert job['decision']['outcome'] == 'NEED_MORE_INFORMATION'
 
@@ -143,7 +150,7 @@ def test_explicit_build_decision_keeps_relevant_and_required_distinct(setup):
     assert decision.outcome == 'BUILD' and decision.capability_ids and not decision.required_capabilities
     from core.candidate_action import EngineeringAction, goal_digest
     action = EngineeringAction(provider='codex', scope='code', goal_digest=goal_digest(goal), **context)
-    job = EngineeringJobs(db).create(goal, action.model_dump(), ARGS, context)
+    job = EngineeringJobs(db).create(goal, action.model_dump(), ARGS | {'project_id': 'jarvis-core'}, context)
     assert job['project_id'] == 'jarvis-core' and job['decision']['outcome'] == 'BUILD'
 
 

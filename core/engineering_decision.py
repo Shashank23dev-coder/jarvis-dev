@@ -45,7 +45,8 @@ class Decision(StrictModel):
 def project_matches(goal, projects):
     """Names/IDs from registration identify context, never repository paths."""
     text = re.sub(r'^\s*jarvis\s*[:,]\s*', '', goal.casefold())
-    aliases = {'jarvis-core': ('jarvis',), 'trading-bot': ('trading bot',),
+    text = re.sub(r'^jarvis\s+(?=(?:fix|inspect|check|build|repair)\b)', '', text)
+    aliases = {'jarvis-core': ('jarvis', 'jarvisbrain', 'your own code', 'your code', 'your own repository', 'your repository', 'self-edit'), 'trading-bot': ('trading bot',),
                'creator-os': ('creatoros', 'creator os')}
     matches = []
     for project in projects:
@@ -72,13 +73,22 @@ def associate(goal, projects, explicit=None):
     ids = {p['project_id'] for p in projects}
     if explicit:
         if explicit not in ids:
-            raise ToolDenied('Unknown portfolio project')
+            raise ToolDenied('Unknown portfolio project', reason='unknown_project')
         return explicit
     matches = set(project_matches(goal, projects))
     # "Connect trading bot to Jarvis" refers to the external project.
     if len(matches) > 1 and re.search(r'\b(?:connect|integrate|link)\b', goal, re.I):
         matches.discard('jarvis-core')
     return next(iter(matches)) if len(matches) == 1 else None
+
+
+def resolve_project(goal, projects, explicit=None):
+    """Mutation/preparation selector: an unresolved identity never means Jarvis."""
+    project_id = associate(goal, projects, explicit)
+    if project_id is None:
+        raise ToolDenied('Which registered project should I work on?',
+            reason='project_ambiguous' if len(project_matches(goal, projects)) > 1 else 'unknown_project')
+    return project_id
 
 
 class Decisions:
@@ -121,6 +131,8 @@ class Decisions:
         outcome, rationale = 'NEED_MORE_INFORMATION', 'The goal does not establish a specific existing operation, integration boundary or engineering change.'
         if unknown_project:
             rationale = 'The requested project is not registered; identify its authoritative identity and location before engineering.'
+        elif project is None and not reuse:
+            rationale = 'Which registered project should I work on? The target is unknown or ambiguous.'
         elif metadata and not required:
             outcome, rationale = 'USE_EXISTING', 'Use registered project metadata and current capability observations; report unknown location or runtime without inventing them.'
         elif project and project['status'] == 'needs_discovery':
@@ -146,6 +158,8 @@ class Decisions:
                 outcome, rationale = 'USE_EXISTING', 'All requested capabilities have fresh usable evidence within this project scope.'
             else:
                 rationale = 'Existing capabilities are unavailable, unproven or outside the project scope; resolve those conditions before execution.'
+        elif project and project['read_only'] and project['status'] == 'unproven' and not engineering:
+            rationale = 'Source inspection and isolated candidates are available; clarify the intended change and owner approval before applying to this read-only, unproven project.'
         elif engineering or re.search(r'\b(?:fix|build|implement|create|add|change|improve|update|repair)\b', text):
             outcome, rationale = 'BUILD', 'A specific engineering change was requested; preserve existing systems and use the controlled candidate workflow in configured dev.'
         relevant = required or (['codex-engineering', 'claude-code-engineering', 'engineering-jobs', 'repo-files', 'testing', 'independent-review'] if outcome == 'BUILD' else [])
@@ -182,11 +196,16 @@ def preflight(database, goal, *, project_id=None, required_capabilities=(), task
 def submission_decision(database, goal, *, task_id=None, project_id=None):
     previous = next((d for d in Decisions(database).recent(task_id=task_id)
                      if d['goal_digest'] == goal_digest(goal) and valid_id(task_id)), None)
-    decision = preflight(database, goal, project_id=project_id or (previous or {}).get('project_id'),
+    decision = preflight(database, goal, project_id=project_id,
         required_capabilities=(previous or {}).get('required_capabilities', []),
         task_id=task_id, engineering=previous is None)
-    # Advisory evidence is not an additional permission layer. Actual adapters
-    # resolve the registered root and report unavailable prerequisites locally.
+    if decision['project_id'] is None:
+        raise ToolDenied('Which registered project should I work on?', reason='unknown_project')
+    project = next(p for p in Portfolio(database).projects() if p['project_id'] == decision['project_id'])
+    if not project.get('repository'):
+        raise ToolDenied('Registered project source is unavailable', reason='project_context_unavailable')
+    # Usability observations remain advisory for isolated preparation, but a
+    # missing registered identity is always a hard stop.
     return decision
 
 

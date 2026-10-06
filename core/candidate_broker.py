@@ -97,15 +97,18 @@ class Broker:
             from .engineering_repository import development_service
             from .candidate_tools import PrepareEngineeringArguments
             args = PrepareEngineeringArguments(**request.arguments)
-            service = development_service(self.service, args.project_id)
+            from .engineering_decision import resolve_project
+            from .engineering_portfolio import Portfolio
+            project_id = resolve_project(request.goal, Portfolio(self.database).projects(), args.project_id)
+            service = development_service(self.service, project_id)
             result = service.engineering_workspace(request.engineering_action.scope if request.engineering_action else args.scope)
             result['provider'] = request.engineering_action.provider if request.engineering_action else args.provider
             return result
         if request.action in {'create', 'engineer'}:
-            from .engineering_decision import associate
+            from .engineering_decision import resolve_project
             from .engineering_portfolio import Portfolio
             from .engineering_repository import development_service
-            project_id = associate(request.goal, Portfolio(self.database).projects(), request.arguments.get('project_id'))
+            project_id = resolve_project(request.goal, Portfolio(self.database).projects(), request.arguments.get('project_id'))
             service = development_service(self.service, project_id)
             # Durable idempotency by source task, including crash/retry requests.
             with service.store.database.transaction() as db:
@@ -132,6 +135,11 @@ class Broker:
             record = handler(request.goal, **arguments, source_context=context, **options)
         else:
             identifier = request.arguments['candidate_id']
+            if request.action == 'inspect':
+                existing = self.service.store.get(identifier, recover=False)
+                if not existing:
+                    raise ToolDenied('Candidate unavailable')
+                return project(existing)
             from .engineering_repository import development_service
             service = development_service(self.service, candidate_id=identifier)
             existing = service.store.get(identifier, internal=True)
