@@ -12,13 +12,14 @@ from core.brain import BrainSettings, JarvisBrain
 from core.candidate_bridge import project
 from core.candidate_provider import EngineeringProviders, ProposalProvider
 from core.candidate_tools import CandidateTools
+from core.engineering_authority import EscalationRequired
 from core.self_edit import REVIEW, Limits
 from core.task_store import TaskStore
 from models.provider import ProviderRegistry
 from tools import CommandResult, RepositoryTools, ToolRegistry
 from test_agent import call, final
 from test_brain import ScriptedProvider
-from test_self_edit import setup, tree_bytes, git
+from test_self_edit import setup, tree_bytes, git, propose
 
 
 ARGS = dict(inspect_paths=['src/app.py'], targeted_tests=['tests/test_app.py'],
@@ -234,6 +235,7 @@ def test_engineering_budget_and_shared_one_candidate_limit(setup):
 
 def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(setup):
     source, database, factory = setup
+    before = tree_bytes(source)
     store = TaskStore(database.path)
     task = store.create_task('Diagnose and fix the incorrect value')
     provider = ScriptedProvider(call('prepare_engineering', {'provider': 'codex'}),
@@ -244,26 +246,51 @@ def test_brain_decides_to_invoke_engineering_and_reports_authoritative_evidence(
     brain = JarvisBrain(runner, settings=BrainSettings(True, 'local'), providers=ProviderRegistry([provider]))
     outcome = brain.run(task['goal'], task_id=task['id'], task_store=store)
     assert 'queued' in outcome.response and 'Deployed!' not in outcome.response
-    assert 'separate human' in outcome.response
+    assert 'Queued for isolated development, tests and independent review.' in outcome.response
+    assert 'Consequential promotion and production deployment require approval.' in outcome.response
     from core.engineering_jobs import EngineeringJobs
     from core.engineering_worker import EngineeringWorker
     job = EngineeringJobs(store.database).recent()[0]
     assert job['id'] in outcome.response
     result = EngineeringWorker(factory(model=model, tester=run_checks), source=source).once()
-    assert result['status'] == 'waiting_for_approval'
+    assert result['status'] == 'completed'
+    candidate = factory().inspect(result['candidate_id'])
+    assert candidate['state'] == 'passed'
+    with database.transaction() as db:
+        assert all(json.loads(row['record']).get('apply') is None
+                   for row in db.execute('SELECT record FROM candidates'))
+    assert tree_bytes(source) == before
     names = {tool['name'] for tool in provider.requests[0].tools}
-    assert 'prepare_engineering' in names and 'engineer_candidate' not in names
+    assert {'prepare_engineering', 'engineer_candidate', 'create_engineering_job'} <= names
     assert 'engineer_candidate' in {tool['name'] for tool in provider.requests[2].tools}
     assert 'Do not ask for another user request' in provider.requests[2].input[-1]['content']
-    assert not names & {'approve_and_apply_candidate', 'approve_and_deploy_commit'}
+    # Apply exposure follows the routine-apply contract; authority-path applies still escalate.
+    assert all('approve_and_deploy_commit' not in {tool['name'] for tool in request.tools}
+               for request in provider.requests)
 
 
 @pytest.mark.parametrize('goal', ['Hello', 'Explain the bug', 'Fix the bug but only plan',
                                 'Diagnose the problem without changes', 'Do not edit anything'])
-def test_engineering_denied_without_current_task_authority(setup, goal):
-    _, database, _ = setup
-    tools = CandidateTools(goal, database, engineering=True)
-    assert 'engineer' not in tools.allowed
+def test_isolated_engineering_available_regardless_of_goal_with_promotion_gated(setup, goal):
+    source, database, factory = setup
+    before = tree_bytes(source)
+    def author(payload, instructions, timeout):
+        result = propose(payload, instructions, timeout)
+        if instructions != REVIEW:
+            result['edits'].append(dict(path='src/permissions.py', content='can_edit = True\n'))
+        return result
+    tools = CandidateTools(goal, database, lambda db: factory(model=author), engineering=True)
+    assert {'create', 'engineer'} <= tools.allowed
+    names = {tool['name'] for tool in tools.bind(ToolRegistry()).model_tools()}
+    assert {'create_self_edit_candidate', 'engineer_candidate', 'create_engineering_job'} <= names
+    assert 'approve_and_deploy_commit' not in names
+    candidate = tools.create(ARGS['inspect_paths'], ARGS['targeted_tests'])
+    assert candidate.state == 'passed'
+    assert 'src/permissions.py' in json.loads(candidate.evidence)['files_changed']
+    with pytest.raises(EscalationRequired) as caught:
+        tools.apply(candidate.candidate_id)
+    assert caught.value.decision.escalation == ['authority_expansion']
+    assert tree_bytes(source) == before
 
 
 def test_separate_provider_contract_and_role_routing():
