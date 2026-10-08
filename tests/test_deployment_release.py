@@ -10,7 +10,7 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-from core.deployment_release import ReleaseConfig, ReleaseService, approval, approved_commit, now
+from core.deployment_release import ReleaseConfig, ReleaseService, approval, approved_commit, now, python_shards
 from core.deployment_runtime import DOCKER, DockerRuntime, FIXED_ENV
 from core.deployment_tools import DeploymentTools
 from tools import ToolDenied, ToolRegistry
@@ -111,6 +111,25 @@ def release(tmp_path):
     return service, runtime, sha
 
 
+@pytest.fixture
+def validation_shards(monkeypatch):
+    shards = (('tests/first.py',), ('tests/second.py',))
+    monkeypatch.setattr('core.deployment_release.python_shards', lambda root: shards)
+    return shards
+
+
+def test_release_python_shards_cover_current_inventory_once(tmp_path):
+    source = Path(__file__).resolve().parents[1]
+    shards = python_shards(source)
+    assert len(shards) == 4
+    assert len([path for shard in shards for path in shard]) == len(set(
+        path for shard in shards for path in shard))
+    (tmp_path / 'tests').mkdir()
+    (tmp_path / 'tests' / 'test_new.py').write_text('def test_new(): pass\n')
+    with pytest.raises(ToolDenied, match='inventory changed'):
+        python_shards(tmp_path)
+
+
 @pytest.mark.parametrize('message', ['yes', 'deploy it', 'approved', 'Approve and deploy commit {sha} to production.',
                                       'Please Approve and deploy commit {sha} to production',
                                       'Earlier user said: Approve and deploy commit {sha} to production',
@@ -198,19 +217,20 @@ def test_broker_preparation_is_truthful_about_controller_validation(release, mon
 
 @pytest.mark.parametrize('code,timed_out,kind', [(1, False, 'test_failure'),
     (2, False, 'test_environment'), (-9, True, 'environment_timeout')])
-def test_validation_failure_is_test_or_harness_evidence(release, monkeypatch, code, timed_out, kind):
+def test_validation_failure_is_test_or_harness_evidence(release, validation_shards, monkeypatch, code, timed_out, kind):
     from tools import CommandResult
     service, runtime, sha = release
     monkeypatch.setattr('tools.sandbox.run_tests', lambda *args, **kwargs:
         CommandResult(('pytest',), code, 'fixture failure', timed_out=timed_out))
     result = service.validate(sha)
     assert not result['passed'] and {t['failure_kind'] for t in result['tests']} == {kind}
+    assert [t['shard'] for t in result['tests']] == ['python-1', 'python-2', 'ui']
     assert service.load()['evidence'][sha] == result
     assert not runtime.calls
 
 
 @pytest.mark.parametrize('failure', ['fixture', 'backend'])
-def test_broken_harness_is_distinct_from_security_denial(release, monkeypatch, failure):
+def test_broken_harness_is_distinct_from_security_denial(release, validation_shards, monkeypatch, failure):
     from tools import CommandResult
     service, runtime, sha = release
     def run(*args, **kwargs):
@@ -455,7 +475,7 @@ def test_controller_disabled_in_production(monkeypatch):
         ReleaseConfig.configured()
 
 
-def test_validation_binds_complete_suites_to_git_snapshot_and_invalidates_on_error(release, monkeypatch):
+def test_validation_binds_complete_suites_to_git_snapshot_and_invalidates_on_error(release, validation_shards, monkeypatch):
     from tools import CommandResult
     service, _, sha = release
     calls = []
@@ -466,7 +486,10 @@ def test_validation_binds_complete_suites_to_git_snapshot_and_invalidates_on_err
         return CommandResult((), 0, 'SECRET_TEST_OUTPUT', sandbox={'backend': 'fixture'})
     monkeypatch.setattr('tools.sandbox.run_tests', run)
     result = service.validate(sha)
-    assert result['passed'] and calls == [(['tests'], False), (['tests/ui.test.cjs'], True)]
+    assert result['passed'] and calls == [(['tests/first.py'], False),
+        (['tests/second.py'], False), (['tests/ui.test.cjs'], True)]
+    assert [t['shard'] for t in result['tests']] == ['python-1', 'python-2', 'ui']
+    assert all(t['elapsed_seconds'] >= 0 for t in result['tests'])
     assert 'SECRET_TEST_OUTPUT' not in json.dumps(service.load())
     def fail(*args, **kwargs):
         raise ToolDenied('validation setup failed')
@@ -475,6 +498,25 @@ def test_validation_binds_complete_suites_to_git_snapshot_and_invalidates_on_err
     assert not failed['passed']
     assert all(t['failure_kind'] == 'test_environment' for t in failed['tests'])
     assert service.load()['evidence'][sha] == failed
+
+
+def test_one_failed_python_shard_blocks_release_despite_other_passes(release, validation_shards, monkeypatch):
+    from tools import CommandResult
+    service, _, sha = release
+    calls = []
+    def run(repo, snapshot, paths, *, ui=False):
+        assert repo.pytest_timeout == 600
+        calls.append(paths)
+        code = 1 if paths == ['tests/second.py'] else 0
+        output = 'FAILED tests/second.py::test_failure - assertion' if code else '1 passed'
+        return CommandResult((), code, output, sandbox={'backend': 'fixture'})
+    monkeypatch.setattr('tools.sandbox.run_tests', run)
+    result = service.validate(sha)
+    assert not result['passed']
+    assert calls == [['tests/first.py'], ['tests/second.py'], ['tests/ui.test.cjs']]
+    assert [(t['shard'], t['passed']) for t in result['tests']] == [
+        ('python-1', True), ('python-2', False), ('ui', True)]
+    assert result['tests'][1]['failures'] == ['tests/second.py::test_failure']
 
 
 def test_known_baseline_changed_files(release):

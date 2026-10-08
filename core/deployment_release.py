@@ -14,12 +14,45 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 from uuid import uuid4
 
 from tools.policy import ToolDenied
 
 SHA = re.compile(r'[0-9a-f]{40}')
 TERMINAL = {'deployed', 'rolled_back', 'failed', 'rollback_failed'}
+
+# Fixed, disjoint file groups keep each Python run within the existing 600 s
+# sandbox deadline. A changed test inventory fails closed until it is assigned.
+PYTHON_SHARDS = (
+    ('tests/test_candidate_apply.py', 'tests/test_experience.py',
+     'tests/test_sandbox_docker.py', 'tests/test_sandbox_imports.py'),
+    ('tests/test_assistant_experience.py', 'tests/test_self_edit.py',
+     'tests/test_candidate_bridge.py'),
+    ('tests/test_owner_readonly_flow.py', 'tests/test_engineering.py',
+     'tests/test_tools.py', 'tests/test_authority_acceptance.py',
+     'tests/test_candidate_tools.py', 'tests/test_authority_model.py',
+     'tests/test_engineering_authority.py', 'tests/test_deployment_release.py',
+     'tests/test_brain_status.py'),
+    ('tests/test_engineering_jobs.py', 'tests/test_project_repository.py',
+     'tests/test_brain.py', 'tests/test_deployment.py',
+     'tests/test_engineering_providers.py', 'tests/test_recall.py',
+     'tests/test_portfolio_integration.py', 'tests/test_self_state.py',
+     'tests/test_engineering_action.py', 'tests/test_persistence.py',
+     'tests/test_engineering_portfolio.py', 'tests/test_api.py',
+     'tests/test_agent.py', 'tests/test_deployment_status.py',
+     'tests/test_experience_evaluation.py', 'tests/test_openai_client.py',
+     'tests/test_registry.py'),
+)
+
+
+def python_shards(root):
+    assigned = [path for shard in PYTHON_SHARDS for path in shard]
+    discovered = [path.relative_to(root).as_posix()
+                  for path in (root / 'tests').rglob('test_*.py')]
+    if len(assigned) != len(set(assigned)) or sorted(assigned) != sorted(discovered):
+        raise ToolDenied('Release Python test inventory changed; assign every test file to one shard')
+    return PYTHON_SHARDS
 
 # Test fixtures construct secret markers at runtime; production context has no fixture exemptions.
 
@@ -208,19 +241,36 @@ class ReleaseService:
                 self.snapshot(sha, root)
                 results = []
                 repository = RepositoryTools(root, pytest_timeout=600)
-                for phase, paths, ui in [('python', ['tests'], False), ('ui', ['tests/ui.test.cjs'], True)]:
+                try:
+                    shards = python_shards(root)
+                except ToolDenied:
+                    shards = ()
+                    results.append(dict(phase='python', shard='inventory', paths=[], passed=False,
+                                        returncode=None, sandbox=None, summary=[],
+                                        failure_kind='test_inventory_changed'))
+                phases = [(f'python-{number}', list(paths), False)
+                          for number, paths in enumerate(shards, 1)]
+                phases.append(('ui', ['tests/ui.test.cjs'], True))
+                for shard, paths, ui in phases:
                     from tools.policy import ToolError
+                    started = time.monotonic()
                     try:
                         result = run_tests(repository, root, paths, ui=ui)
                     except (ToolError, OSError):
                         # Context security checks above have already passed.
                         # An unavailable test backend is validation evidence,
                         # never a claim that the production source is unsafe.
-                        results.append(dict(phase=phase, passed=False, returncode=None,
-                            sandbox=None, summary=[], failure_kind='test_environment'))
+                        results.append(dict(phase='ui' if ui else 'python', shard=shard,
+                            paths=paths, elapsed_seconds=round(time.monotonic() - started, 2),
+                            passed=False, returncode=None, sandbox=None, summary=[],
+                            failure_kind='test_environment'))
                         continue
                     summary = re.findall(r'(?:\d+ (?:passed|failed|skipped|errors?)\b|# (?:tests|pass|fail|skipped) \d+)', result.stdout)
-                    results.append(dict(phase=phase, passed=not (result.returncode or result.timed_out or result.truncated),
+                    failures = re.findall(r'(?m)^(?:FAILED|ERROR) (tests/[A-Za-z0-9_./:-]+)', result.stdout)
+                    results.append(dict(phase='ui' if ui else 'python', shard=shard,
+                                        paths=paths, elapsed_seconds=round(time.monotonic() - started, 2),
+                                        failures=failures[:20],
+                                        passed=not (result.returncode or result.timed_out or result.truncated),
                                         returncode=result.returncode, sandbox=result.sandbox,
                                         summary=summary[-8:],
                                         failure_kind=('environment_timeout' if result.timed_out else
