@@ -80,6 +80,27 @@ def test_expired_validation_is_not_reported_fresh(snapshot):
     assert configured_inspector().preview(SHA)['evidence']['fresh'] is False
 
 
+def test_status_shows_each_python_batch_ui_and_inventory_failure(snapshot):
+    data = json.loads(snapshot.read_text())
+    data['history'][0]['evidence']['tests'] = [
+        dict(phase='python', shard='python-1', passed=True, failure_kind=None),
+        dict(phase='python', shard='python-2', passed=True, failure_kind=None),
+        dict(phase='python', shard='python-3', passed=False, failure_kind='test_failure',
+             stdout='SECRET_OUTPUT'),
+        dict(phase='ui', shard='ui', passed=True, failure_kind=None),
+        dict(phase='python', shard='inventory', passed=False,
+             failure_kind='test_inventory_changed'),
+    ]
+    snapshot.write_text(json.dumps(data))
+    tests = configured_inspector().status()['latest']['evidence']['tests']
+    assert [(test['shard'], test['passed'], test['failure_kind']) for test in tests] == [
+        ('python-1', True, None), ('python-2', True, None),
+        ('python-3', False, 'test_failure'), ('ui', True, None),
+        ('inventory', False, 'test_inventory_changed'),
+    ]
+    assert 'SECRET_OUTPUT' not in json.dumps(tests)
+
+
 def test_known_secrets_redacted_even_in_allowed_fields(snapshot, monkeypatch):
     monkeypatch.setenv('JARVIS_AUTH_TOKEN', SHA)
     monkeypatch.setenv('OPENAI_API_KEY', 'b' * 64)

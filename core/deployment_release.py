@@ -46,8 +46,9 @@ PYTHON_SHARDS = (
 
 def python_shards(root):
     assigned = [path for shard in PYTHON_SHARDS for path in shard]
-    discovered = [path.relative_to(root).as_posix()
-                  for path in (root / 'tests').rglob('test_*.py')]
+    discovered = {path.relative_to(root).as_posix()
+                  for pattern in ('test_*.py', '*_test.py')
+                  for path in (root / 'tests').rglob(pattern)}
     if len(assigned) != len(set(assigned)) or sorted(assigned) != sorted(discovered):
         raise ToolDenied('Release Python test inventory changed; assign every test file to one shard')
     return PYTHON_SHARDS

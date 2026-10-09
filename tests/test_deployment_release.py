@@ -125,7 +125,8 @@ def test_release_python_shards_cover_current_inventory_once(tmp_path, monkeypatc
     assigned = [path for shard in shards for path in shard]
     assert len(assigned) == len(set(assigned))
     discovered = {path.relative_to(source).as_posix()
-                  for path in (source / 'tests').rglob('test_*.py')}
+                  for pattern in ('test_*.py', '*_test.py')
+                  for path in (source / 'tests').rglob(pattern)}
     assert set(assigned) == discovered
     (tmp_path / 'tests').mkdir()
     (tmp_path / 'tests' / 'test_new.py').write_text('def test_new(): pass\n')
@@ -137,6 +138,10 @@ def test_release_python_shards_cover_current_inventory_once(tmp_path, monkeypatc
     with pytest.raises(ToolDenied, match='inventory changed'):
         python_shards(tmp_path)
     monkeypatch.setattr('core.deployment_release.PYTHON_SHARDS', (('tests/test_new.py',),))
+    with pytest.raises(ToolDenied, match='inventory changed'):
+        python_shards(tmp_path)
+    (tmp_path / 'tests' / 'test_other.py').unlink()
+    (tmp_path / 'tests' / 'foo_test.py').write_text('def test_foo(): pass\n')
     with pytest.raises(ToolDenied, match='inventory changed'):
         python_shards(tmp_path)
 

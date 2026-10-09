@@ -47,7 +47,12 @@ def evidence(value):
                 passed=value.get('passed') if type(value.get('passed')) is bool else None,
                 fresh=bool(at and value.get('passed') is True and
                            datetime.fromisoformat(at) <= datetime.now(timezone.utc) < expiry),
-                tests=[dict(phase=t['phase'], passed=t['passed']) for t in tests[:2]
+                tests=[dict(phase=t['phase'], shard=token(t.get('shard'), r'python-[1-3]|ui|inventory'),
+                            passed=t['passed'],
+                            failure_kind=token(t.get('failure_kind'),
+                                r'test_inventory_changed|test_environment|environment_timeout|'
+                                r'environment_output_limit|test_fixture_failure|test_failure'))
+                       for t in tests[:8]
                        if isinstance(t, dict) and t.get('phase') in {'python', 'ui'}
                        and type(t.get('passed')) is bool] if isinstance(tests, list) else [])
 
