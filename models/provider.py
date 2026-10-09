@@ -13,6 +13,36 @@ from typing import Protocol
 PROVIDER_NAMES = frozenset({'openai', 'claude', 'codex', 'gemini', 'local'})
 
 
+class ProviderPolicyRefusal(Exception):
+    """A provider declined the request; no provider text is retained."""
+
+
+def is_policy_rejection(exc):
+    """Recognize structured 400 policy errors without inspecting exception text."""
+    if getattr(exc, 'status_code', None) != 400:
+        return False
+    body = getattr(exc, 'body', None)
+    error = body.get('error', body) if isinstance(body, dict) else None
+    codes = [getattr(exc, 'code', None)]
+    if isinstance(error, dict):
+        codes.extend((error.get('code'), error.get('type')))
+    return any(isinstance(code, str) and any(part in code.lower()
+               for part in ('policy', 'safety', 'content_filter', 'moderation')) for code in codes)
+
+
+def refusal_only(turn):
+    """A completed turn containing only refusal content and optional reasoning."""
+    if not isinstance(turn, ProviderTurn) or turn.status != 'completed' or not isinstance(turn.output, list):
+        return False
+    messages = [item for item in turn.output if isinstance(item, dict) and item.get('type') == 'message']
+    return bool(messages) and all(
+        isinstance(item, dict) and (item.get('type') == 'reasoning' or
+        item.get('type') == 'message' and isinstance(item.get('content'), list) and
+        bool(item['content']) and all(isinstance(part, dict) and part.get('type') == 'refusal'
+                                     for part in item['content']))
+        for item in turn.output)
+
+
 @dataclass(frozen=True)
 class ProviderRequest:
     input: list[dict]

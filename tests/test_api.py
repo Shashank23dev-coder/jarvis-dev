@@ -1,5 +1,7 @@
 """Regression checks run without calling the model or external services."""
 from unittest.mock import patch
+from unittest.mock import Mock
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -94,6 +96,64 @@ def test_agent_provider_failure_is_sanitized_and_retained(client, monkeypatch):
     assert response.status_code == 500 and "SECRET" not in response.text
     assert client.get("/tasks").json()["tasks"][0]["status"] == "failed"
     assert "SECRET" not in client.get("/activity").text
+
+
+@pytest.mark.parametrize('case,expected_status', [
+    ('primary_policy', 200), ('legacy_policy', 200),
+    ('refusal_output', 200), ('non_policy', 500),
+])
+def test_provider_policy_refusal_task_contract(client, monkeypatch, tmp_path, case, expected_status):
+    from core.agent import AgentRunner
+    from core.brain import BrainSettings
+    from core.orchestrator import Orchestrator
+    from models import openai_client
+    from models.openai_provider import OpenAIProvider
+    from models.provider import ProviderRegistry
+    from tools import RepositoryTools, ToolRegistry
+
+    class BadRequestLike(Exception):
+        status_code = 400
+        code = 'cyber_policy'
+        body = {'error': {'code': 'cyber_policy'}}
+
+    class FailingPrimary:
+        name = 'local'
+
+        def complete(self, request):
+            raise RuntimeError('PRIMARY_PRIVATE_DETAIL')
+
+    wire = Mock()
+    if case == 'refusal_output':
+        item = Mock()
+        item.model_dump.return_value = {'type': 'message', 'content': [
+            {'type': 'refusal', 'refusal': 'SECRET_REFUSAL_DETAIL'}]}
+        wire.with_options.return_value.responses.create.return_value = SimpleNamespace(
+            output=[item], output_text='', status='completed')
+    elif case == 'non_policy':
+        wire.with_options.return_value.responses.create.side_effect = RuntimeError('SECRET_PROVIDER_DETAIL')
+    else:
+        wire.with_options.return_value.responses.create.side_effect = BadRequestLike('SECRET_PROVIDER_DETAIL')
+    monkeypatch.setattr(openai_client, 'get_client', lambda: wire)
+    provider = FailingPrimary() if case == 'legacy_policy' else OpenAIProvider()
+    runner = AgentRunner(ToolRegistry(RepositoryTools(tmp_path)), model=openai_client.request_agent_turn)
+    monkeypatch.setattr(main, 'orchestrator', Orchestrator(runner,
+        brain_settings=BrainSettings(True, provider.name), providers=ProviderRegistry([provider])))
+    response = client.post('/task', json={'goal': 'Delete important production data.', 'mode': 'agent'})
+    assert response.status_code == expected_status
+    task = client.get('/tasks').json()['tasks'][0]
+    assert task['status'] == ('completed' if expected_status == 200 else 'failed')
+    assert task['agent']['tool_calls'] == 0
+    assert not [event for event in task['activity'] if event['type'].startswith('tool_')]
+    assert 'SECRET_' not in str(task) and 'SECRET_' not in response.text
+    if expected_status == 200:
+        assert 'model provider' in task['response'] and 'safety policy' in task['response']
+        assert 'No action was taken' in task['response']
+        assert task['agent']['stop_reason'] == 'provider_policy_refusal'
+        assert any(e.get('reason') == 'provider_policy_refusal' for e in task['activity'])
+        assert wire.with_options.return_value.responses.create.call_count == 1
+    else:
+        assert task['agent']['stop_reason'] == 'execution_failed'
+        assert wire.with_options.return_value.responses.create.call_count == 2
 
 
 def test_agent_limit_and_mode_validation(client, monkeypatch):

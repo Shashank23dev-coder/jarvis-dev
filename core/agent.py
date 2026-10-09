@@ -6,6 +6,7 @@ import re
 from typing import Callable
 
 from models.openai_client import request_agent_turn
+from models.provider import ProviderPolicyRefusal
 from tools.registry import ToolRegistry
 from .task_store import TaskStore
 from .experience import TaskReflection, attempt_capture, EXPERIENCE_INSTRUCTIONS
@@ -248,6 +249,11 @@ class AgentRunner:
                 else:
                     history.extend(turn.output)
             return finish("limit_reached", "Stopped at the model iteration limit without a final answer.", "iteration_limit")
+        except ProviderPolicyRefusal:
+            response = ("I can't help with that: the model provider declined this request under its safety policy. "
+                        + ('No further action was taken.' if calls else 'No action was taken.'))
+            return finish('completed', response,
+                          'provider_policy_refusal')
         except Exception:
             # Provider/tool infrastructure exceptions may contain credentials or user data.
             return finish("failed", "Jarvis could not complete the agent request.", "execution_failed")

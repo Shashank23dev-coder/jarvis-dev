@@ -4,7 +4,8 @@ from dataclasses import dataclass
 import os
 
 from models.openai_provider import OpenAIProvider
-from models.provider import ProviderRegistry, ProviderRequest, ProviderTurn
+from models.provider import (ProviderPolicyRefusal, ProviderRegistry, ProviderRequest,
+                             ProviderTurn, is_policy_rejection, refusal_only)
 from .task_context import TaskContext, assemble_context
 
 
@@ -80,11 +81,17 @@ class _ProviderSession:
                 result = self.provider.complete(ProviderRequest(**deepcopy(request)))
                 if not isinstance(result, ProviderTurn):
                     raise ValueError('Invalid provider result')
-            except Exception:
+            except Exception as exc:
+                if is_policy_rejection(exc):
+                    self.record(name, 'provider_policy_refusal', 'completed')
+                    raise ProviderPolicyRefusal() from None
                 # Exception messages may contain credentials; persist only a code.
                 self.record(name, 'provider_error', 'failed')
                 self.fallback_reason = 'provider_error'
             else:
+                if refusal_only(result):
+                    self.record(name, 'provider_policy_refusal', 'completed')
+                    raise ProviderPolicyRefusal()
                 if result.status == 'completed':
                     self.record(name, 'configured_provider', 'completed')
                     return result
@@ -104,9 +111,15 @@ class _ProviderSession:
             if self.self_state:
                 legacy_kwargs = self.self_state.enrich(legacy_kwargs)
             result = self.legacy(**legacy_kwargs)
-        except Exception:
+        except Exception as exc:
+            if is_policy_rejection(exc) or isinstance(exc, ProviderPolicyRefusal):
+                self.record('legacy', 'provider_policy_refusal', 'completed')
+                raise ProviderPolicyRefusal() from None
             self.record('legacy', reason, 'failed')
             raise
+        if refusal_only(result):
+            self.record('legacy', 'provider_policy_refusal', 'completed')
+            raise ProviderPolicyRefusal()
         self.record('legacy', reason, 'completed' if result.status == 'completed' else 'incomplete')
         self.fallback_reason = 'legacy_continuation' if self.enabled else 'brain_disabled'
         return result

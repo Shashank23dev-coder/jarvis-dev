@@ -181,14 +181,43 @@ def test_research_adapter_uses_bounded_provider_search(monkeypatch):
     from core.engineering_tools import research_web
     from models import openai_client
     calls = []
+    options = []
     def create(**kwargs):
         calls.append(kwargs)
         return SimpleNamespace(status='completed', output_text='Framework comparison', output=[])
-    client = SimpleNamespace(with_options=lambda **kwargs: SimpleNamespace(responses=SimpleNamespace(create=create)))
+    def with_options(**kwargs):
+        options.append(kwargs)
+        return SimpleNamespace(responses=SimpleNamespace(create=create))
+    client = SimpleNamespace(with_options=with_options)
     monkeypatch.setattr(openai_client, 'get_client', lambda: client)
     assert 'Framework comparison' in research_web('Compare public agent frameworks')
     assert calls[0]['tools'] == [{'type': 'web_search'}] and calls[0]['tool_choice'] == 'required'
     assert calls[0]['store'] is False
+    assert calls[0]['max_output_tokens'] == 6000
+    assert options == [{'timeout': 180, 'max_retries': 0}]
+
+
+@pytest.mark.parametrize('status,reason,text,works', [
+    ('incomplete', 'max_output_tokens', 'Partial public findings', True),
+    ('incomplete', 'max_output_tokens', '', False),
+    ('incomplete', 'other', 'Partial public findings', False),
+    ('failed', None, 'Partial public findings', False),
+])
+def test_research_partial_result_is_explicit_and_bounded(monkeypatch, status, reason, text, works):
+    from types import SimpleNamespace
+    from core.engineering_tools import research_web
+    from models import openai_client
+    result = SimpleNamespace(status=status, incomplete_details=SimpleNamespace(reason=reason),
+                             output_text=text, output=[])
+    client = SimpleNamespace(with_options=lambda **kwargs: SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: result)))
+    monkeypatch.setattr(openai_client, 'get_client', lambda: client)
+    if works:
+        value = research_web('Compare public frameworks')
+        assert len(value) <= 14000 and '"truncated": true' in value and text in value
+    else:
+        with pytest.raises(ToolDenied, match='Research did not finish'):
+            research_web('Compare public frameworks')
 
 
 @pytest.mark.parametrize('goal', ['Fix the order bug', 'Fix an unregistered widget',

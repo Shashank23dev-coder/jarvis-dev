@@ -175,7 +175,8 @@ class TaskStore:
         from models.provider import PROVIDER_NAMES
         if (provider not in PROVIDER_NAMES | {'legacy'}
                 or reason not in {'configured_provider', 'provider_unavailable',
-                                  'provider_error', 'provider_incomplete', 'legacy_continuation', 'brain_disabled'}
+                                  'provider_error', 'provider_incomplete', 'provider_policy_refusal',
+                                  'legacy_continuation', 'brain_disabled'}
                 or type(iteration) is not int or not 1 <= iteration <= 64
                 or status not in {'started', 'completed', 'failed', 'incomplete'}):
             raise ValueError('Invalid routing metadata')

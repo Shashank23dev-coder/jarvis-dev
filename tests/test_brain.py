@@ -13,6 +13,7 @@ from core.orchestrator import Orchestrator
 from core.task_context import TaskContext
 from core.task_store import TaskStore
 from models.provider import ProviderRegistry, ProviderRequest, ProviderTurn
+from models.provider import is_policy_rejection
 from models.openai_provider import OpenAIProvider
 from models import openai_client
 from tools import RepositoryTools, ToolRegistry
@@ -32,6 +33,20 @@ class ScriptedProvider:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+@pytest.mark.parametrize('code', ['cyber_policy', 'content_policy', 'content_filter',
+                                  'safety', 'policy_violation'])
+def test_only_structured_bad_request_policy_codes_are_refusals(code):
+    class Rejected(Exception):
+        body = {'error': {'code': code}}
+        status_code = 400
+    assert is_policy_rejection(Rejected('PRIVATE_PROVIDER_DETAIL'))
+    Rejected.status_code = 500
+    assert not is_policy_rejection(Rejected('PRIVATE_PROVIDER_DETAIL'))
+    Rejected.status_code = 400
+    Rejected.body = {'error': {'code': 'invalid_request'}}
+    assert not is_policy_rejection(Rejected('policy PRIVATE_PROVIDER_DETAIL'))
 
 
 def routes(store, task_id):
