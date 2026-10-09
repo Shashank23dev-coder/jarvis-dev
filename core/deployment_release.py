@@ -22,27 +22,25 @@ from tools.policy import ToolDenied
 SHA = re.compile(r'[0-9a-f]{40}')
 TERMINAL = {'deployed', 'rolled_back', 'failed', 'rollback_failed'}
 
-# Fixed, disjoint file groups keep each Python run within the existing 600 s
-# sandbox deadline. A changed test inventory fails closed until it is assigned.
+# Three fixed batches, balanced by measured in-sandbox durations, keep each
+# Python run under the existing 600 s deadline. Inventory changes fail closed.
 PYTHON_SHARDS = (
-    ('tests/test_candidate_apply.py', 'tests/test_experience.py',
-     'tests/test_sandbox_docker.py', 'tests/test_sandbox_imports.py'),
     ('tests/test_assistant_experience.py', 'tests/test_self_edit.py',
-     'tests/test_candidate_bridge.py'),
-    ('tests/test_owner_readonly_flow.py', 'tests/test_engineering.py',
-     'tests/test_tools.py', 'tests/test_authority_acceptance.py',
-     'tests/test_candidate_tools.py', 'tests/test_authority_model.py',
-     'tests/test_engineering_authority.py', 'tests/test_deployment_release.py',
-     'tests/test_brain_status.py'),
-    ('tests/test_engineering_jobs.py', 'tests/test_project_repository.py',
-     'tests/test_brain.py', 'tests/test_deployment.py',
-     'tests/test_engineering_providers.py', 'tests/test_recall.py',
-     'tests/test_portfolio_integration.py', 'tests/test_self_state.py',
+     'tests/test_candidate_bridge.py', 'tests/test_brain_status.py',
+     'tests/test_authority_model.py', 'tests/test_engineering_providers.py'),
+    ('tests/test_candidate_apply.py', 'tests/test_engineering.py',
+     'tests/test_deployment_release.py', 'tests/test_candidate_tools.py',
+     'tests/test_engineering_authority.py', 'tests/test_experience.py',
+     'tests/test_sandbox_docker.py', 'tests/test_sandbox_imports.py'),
+    ('tests/test_owner_readonly_flow.py', 'tests/test_engineering_jobs.py',
+     'tests/test_project_repository.py', 'tests/test_authority_acceptance.py',
+     'tests/test_tools.py', 'tests/test_recall.py',
+     'tests/test_portfolio_integration.py', 'tests/test_openai_client.py',
      'tests/test_engineering_action.py', 'tests/test_persistence.py',
-     'tests/test_engineering_portfolio.py', 'tests/test_api.py',
-     'tests/test_agent.py', 'tests/test_deployment_status.py',
-     'tests/test_experience_evaluation.py', 'tests/test_openai_client.py',
-     'tests/test_registry.py'),
+     'tests/test_deployment.py', 'tests/test_brain.py', 'tests/test_agent.py',
+     'tests/test_experience_evaluation.py', 'tests/test_deployment_status.py',
+     'tests/test_self_state.py', 'tests/test_api.py',
+     'tests/test_engineering_portfolio.py', 'tests/test_registry.py'),
 )
 
 

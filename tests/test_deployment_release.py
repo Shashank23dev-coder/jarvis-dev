@@ -118,14 +118,25 @@ def validation_shards(monkeypatch):
     return shards
 
 
-def test_release_python_shards_cover_current_inventory_once(tmp_path):
+def test_release_python_shards_cover_current_inventory_once(tmp_path, monkeypatch):
     source = Path(__file__).resolve().parents[1]
     shards = python_shards(source)
-    assert len(shards) == 4
-    assert len([path for shard in shards for path in shard]) == len(set(
-        path for shard in shards for path in shard))
+    assert len(shards) == 3
+    assigned = [path for shard in shards for path in shard]
+    assert len(assigned) == len(set(assigned))
+    discovered = {path.relative_to(source).as_posix()
+                  for path in (source / 'tests').rglob('test_*.py')}
+    assert set(assigned) == discovered
     (tmp_path / 'tests').mkdir()
     (tmp_path / 'tests' / 'test_new.py').write_text('def test_new(): pass\n')
+    with pytest.raises(ToolDenied, match='inventory changed'):
+        python_shards(tmp_path)
+    (tmp_path / 'tests' / 'test_other.py').write_text('def test_other(): pass\n')
+    monkeypatch.setattr('core.deployment_release.PYTHON_SHARDS',
+                        (('tests/test_new.py', 'tests/test_other.py', 'tests/test_new.py'),))
+    with pytest.raises(ToolDenied, match='inventory changed'):
+        python_shards(tmp_path)
+    monkeypatch.setattr('core.deployment_release.PYTHON_SHARDS', (('tests/test_new.py',),))
     with pytest.raises(ToolDenied, match='inventory changed'):
         python_shards(tmp_path)
 
