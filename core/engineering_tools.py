@@ -105,5 +105,8 @@ def invoke(tools, operation, job_id=None, *, before=None):
             job = jobs.get(job_id)
             result = project_job(job if operation == 'inspect' else jobs.control(job_id, operation, authority=tools.authority))
     from .engineering_jobs import JOB_PAGE_SIZE
+    for job in result if isinstance(result, list) else [result]:
+        if job.get('operator'):
+            tools.jobs[job['id']] = job
     return JobEvidence(jobs=result if isinstance(result, list) else [result],
         next_before=result[-1]['id'] if operation == 'list' and len(result) == JOB_PAGE_SIZE else None)

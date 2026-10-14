@@ -97,7 +97,7 @@ class EngineeringJobs:
         return json.loads(row[0])
 
     def create(self, goal, action, arguments, context):
-        from .candidate_tools import EngineeringArguments
+        from .candidate_tools import EngineeringArguments, OperatorArguments
         from tools.candidate_edit import CandidatePolicy, safe_text
         text_value(goal)
         if action is None:
@@ -107,7 +107,8 @@ class EngineeringJobs:
         action = EngineeringAction.model_validate(action).check(goal, context)
         if not all(valid_id(context.get(key)) for key in ('task_id', 'conversation_id')):
             raise ToolDenied('Invalid job source')
-        args = EngineeringArguments.model_validate(arguments).model_dump(exclude_none=True)
+        schema = OperatorArguments if 'execution_mode' in arguments else EngineeringArguments
+        args = schema.model_validate(arguments).model_dump(exclude_none=True)
         from .engineering_decision import resolve_project
         from .engineering_portfolio import Portfolio
         project_id = resolve_project(goal, Portfolio(self.database).projects(), args.get('project_id'))
@@ -152,6 +153,11 @@ class EngineeringJobs:
                 action=action.model_dump(), arguments=args,
                 improvement=ImprovementMetadata(observed_problem=args['problem_detected'],
                     hypothesis=args['hypothesis'], proposed_change=goal).model_dump())
+            if 'execution_mode' in args:
+                from .engineering_operator import routes
+                job.update(provider=routes(args['execution_mode'])[0],
+                           operator=dict(mode=args['execution_mode'], phase='inspect', revision=0,
+                                         ready=False, controller_validated=False))
             db.execute('INSERT INTO engineering_jobs VALUES (?,?,?,?)',
                        (job['id'], action.task_id, job['created_at'], json.dumps(job)))
             self._save(db, job, 'created')
@@ -229,10 +235,11 @@ class EngineeringJobs:
 
     def _revise_inputs_locked(self, identifier, arguments, *, authority):
         from .engineering_authority import require_owner
-        from .candidate_tools import EngineeringArguments
+        from .candidate_tools import EngineeringArguments, OperatorArguments
         from tools.candidate_edit import CandidatePolicy, safe_text
         require_owner(authority)
-        args = EngineeringArguments.model_validate(arguments).model_dump(exclude_none=True)
+        schema = OperatorArguments if 'execution_mode' in arguments else EngineeringArguments
+        args = schema.model_validate(arguments).model_dump(exclude_none=True)
         policy = CandidatePolicy()
         for path in args['inspect_paths']:
             policy.edit_path(path)
@@ -252,6 +259,8 @@ class EngineeringJobs:
                 raise ToolDenied('Documentation scope mismatch')
             if args.get('project_id', job.get('project_id')) != job.get('project_id'):
                 raise ToolDenied('Input recovery cannot change the job project')
+            if job.get('operator') and args != job['arguments']:
+                raise ToolDenied('Checkpointed operator inputs are immutable; submit a new goal for changed inputs')
             job.setdefault('input_revisions', []).append(dict(timestamp=timestamp(), arguments=job['arguments']))
             job['arguments'] = args
             self._save(db, job, 'inputs_revised')
@@ -322,19 +331,25 @@ class EngineeringJobs:
                 raise ToolDenied('Stale engineering lease')
             passed = bool(candidate and candidate['state'] == 'passed' and not candidate.get('busy')
                           and candidate.get('tested_fingerprint') == candidate.get('reviewed_fingerprint')
-                          and (candidate.get('reviewer_result') or {}).get('verdict') == 'passed')
+                          and (candidate.get('reviewer_result') or {}).get('verdict') == 'passed'
+                          and (not job.get('operator') or candidate.get('operator', {}).get('ready')))
             from .engineering_authority import assess_action
             consequence = assess_action('candidate_apply', goal=candidate['goal'],
                 changed_paths=candidate['files_changed'],
                 read_only_target=job.get('project_id') in read_only) if passed else None
             status = ('waiting_for_approval' if consequence.approval_required else 'completed') if passed else (
                 'failed' if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS) else 'blocked')
+            if passed and job.get('operator') and job['project_id'] == 'jarvis-core':
+                status = 'waiting_for_approval'
             job['authority'] = consequence.model_dump() if consequence else None
             job.update(status=status, current_stage=status, lease_owner=None, lease_until=0,
                        error=None if passed else 'Candidate execution did not pass tests and review',
                        block_reason=None if passed else 'Explicit retry required',
                        completed_at=timestamp() if status in {'failed', 'completed'} else None)
             if candidate:
+                if candidate.get('operator'):
+                    job.update(operator=candidate['operator'], worktree=candidate['worktree'],
+                               branch=candidate['branch'], commit_sha=candidate['operator'].get('commit_sha'))
                 self._merge_candidate_failures(job, candidate)
                 improvement = candidate.get('improvement', {})
                 job.update(provider=improvement.get('implementation_provider', job['provider']),
@@ -367,6 +382,7 @@ def project_job(job):
     from pydantic import TypeAdapter
     from .candidate_provider import WorkAttribution, project_provider_results, work_attribution
     from .engineering_providers import ProviderBlocker
+    from .engineering_operator import project_operator
     failures = job.get('failures', [])
     failure_count = job.get('failure_count', len(failures))
     if type(failure_count) is not int or failure_count < len(failures):
@@ -430,6 +446,7 @@ def project_job(job):
     return {key: job.get(key) for key in ('id', 'type', 'status', 'provider', 'created_at',
         'started_at', 'completed_at', 'current_stage', 'attempts', 'candidate_id', 'control')} | {
         'project_id': project_reference(job.get('project_id')),
+        **({'operator': project_operator(job['operator'])} if job.get('operator') else {}),
         'decision': project_decision(job.get('decision')),
         'error': 'Engineering job requires attention' if job.get('error') else None,
         'failure': project_failure(job.get('failure')),

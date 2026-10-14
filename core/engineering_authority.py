@@ -91,7 +91,8 @@ RUNTIME_ENTRYPOINTS = ('main', 'core.candidate_broker', 'core.candidate_bridge',
 LOCAL_PACKAGES = ('main', 'core', 'tools', 'models')
 # Weakening these would silently remove security regression coverage.
 SECURITY_TESTS = ('tests/conftest.py', 'tests/test_tools.py', 'tests/test_authority*.py',
-    'tests/test_candidate_*.py', 'tests/test_engineering_authority.py', 'tests/test_owner_readonly_flow.py',
+    'tests/test_candidate_*.py', 'tests/test_engineering_authority.py', 'tests/test_engineering_operator.py',
+    'tests/test_owner_readonly_flow.py',
     'tests/test_deployment*.py', 'tests/test_sandbox*.py')
 
 

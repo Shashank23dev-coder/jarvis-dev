@@ -164,7 +164,7 @@ class EngineeringRegistry:
                     'provider_authentication' if state == 'not_authenticated' else
                     'provider_unavailable' if state == 'unavailable' else None)
 
-    def complete(self, payload, instructions, timeout, *, stage, task_type='code', exclude=(), validate=lambda x: x, preferred=None):
+    def complete(self, payload, instructions, timeout, *, stage, task_type='code', exclude=(), validate=lambda x: x, preferred=None, allowed=None):
         import time
         deadline = time.monotonic() + timeout
         order = ('codex', 'claude_code') if stage == 'implementing' else ('openai', 'claude_code', 'codex')
@@ -172,6 +172,8 @@ class EngineeringRegistry:
             list(order) + list(self.registrations)))
         reasons = []
         for name in order:
+            if allowed is not None and name not in allowed:
+                continue
             if name in exclude or name not in self.registrations:
                 continue
             r = self.registrations[name]

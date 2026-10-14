@@ -9,7 +9,7 @@ from uuid import uuid4
 from pydantic import Field
 from tools.schemas import StrictModel
 from tools.policy import ToolDenied
-from .candidate_tools import CreateArguments, CandidateArguments, EngineeringArguments, PrepareEngineeringArguments
+from .candidate_tools import CreateArguments, CandidateArguments, EngineeringArguments, OperatorArguments, PrepareEngineeringArguments
 from .database import valid_id
 from .candidate_action import EngineeringAction, EngineeringWorkspace
 from .engineering_authority import OwnerDevAuthority, require_owner
@@ -42,6 +42,7 @@ class Request(StrictModel):
         from .engineering_repository import RepositoryArguments
         schema = (RepositoryArguments if self.action == 'project_repository' else ProjectArguments if self.action == 'project_inspect' else DecisionArguments if self.action == 'decision' else JobListArguments if self.action == 'job_list' else
                   PrepareEngineeringArguments if self.action == 'workspace' else StrictModel if self.action in {'runtime', 'release_prepare'} else
+                  OperatorArguments if self.action == 'job_create' and 'execution_mode' in self.arguments else
                   EngineeringArguments if self.action in {'engineer', 'job_create'} else
                   JobArguments if self.action.startswith('job_') else
                   CreateArguments if self.action == 'create' else CandidateArguments)

@@ -29,6 +29,11 @@ class EngineeringArguments(CreateArguments):
 
 class BrainEngineeringArguments(EngineeringArguments):
     provider: ProviderId = 'codex'
+    execution_mode: Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW'] | None = None
+
+
+class OperatorArguments(EngineeringArguments):
+    execution_mode: Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW'] = 'CODEX_BUILD_CLAUDE_REVIEW'
 
 
 class PrepareEngineeringArguments(StrictModel):
@@ -110,6 +115,10 @@ Use list_files/read_text or inspect_project_repository for source inspection.
 Unknown locations need clarification; unavailable runtime never blocks source work.
 Create engineering jobs directly with project_id, observed problem, hypothesis,
 inspection paths and tests. prepare_engineering is optional workspace discovery.
+Prefer start_engineering_operator for coordinated implementation and review.
+Default CODEX_BUILD_CLAUDE_REVIEW: Codex implements, Claude reviews independently.
+Use CODEX_ONLY for a requested Codex implementation or CLAUDE_ONLY for a requested
+Claude implementation; both retain the existing independent OpenAI review gate.
 Use registered provider routing (Codex/Claude); report actual provider attribution.
 Inspect jobs and candidates across conversations without another permission request.
 Jobs implement/test/review in isolated development; completed means that candidate
@@ -242,7 +251,12 @@ always requires approval for the exact commit and verified release evidence.
         self.allowed.update({'engineer', 'inspect', 'tests', 'review'})
         return self.workspace
 
-    def engineer(self, inspect_paths, targeted_tests, problem_detected, hypothesis, provider='codex', project_id=None):
+    def start_operator(self, inspect_paths, targeted_tests, problem_detected, hypothesis,
+                       project_id=None, execution_mode='CODEX_BUILD_CLAUDE_REVIEW'):
+        return self.engineer(inspect_paths, targeted_tests, problem_detected, hypothesis,
+                             project_id=project_id, execution_mode=execution_mode)
+
+    def engineer(self, inspect_paths, targeted_tests, problem_detected, hypothesis, provider='codex', project_id=None, execution_mode=None):
         if self.created:
             raise ToolDenied('One candidate per authorized task')
         require_owner(self.authority)
@@ -263,6 +277,8 @@ always requires approval for the exact commit and verified release evidence.
             from .engineering_tools import JobEvidence
             arguments = dict(inspect_paths=inspect_paths, targeted_tests=targeted_tests,
                              problem_detected=problem_detected, hypothesis=hypothesis)
+            if execution_mode is not None:
+                arguments['execution_mode'] = execution_mode
             if project_id is not None:
                 arguments['project_id'] = project_id
             record = (self._service().invoke('job_create', arguments) if self.production else
@@ -398,6 +414,9 @@ always requires approval for the exact commit and verified release evidence.
                 'Create a durable job in a registered project without prior preparation. Host providers implement, test and independently review in isolated dev. Returns immediately; consequential promotion requires approval.',
                 BrainEngineeringArguments, JobEvidence, self.engineer)
             definitions['create_engineering_job'] = definitions['engineer_candidate']
+            definitions['start_engineering_operator'] = ToolDefinition(
+                'Coordinate an engineering goal for a registered project. Default: Codex implements and Claude independently reviews. Persist worktree, checkpoints and findings; resume completed work after interruption or quota recovery. Prepare the reviewed commit without promoting or deploying it.',
+                OperatorArguments, JobEvidence, self.start_operator)
         for action, name, description in (
             ('preview', 'preview_candidate_apply', 'Preview apply eligibility for the named candidate. Never applies or changes main.'),
             ('audit', 'inspect_candidate_apply', 'Read the named candidate apply audit without mutations or recovery.')):
@@ -431,6 +450,9 @@ always requires approval for the exact commit and verified release evidence.
                     'NEED_MORE_INFORMATION': 'clarify the missing information'}.items():
                 original = re.sub(r'\b' + label + r'\b', wording, original)
         if self.jobs:
+            if any(j.get('operator') for j in self.jobs.values()):
+                from .engineering_operator import owner_status
+                return '\n'.join(owner_status(j) for j in self.jobs.values())
             return '\n'.join(f"Engineering job {j['id']}: {j['status']}. Provider: {j['provider']}. "
                 'Queued for isolated development, tests and independent review. '
                 'Consequential promotion and production deployment require approval.' for j in self.jobs.values())

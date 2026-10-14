@@ -39,6 +39,10 @@ not a permanent claim about quota or service health.
 
 ## Routing
 
+[Engineering Operator v1](engineering-operator.md) pins the providers required
+by its selected mode and resumes a blocked step without discarding completed
+work. The fallback order below remains the behavior for legacy engineering jobs.
+
 Use Codex when usable or not yet observed. Skip a provider with a fresh negative
 observation or missing configuration. On an invocation failure, record a closed
 reason and try Claude within the same existing request deadline. If neither can

@@ -1,5 +1,9 @@
 # Persistent engineering jobs
 
+For checkpointed Codex/Claude coordination, see
+[Engineering Operator v1](engineering-operator.md). Its optional execution mode
+uses this same queue and worker; the workflow below describes legacy jobs.
+
 Authenticated owners use `create_engineering_job` directly to queue the current goal, problem, hypothesis, inspection
 paths and targeted tests. The compatibility name is `engineer_candidate`.
 `prepare_engineering` optionally discovers the editable/test catalog; it is not

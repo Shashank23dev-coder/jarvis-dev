@@ -48,11 +48,13 @@ class CandidateStore:
                 # Older records may predate the durable failure-history field.
                 self.save(record)
                 record.update(state='rejected', error='Previous worker was interrupted.',
-                              tested_fingerprint=None, reviewer_result=None,
+                              **({} if record.get('operator') else dict(tested_fingerprint=None, reviewer_result=None)),
                               failure=failure_evidence(
                                   record.get('improvement', {}).get('implementation_provider', 'openai'),
                                   'worker_failed', record.get('stage', 'planning'),
                                   record.get('source_context', {}).get('attempt', 1)))
+                if record.get('operator'):
+                    record['state'] = 'needs_revision'
                 db.execute('UPDATE candidates SET busy=0 WHERE id=?', (candidate_id,))
                 self.save(record, 'candidate_interrupted')
                 row = {'busy': 0}
@@ -92,6 +94,10 @@ class CandidateStore:
                     job = jobs._get(db, job_id)
                     if job['lease_owner'] and job['lease_owner'] != record['source_context'].get('lease_owner'):
                         raise ValueError('Engineering lease mismatch')
+                    if record.get('operator'):
+                        job.update(operator=record['operator'], worktree=record['worktree'],
+                                   branch=record['branch'], commit_sha=record['operator'].get('commit_sha'))
+                        jobs._save(db, job, 'operator_checkpoint')
                     stage = ('testing' if event.startswith(('test', 'baseline')) else
                              'reviewing' if event in {'review_finished', 'independent_review',
                                                      'review_requires_baseline_comparison'} else

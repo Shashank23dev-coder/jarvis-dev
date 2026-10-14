@@ -43,6 +43,10 @@ class EngineeringWorker:
             try:
                 from .engineering_repository import development_service
                 service = development_service(self.service, job.get('project_id'))
+                if job.get('operator'):
+                    from .engineering_operator import run_job
+                    candidate = run_job(service, self.jobs, job, owner)
+                    return self.jobs.finish(job['id'], owner, candidate)
                 if job['candidate_id']:
                     prior = service.store.get(job['candidate_id'], recover=False)
                     if prior and prior['state'] == 'passed' and not prior['busy']:

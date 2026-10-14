@@ -30,7 +30,7 @@ PYTHON_SHARDS = (
      'tests/test_authority_model.py', 'tests/test_engineering_providers.py'),
     ('tests/test_candidate_apply.py', 'tests/test_engineering.py',
      'tests/test_deployment_release.py', 'tests/test_candidate_tools.py',
-     'tests/test_engineering_authority.py', 'tests/test_experience.py',
+     'tests/test_engineering_authority.py', 'tests/test_engineering_operator.py', 'tests/test_experience.py',
      'tests/test_sandbox_docker.py', 'tests/test_sandbox_imports.py'),
     ('tests/test_owner_readonly_flow.py', 'tests/test_engineering_jobs.py',
      'tests/test_project_repository.py', 'tests/test_authority_acceptance.py',

@@ -34,10 +34,18 @@ class Proposal(BaseModel):
     edits: list[Edit] = Field(min_length=1, max_length=8)
 
 
+class ReviewFinding(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    path: str = Field(min_length=1, max_length=4096)
+    problem: str = Field(min_length=1, max_length=1000)
+    requested_change: str = Field(min_length=1, max_length=1000)
+
+
 class Review(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     verdict: Literal['passed', 'needs_revision', 'rejected']
     summary: str = Field(min_length=1, max_length=4000)
+    findings: list[ReviewFinding] = Field(default_factory=list, max_length=8)
 
 
 @dataclass(frozen=True)
@@ -287,6 +295,10 @@ class SelfEditService:
         stage = 'reviewing' if schema is Review else 'implementing'
         provider = ('openai' if schema is Review else
                     self.record.get('improvement', {}).get('implementation_provider', 'openai'))
+        operator = self.record.get('operator')
+        if operator:
+            from .engineering_operator import routes
+            provider = routes(operator['mode'])[schema is Review]
         origin = 'operator_assisted' if self.model is not model_request else 'provider'
         if self.record.get('improvement') and self.model is model_request:
             from .engineering_providers import EngineeringRegistry, RoutingBlocked
@@ -296,12 +308,16 @@ class SelfEditService:
             try:
                 result, provider = providers.complete(payload, instructions, min(120, self._check()),
                     stage=stage, task_type=self.record['improvement'].get('scope', 'code'),
-                    preferred=provider if schema is not Review else None,
+                    preferred=provider if operator or schema is not Review else None,
+                    allowed=(provider,) if operator else None,
                     exclude=authors if schema is Review else (), validate=schema.model_validate)
             except ProviderFailure as exc:
                 if isinstance(exc, RoutingBlocked):
                     self.record['provider_blocker'] = exc.blocker
-                self.record['failure'] = failure_evidence(exc.provider, exc.code,
+                code = exc.code
+                if operator and isinstance(exc, RoutingBlocked) and exc.blocker['reasons']:
+                    code = (exc.blocker['reasons'][0].get('observation') or {}).get('code') or code
+                self.record['failure'] = failure_evidence(exc.provider, code,
                     stage,
                     self.record.get('source_context', {}).get('attempt', 1))
                 raise
@@ -326,7 +342,7 @@ class SelfEditService:
         self.store.save(self.record, 'provider_response_received')
         return parsed
 
-    def _prepare(self):
+    def _prepare(self, *, workspace_only=False):
         policy = CandidatePolicy()
         # A real committed, clean baseline is mandatory; no implicit commits or
         # copying of dirty/untracked files from the user's checkout.
@@ -341,6 +357,8 @@ class SelfEditService:
                            '--work-tree=' + str(self.source), 'status', '--porcelain=v1', '--untracked-files=all')
         if status:
             raise ToolDenied('Source must be clean before starting a candidate')
+        if workspace_only and self.record['base_commit'] and self.record['base_commit'] != base:
+            raise ToolDenied('Source changed during worktree preparation')
         reader = RepositoryTools(self.source, policy=policy, max_file_bytes=256000)
         context = {}
         for path in self.record['inspect_paths']:
@@ -353,14 +371,23 @@ class SelfEditService:
         if self.root.resolve() != self.root:
             raise ToolDenied('Unsafe candidate storage')
         container, bare, worktree = self._paths(self.record)
-        container.mkdir(mode=0o700)
+        container.mkdir(mode=0o700, exist_ok=workspace_only)
+        if container.resolve() != container or bare.resolve() != bare or worktree.resolve() != worktree:
+            raise ToolDenied('Unsafe candidate storage')
         self.record.update(base_commit=base, branch='jarvis/candidate-' + self.record['id'], worktree=str(worktree))
         self.store.save(self.record, 'create_worktree')
-        self._git(container, 'clone', '--bare', '--no-hardlinks', '--no-local', '--', str(self.source), str(bare))
-        self._git(container, '--git-dir=' + str(bare), 'worktree', 'add', '-b', self.record['branch'], str(worktree), base)
+        if not workspace_only or not bare.exists():
+            self._git(container, 'clone', '--bare', '--no-hardlinks', '--no-local', '--', str(self.source), str(bare))
+        if not workspace_only or not worktree.exists():
+            self._git(container, '--git-dir=' + str(bare), 'worktree', 'add', '-b', self.record['branch'], str(worktree), base)
+        if workspace_only and (self._workgit('rev-parse', 'HEAD').strip() != base or
+                               self._workgit('status', '--porcelain=v1', '--untracked-files=all')):
+            raise ToolDenied('Incomplete worktree preparation requires inspection')
         self.record['manifest'] = scan(worktree, self._check)
         # Copy no source configuration/hooks, share no source object hardlinks.
         self.store.save(self.record, 'worktree_ready')
+        if workspace_only:
+            return context
         if self.record.get('improvement'):
             self._engineering(context)
             return
@@ -489,7 +516,7 @@ class SelfEditService:
                 review_result=self.record['reviewer_result'],
                 confidence='supported_by_tests_and_review' if self.record['state'] == 'passed' else 'insufficient')
 
-    def _tests(self):
+    def _tests(self, *, resume=False, focused=False):
         if self.record['state'] in {'discarded', 'rejected'} or not self.record['manifest']:
             raise ToolDenied('Candidate cannot be tested')
         self.record.update(state='needs_revision', reviewer_result=None, tested_fingerprint=None)
@@ -499,10 +526,16 @@ class SelfEditService:
         self.store.save(self.record, 'tests_started')
         _, _, worktree = self._paths(self.record)
         repository = CandidateRepository(worktree, source_root=self.source, check=self._check)
-        phases = [('targeted', self.record['targeted_tests']), ('full_python', ['tests'])]
-        if (worktree / 'tests/ui.test.cjs').is_file():
+        phases = [('targeted', self.record['targeted_tests'])]
+        if not focused:
+            phases.append(('full_python', ['tests']))
+        if not focused and (worktree / 'tests/ui.test.cjs').is_file():
             phases.append(('full_ui', ['tests/ui.test.cjs']))
         for phase, paths in phases:
+            prior = [t for t in self.record['test_results'] if t['phase'] == phase
+                     and t['fingerprint'] == fingerprint and t['paths'] == paths]
+            if resume and prior and not any(prior[-1][k] for k in ('returncode', 'timed_out', 'truncated')):
+                continue
             self._tick('test_' + phase)
             if self.tester:
                 result = self.tester(repository, phase, paths)
@@ -555,15 +588,23 @@ class SelfEditService:
                         self.record.get('source_context', {}).get('attempt', 1)))
                 self.store.save(self.record, 'review_requires_baseline_comparison')
                 return
+        instructions = REVIEW
+        if self.record.get('operator'):
+            instructions += (' For needs_revision, include findings: a nonempty list of objects '
+                'with path, problem, requested_change. Each finding must describe a concrete '
+                'change in an inspected or changed file. No general commentary in findings.')
         review = self._ask({'candidate': candidate,
                             'goal': self.record['goal'], 'diff': self.record['diff'],
                             'tests': evidence, 'original_files': {path: self._original(path) for path in self.record['files_changed']}},
-                           REVIEW, Review)
+                           instructions, Review)
+        if self.record.get('operator'):
+            from .engineering_operator import checked_findings
+            checked_findings(self.record, review)
         safe_text(review.summary)
         text_value(review.summary, 4000)
         if fingerprint != self._diff():
             raise ToolDenied('Candidate changed during review')
-        self.record.update(state=review.verdict, reviewer_result=review.model_dump(),
+        self.record.update(state=review.verdict, reviewer_result=review.model_dump(exclude_defaults=True),
                            reviewed_at=timestamp(), reviewed_fingerprint=fingerprint,
                            reviewed_diff_hash=digest(self.record['diff'].encode()))
         from .candidate_provider import failure_evidence
@@ -585,7 +626,10 @@ class SelfEditService:
                 if prior_fingerprint and self._diff() != prior_fingerprint:
                     self.record['execution_origin'] = 'operator_assisted'
                     self.store.save(self.record, 'operator_worktree_change')
-            if action == 'start':
+            if action == 'operator':
+                from .engineering_operator import coordinate
+                coordinate(self)
+            elif action == 'start':
                 self._prepare()
             elif action == 'tests':
                 self._tests()
@@ -598,12 +642,14 @@ class SelfEditService:
         except Exception as exc:
             from .candidate_provider import ProviderFailure, failure_evidence, execution_error_code, FAILURES
             failure = (self.record.get('failure') if isinstance(exc, ProviderFailure) else None) or failure_evidence(
-                self.record.get('improvement', {}).get('implementation_provider', 'openai'),
+                exc.provider if action == 'operator' and isinstance(exc, ProviderFailure) else
+                    self.record.get('improvement', {}).get('implementation_provider', 'openai'),
                 execution_error_code(exc), self.record.get('stage', 'planning'),
                 self.record.get('source_context', {}).get('attempt', 1))
             self.record.update(state='rejected' if isinstance(exc, ToolDenied) else 'needs_revision',
                                error=str(exc) if isinstance(exc, ToolDenied) else FAILURES[failure['code']][1], failure=failure,
-                               tested_fingerprint=None, reviewer_result=None)
+                               **({} if action == 'operator' and not isinstance(exc, ToolDenied) else
+                                  dict(tested_fingerprint=None, reviewer_result=None)))
             self.store.save(self.record, 'candidate_failed')
         finally:
             self._improvement_evidence()
@@ -652,7 +698,9 @@ class SelfEditService:
         import fcntl
         record = self.store.get(candidate_id, recover=False)
         job_id = (record or {}).get('source_context', {}).get('engineering_job_id')
-        if action == 'start' or not job_id:
+        if action == 'operator' and not hasattr(self, 'engineering_lock_fd'):
+            raise ToolDenied('Operator execution requires the engineering worker fence')
+        if action in {'start', 'operator'} or not job_id:
             return self._operate_locked(candidate_id, action)
         from .engineering_jobs import EngineeringJobs
         jobs = EngineeringJobs(self.store.database)
@@ -736,8 +784,9 @@ class SelfEditService:
                 record.get('improvement', {}).get('implementation_provider', 'openai'),
                 'candidate_deadline' if isinstance(exc, TimeoutError) else 'worker_failed',
                 record.get('stage', 'planning'), record.get('source_context', {}).get('attempt', 1))
-            record.update(state='rejected', error='Candidate deadline or worker limit reached.',
-                          tested_fingerprint=None, reviewer_result=None)
+            record.update(state='needs_revision' if action == 'operator' else 'rejected',
+                          error='Candidate deadline or worker limit reached.',
+                          **({} if action == 'operator' else dict(tested_fingerprint=None, reviewer_result=None)))
             self.store.save(record, 'worker_stopped')
         finally:
             if isinstance(process, subprocess.Popen) and process.stdin:
