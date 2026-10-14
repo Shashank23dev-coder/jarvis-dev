@@ -640,15 +640,30 @@ class SelfEditService:
             else:
                 raise ValueError('Unknown candidate operation')
         except Exception as exc:
-            from .candidate_provider import ProviderFailure, failure_evidence, execution_error_code, FAILURES
+            from .candidate_provider import (ProviderFailure, failure_evidence, execution_error_code,
+                                             FAILURES, SANDBOX_SAFETY_DENIALS)
             failure = (self.record.get('failure') if isinstance(exc, ProviderFailure) else None) or failure_evidence(
                 exc.provider if action == 'operator' and isinstance(exc, ProviderFailure) else
                     self.record.get('improvement', {}).get('implementation_provider', 'openai'),
                 execution_error_code(exc), self.record.get('stage', 'planning'),
                 self.record.get('source_context', {}).get('attempt', 1))
-            self.record.update(state='rejected' if isinstance(exc, ToolDenied) else 'needs_revision',
+            # Operator checkpoints can resume after an unavailable test sandbox
+            # or an exhausted operation budget. Keep all other denials terminal,
+            # including worktree, baseline, and identity violations. In
+            # particular, a sandbox availability wrapper must not hide a failed
+            # hardened-runtime or volume safety check in its cause.
+            retryable_denial = (action == 'operator' and isinstance(exc, ToolDenied)
+                and str(exc) in {
+                    'No usable sandbox: Bubblewrap and Docker unavailable; host execution disabled',
+                    'Docker runtime image unavailable',
+                    'Sandbox setup exhausted test deadline',
+                    'Candidate deadline exceeded',
+                }
+                and not (isinstance(exc.__cause__, ToolDenied)
+                         and str(exc.__cause__) in SANDBOX_SAFETY_DENIALS))
+            self.record.update(state='needs_revision' if retryable_denial or not isinstance(exc, ToolDenied) else 'rejected',
                                error=str(exc) if isinstance(exc, ToolDenied) else FAILURES[failure['code']][1], failure=failure,
-                               **({} if action == 'operator' and not isinstance(exc, ToolDenied) else
+                               **({} if action == 'operator' and (retryable_denial or not isinstance(exc, ToolDenied)) else
                                   dict(tested_fingerprint=None, reviewer_result=None)))
             self.store.save(self.record, 'candidate_failed')
         finally:

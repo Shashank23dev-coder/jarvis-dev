@@ -9,6 +9,11 @@ from pydantic import Field
 from tools.schemas import StrictModel
 
 PROVIDERS = {'codex', 'openai', 'claude_code'}
+SANDBOX_SAFETY_DENIALS = frozenset({
+    'Docker runtime must have no implicit volumes',
+    'Docker hardened runtime probe failed',
+    'Docker sandbox cleanup could not be confirmed',
+})
 ProviderId = Annotated[str, Field(pattern=r'^[a-z][a-z0-9_]{0,63}$')]
 FAILURES = {
     'provider_authentication': (False, 'Configure the development provider credential.'),
@@ -24,6 +29,7 @@ FAILURES = {
     'source_not_clean': (True, 'Commit development changes before resuming.'),
     'credential_content_blocked': (False, 'Remove credential-like content from the proposed edits.'),
     'sandbox_unavailable': (True, 'Restore the configured Docker test sandbox.'),
+    'sandbox_integrity_failed': (False, 'Inspect the sandbox safety configuration before retrying.'),
     'candidate_deadline': (True, 'Resume with a fresh candidate budget.'),
     'candidate_policy_denied': (False, 'Keep edits within approved development paths and limits.'),
     'tests_failed': (True, 'Revise the candidate using test evidence.'),
@@ -145,6 +151,8 @@ def execution_error_code(exc):
     from tools.policy import ToolDenied
     if isinstance(exc, ToolDenied):
         value = str(exc)
+        if value in SANDBOX_SAFETY_DENIALS or isinstance(exc.__cause__, ToolDenied) and str(exc.__cause__) in SANDBOX_SAFETY_DENIALS:
+            return 'sandbox_integrity_failed'
         if value == 'Proposal made no changes':
             return 'provider_no_changes'
         if value == 'Source must be clean before starting a candidate':

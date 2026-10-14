@@ -80,8 +80,18 @@ def harness(setup, monkeypatch, tmp_path):
     monkeypatch.setattr(EngineeringRegistry, 'refresh_claude', lambda *a, **kw: None)
 
     def tester(repository, phase, paths):
+        previous_targeted = sum(e.get('test') == 'targeted' for e in read_events(log))
         emit(dict(test=phase, worktree=str(repository.root)))
+        if phase == 'targeted' and behavior.get('targeted_denial') and not previous_targeted:
+            if behavior.get('targeted_safety_cause'):
+                try:
+                    raise ToolDenied(behavior['targeted_safety_cause'])
+                except ToolDenied as cause:
+                    raise ToolDenied(behavior['targeted_denial']) from cause
+            raise ToolDenied(behavior['targeted_denial'])
         content = repository.read_text('src/app.py')
+        if phase == 'targeted' and behavior.get('targeted_tamper'):
+            Path(repository.root, 'src/app.py').write_text('value = 999\n')
         return CommandResult(('pytest',), 0 if content.splitlines()[0] == 'value = 2' else 1, 'Assertion result')
 
     def prepare(service, record):
@@ -182,6 +192,78 @@ def test_resume_preserves_implementation_tests_and_worktree_across_restart(harne
     assert len([e for e in events if e.get('role') == 'implement']) == 1
     assert [e['test'] for e in events if 'test' in e] == ['baseline', 'targeted']
     assert len(second['failures']) >= 1
+
+
+@pytest.mark.parametrize('denial,code', [
+    ('No usable sandbox: Bubblewrap and Docker unavailable; host execution disabled', 'sandbox_unavailable'),
+    ('Candidate deadline exceeded', 'candidate_deadline'),
+])
+def test_targeted_operational_denial_resumes_same_candidate_without_reimplementation(harness, denial, code):
+    h = harness
+    h['behavior']['targeted_denial'] = denial
+    job = h['enqueue']()
+    first = h['worker']().once()
+    assert first['status'] == 'blocked' and first['operator']['phase'] == 'validate', first
+    assert first['failure']['code'] == code and first['failure']['retryable']
+    candidate = h['worker']().service.store.get(first['candidate_id'], internal=True)
+    assert candidate['state'] == 'needs_revision'
+    assert candidate['operator']['revision'] == 1
+    assert candidate['improvement']['baseline_comparison']['baseline']
+    original_worktree = tree_bytes(Path(first['worktree']))
+    EngineeringJobs(h['db']).control(job['id'], 'resume')
+    second = h['worker']().once()
+    assert second['status'] == 'waiting_for_approval' and second['operator']['ready'], second
+    assert second['candidate_ids'] == first['candidate_ids']
+    assert second['worktree'] == first['worktree']
+    assert tree_bytes(Path(second['worktree'])) == original_worktree
+    events = read_events(h['log'])
+    assert len([e for e in events if e.get('role') == 'implement']) == 1
+    assert [e['test'] for e in events if 'test' in e] == ['baseline', 'targeted', 'targeted']
+
+
+def test_targeted_worktree_tamper_remains_terminal(harness):
+    h = harness
+    h['behavior']['targeted_tamper'] = True
+    job = h['enqueue']()
+    first = h['worker']().once()
+    assert first['status'] == 'blocked' and first['operator']['phase'] == 'validate', first
+    candidate = h['worker']().service.store.get(first['candidate_id'], internal=True)
+    assert candidate['state'] == 'rejected'
+    EngineeringJobs(h['db']).control(job['id'], 'resume')
+    second = h['worker']().once()
+    assert second['status'] == 'blocked' and second['candidate_ids'] == first['candidate_ids']
+    assert len([e for e in read_events(h['log']) if e.get('role') == 'implement']) == 1
+
+
+@pytest.mark.parametrize('denial', [
+    'Operator worktree changed outside its checkpoint',
+    'Operator candidate identity mismatch',
+    'Candidate commit identity changed',
+    'Baseline changed during tests',
+    'Docker runtime must have no implicit volumes',
+])
+def test_integrity_and_sandbox_safety_denials_reject_candidate(harness, denial):
+    h = harness
+    h['behavior']['targeted_denial'] = denial
+    h['enqueue']()
+    result = h['worker']().once()
+    candidate = h['worker']().service.store.get(result['candidate_id'], internal=True)
+    assert result['status'] == 'blocked'
+    assert candidate['state'] == 'rejected'
+    assert not candidate['operator']['ready']
+    assert candidate['failure']['retryable'] is False
+
+
+def test_sandbox_unavailable_wrapper_does_not_hide_safety_denial(harness):
+    h = harness
+    h['behavior']['targeted_denial'] = 'No usable sandbox: Bubblewrap and Docker unavailable; host execution disabled'
+    h['behavior']['targeted_safety_cause'] = 'Docker runtime must have no implicit volumes'
+    h['enqueue']()
+    result = h['worker']().once()
+    candidate = h['worker']().service.store.get(result['candidate_id'], internal=True)
+    assert candidate['state'] == 'rejected'
+    assert candidate['failure']['code'] == 'sandbox_integrity_failed'
+    assert candidate['failure']['retryable'] is False
 
 
 def test_release_failure_keeps_pass_and_commit_for_retry(harness, tmp_path):
