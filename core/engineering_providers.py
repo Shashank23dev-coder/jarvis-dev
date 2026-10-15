@@ -15,6 +15,8 @@ State = Literal['available', 'unavailable', 'not_authenticated', 'quota_blocked'
 FAILURE_STATES = {'provider_authentication': 'not_authenticated',
                   'provider_quota': 'quota_blocked', 'provider_rate_limit': 'quota_blocked',
                   'provider_unavailable': 'unavailable'}
+STATE_FAILURES = {'not_authenticated': 'provider_authentication', 'quota_blocked': 'provider_quota',
+                  'invocation_failed': 'provider_invocation_failed'}
 
 
 def utc_time(value):
@@ -195,51 +197,58 @@ class EngineeringRegistry:
             adapter_type=requested_type,
             billing_class='subscription_cli' if requested_type == 'cli' else
                           'api_billed' if requested_type == 'api' else None,
-            fallback_reason='provider_unavailable' if requested not in self.registrations else None)
+            fallback_reason=None)
+        # Only the requested provider explains a fallback: set when it is
+        # skipped or fails, before any evidence write, never by a later provider.
+        requested_reason = 'provider_unavailable' if requested not in self.registrations else None
+
+        def attribute(name, reason):
+            nonlocal requested_reason
+            if name == requested:
+                requested_reason = self.last_route['fallback_reason'] = reason
+
+        self.last_route['fallback_reason'] = requested_reason
         reasons = []
         for name in order:
             if allowed is not None and name not in allowed:
-                if name == requested:
-                    self.last_route['fallback_reason'] = 'route_not_allowed'
+                attribute(name, 'route_not_allowed')
                 continue
             if name in exclude:
-                if name == requested:
-                    self.last_route['fallback_reason'] = (
-                        'reviewer_independence' if stage == 'reviewing' else 'provider_excluded')
+                attribute(name, 'reviewer_independence' if stage == 'reviewing' else 'provider_excluded')
                 continue
             if name not in self.registrations:
-                if name == requested:
-                    self.last_route['fallback_reason'] = 'provider_unavailable'
+                attribute(name, 'provider_unavailable')
                 continue
             r = self.registrations[name]
             if stage not in r.capabilities or task_type not in r.task_types:
-                if name == requested:
-                    self.last_route['fallback_reason'] = 'capability_mismatch'
+                attribute(name, 'capability_mismatch')
                 continue
-            if name == 'codex_api' and name != preferred:
+            if name == 'codex_api':
+                # Explicit selection consents to this provider, never to spend.
                 # A CLI failure cannot create a new API charge. Unknown cost is
                 # rejected by the existing financial policy until authorized.
                 from .engineering_authority import assess_action
-                if not api_fallback_authorized or not assess_action('spend', amount=None).allowed:
-                    if name == requested:
-                        self.last_route['fallback_reason'] = 'financial_authorization_required'
+                explicit = name == requested
+                if not (explicit or api_fallback_authorized) or not assess_action('spend', amount=None).allowed:
+                    attribute(name, 'financial_authorization_required')
+                    if explicit:
+                        # Block rather than switch to another (API-billed) route.
+                        break
                     continue
             if modern and name in {'codex', 'openai', 'claude_code'}:
-                if name == requested:
-                    self.last_route['fallback_reason'] = 'route_not_allowed'
+                attribute(name, 'route_not_allowed')
                 continue
             state = self.state(name)
             if state.current_usability not in {'available', 'unknown'}:
                 reasons.append(state)
-                if name == requested:
-                    self.last_route['fallback_reason'] = (
-                        state.observation.code if state.observation and state.observation.code
-                        else 'provider_unavailable')
+                attribute(name, state.observation.code if state.observation and state.observation.code
+                          else STATE_FAILURES.get(state.current_usability, 'provider_unavailable'))
                 if modern and name == requested and state.current_usability in {'quota_blocked', 'unavailable', 'not_authenticated'}:
                     break
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                attribute(name, 'provider_timeout')
                 raise RoutingBlocked(stage, reasons + [state], exclude=exclude, budget_exhausted=True)
             try:
                 result = r.adapter.complete(payload, instructions, remaining)
@@ -249,29 +258,28 @@ class EngineeringRegistry:
                     raise ProviderFailure(name, 'provider_invalid_response') from None
             except ProviderFailure as exc:
                 code = exc.code if exc.code.startswith('provider_') else 'provider_invocation_failed'
+                attribute(name, code)
                 self.observe(name, FAILURE_STATES.get(exc.code, 'invocation_failed'),
                              'provider_failure', 'engineering_request', code, stage=stage)
                 reasons.append(self.state(name))
-                if name == requested:
-                    self.last_route['fallback_reason'] = code
                 if modern and name == requested and exc.code in {'provider_quota', 'provider_rate_limit',
                                                                   'provider_unavailable', 'provider_authentication'}:
                     break
                 continue
             except Exception:
                 # Never reflect arbitrary adapter exception text.
+                attribute(name, 'provider_invocation_failed')
                 self.observe(name, 'invocation_failed', 'provider_failure',
                              'engineering_request', 'provider_invocation_failed', stage=stage)
                 reasons.append(self.state(name))
-                if name == requested:
-                    self.last_route['fallback_reason'] = 'provider_invocation_failed'
                 continue
             self.observe(name, 'available', 'provider_response', 'engineering_request', stage=stage)
             self.last_route.update(provider_used=name, adapter_type=r.provider_type,
                 billing_class='subscription_cli' if r.provider_type == 'cli' else 'api_billed',
-                fallback_reason=None if name == self.last_route['provider_requested'] else
-                _successful_fallback_reason(self.last_route['fallback_reason'], reasons))
+                fallback_reason=None if name == requested else
+                _successful_fallback_reason(requested_reason, reasons))
             return result, name
+        self.last_route['fallback_reason'] = requested_reason
         raise RoutingBlocked(stage, reasons, exclude=exclude)
 
     def snapshot(self):

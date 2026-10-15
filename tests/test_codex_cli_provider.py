@@ -87,7 +87,16 @@ def test_requested_skip_survives_later_failure_and_success(
     assert routes.state('codex_cli').last_failure is None
 
 
-def test_api_fallback_blocked_without_financial_authorization(tmp_path):
+def allow_spend(monkeypatch, allowed, seen=None):
+    from core import engineering_authority
+    def assess(action, **kw):
+        if seen is not None:
+            seen.append((action, kw))
+        return SimpleNamespace(allowed=allowed)
+    monkeypatch.setattr(engineering_authority, 'assess_action', assess)
+
+
+def test_api_fallback_blocked_without_financial_authorization(tmp_path, monkeypatch):
     calls = []
     routes = registry(tmp_path, calls, 'provider_invalid_response', 'provider_unavailable')
     with pytest.raises(RoutingBlocked):
@@ -95,10 +104,169 @@ def test_api_fallback_blocked_without_financial_authorization(tmp_path):
     assert calls == ['codex_cli']
     assert routes.last_route['provider_used'] is None
     assert routes.last_route['fallback_reason'] == 'provider_invalid_response'
-    # Explicit selection remains distinguishable from a surprise fallback.
+    # Explicit selection remains distinguishable from a surprise fallback once
+    # the financial policy authorizes the spend.
+    allow_spend(monkeypatch, True)
     assert routes.complete({}, '', 2, stage='implementing', preferred='codex_api')[1] == 'codex_api'
     assert calls[-1] == 'codex_api'
     assert routes.last_route['billing_class'] == 'api_billed'
+
+
+def api_registry(tmp_path, calls, later_failure='provider_invalid_response'):
+    return EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls), 'cli', True),
+        Registration(fake('claude_cli', calls, later_failure), 'cli', True),
+        Registration(fake('codex_api', calls), 'api', True),
+        Registration(fake('other_api', calls), 'api', True),
+        Registration(fake('later_cli', calls), 'cli', True)])
+
+
+@pytest.mark.parametrize('stage', ['implementing', 'reviewing'])
+@pytest.mark.parametrize('fallback_authorized', [False, True])
+def test_explicit_codex_api_denied_by_spend_policy_blocks_cleanly(
+        tmp_path, monkeypatch, stage, fallback_authorized):
+    from core.engineering_jobs import project_provider_route
+    calls, seen = [], []
+    allow_spend(monkeypatch, False, seen)
+    routes = api_registry(tmp_path, calls)
+    with pytest.raises(RoutingBlocked) as blocked:
+        routes.complete({}, '', 2, stage=stage, preferred='codex_api',
+                        api_fallback_authorized=fallback_authorized)
+    # No API invocation, no silent switch to any other provider (API or CLI).
+    assert calls == [] and seen == [('spend', {'amount': None})]
+    assert blocked.value.blocker['reasons'] == []
+    assert routes.last_route == dict(provider_requested='codex_api', provider_used=None,
+        adapter_type='api', billing_class='api_billed',
+        fallback_reason='financial_authorization_required')
+    assert project_provider_route(routes.last_route, 'codex_api')['fallback_state'] == 'blocked'
+    assert routes.state('codex_api').last_failure is None
+
+
+def test_explicit_codex_api_uses_real_spend_policy_by_default(tmp_path, monkeypatch):
+    # Unknown cost has no autonomous authorization under the existing policy.
+    monkeypatch.delenv('JARVIS_AUTONOMOUS_FINANCIAL_LIMIT', raising=False)
+    calls = []
+    routes = api_registry(tmp_path, calls)
+    with pytest.raises(RoutingBlocked):
+        routes.complete({}, '', 2, stage='implementing', preferred='codex_api')
+    assert calls == []
+    assert routes.last_route['fallback_reason'] == 'financial_authorization_required'
+
+
+def test_explicit_codex_api_authorized_spend_invokes_only_codex_api(tmp_path, monkeypatch):
+    calls, seen = [], []
+    allow_spend(monkeypatch, True, seen)
+    routes = api_registry(tmp_path, calls)
+    assert routes.complete({}, '', 2, stage='implementing', preferred='codex_api')[1] == 'codex_api'
+    assert calls == ['codex_api'] and seen == [('spend', {'amount': None})]
+    assert routes.last_route['fallback_reason'] is None
+
+
+def test_unauthorized_codex_api_fallback_does_not_overwrite_requested_reason(tmp_path, monkeypatch):
+    calls = []
+    allow_spend(monkeypatch, True)
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls, 'provider_timeout'), 'cli', True),
+        Registration(fake('codex_api', calls), 'api', True),
+        Registration(fake('later_cli', calls), 'cli', True)])
+    # Spend policy alone is not fallback consent.
+    _, used = routes.complete({}, '', 2, stage='implementing', preferred='codex_cli')
+    assert used == 'later_cli' and calls == ['codex_cli', 'later_cli']
+    assert routes.last_route['fallback_reason'] == 'provider_timeout'
+
+
+def raising(name, calls, exc):
+    def complete(*args):
+        calls.append(name)
+        raise exc
+    return SimpleNamespace(name=name, complete=complete)
+
+
+@pytest.mark.parametrize('adapter,expected', [
+    (lambda calls: fake('codex_cli', calls, 'provider_invalid_response'), 'provider_invalid_response'),
+    (lambda calls: fake('codex_cli', calls, 'provider_timeout'), 'provider_timeout'),
+    (lambda calls: fake('codex_cli', calls, 'provider_output_limit'), 'provider_output_limit'),
+    (lambda calls: fake('codex_cli', calls, 'provider_request_rejected'), 'provider_request_rejected'),
+    (lambda calls: fake('codex_cli', calls, 'provider_invocation_failed'), 'provider_invocation_failed'),
+    (lambda calls: fake('codex_cli', calls, 'tests_failed'), 'provider_invocation_failed'),
+    (lambda calls: raising('codex_cli', calls, RuntimeError('secret prose')), 'provider_invocation_failed'),
+])
+def test_requested_failure_code_survives_later_failure_and_success(tmp_path, adapter, expected):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(adapter(calls), 'cli', True),
+        Registration(fake('claude_cli', calls, 'provider_quota'), 'cli', True),
+        Registration(fake('later_cli', calls), 'cli', True)])
+    _, used = routes.complete({}, '', 2, stage='implementing', preferred='codex_cli')
+    assert used == 'later_cli' and calls == ['codex_cli', 'claude_cli', 'later_cli']
+    assert routes.last_route['fallback_reason'] == expected
+
+
+def test_requested_invalid_response_from_validation_survives_later_success(tmp_path):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls), 'cli', True),
+        Registration(fake('later_cli', calls), 'cli', True)])
+    def validate(result):
+        if calls[-1] == 'codex_cli':
+            raise ValueError('bad shape')
+    _, used = routes.complete({}, '', 2, stage='implementing', validate=validate)
+    assert used == 'later_cli'
+    assert routes.last_route['fallback_reason'] == 'provider_invalid_response'
+
+
+@pytest.mark.parametrize('code', ['provider_quota', 'provider_rate_limit',
+                                  'provider_authentication', 'provider_unavailable'])
+def test_requested_hard_failure_blocks_with_its_own_code(tmp_path, code):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls, code), 'cli', True),
+        Registration(fake('later_cli', calls), 'cli', True)])
+    with pytest.raises(RoutingBlocked):
+        routes.complete({}, '', 2, stage='implementing')
+    assert calls == ['codex_cli']
+    assert routes.last_route['fallback_reason'] == code
+
+
+@pytest.mark.parametrize('code', ['provider_quota', 'provider_authentication', 'provider_invalid_response'])
+def test_legacy_requested_failure_survives_later_failure_and_success(tmp_path, code):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex', calls, code), 'api', True),
+        Registration(fake('claude_code', calls, 'provider_timeout'), 'cli', True),
+        Registration(fake('later', calls), 'cli', True)])
+    _, used = routes.complete({}, '', 2, stage='implementing')
+    assert used == 'later' and calls == ['codex', 'claude_code', 'later']
+    assert routes.last_route['fallback_reason'] == code
+
+
+def test_requested_failure_attributed_even_if_evidence_write_fails(tmp_path, monkeypatch):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls, 'provider_timeout'), 'cli', True)])
+    def broken(*args, **kw):
+        raise OSError('disk')
+    monkeypatch.setattr(routes, 'observe', broken)
+    with pytest.raises(OSError):
+        routes.complete({}, '', 2, stage='implementing')
+    assert routes.last_route['fallback_reason'] == 'provider_timeout'
+
+
+@pytest.mark.parametrize('state,expected', [
+    ('quota_blocked', 'provider_quota'), ('not_authenticated', 'provider_authentication'),
+    ('invocation_failed', 'provider_invocation_failed'), ('unavailable', 'provider_unavailable')])
+def test_codeless_unusable_requested_state_maps_to_specific_reason(tmp_path, state, expected):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls), 'cli', True),
+        Registration(fake('later_cli', calls), 'cli', True)])
+    routes.observe('codex_cli', state, 'provider_failure', 'engineering_request')
+    try:
+        routes.complete({}, '', 2, stage='implementing')
+    except RoutingBlocked:
+        pass
+    assert 'codex_cli' not in calls
+    assert routes.last_route['fallback_reason'] == expected
 
 
 def test_requested_quota_reason_precedes_later_api_financial_skip():
