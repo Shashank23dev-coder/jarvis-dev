@@ -194,11 +194,20 @@ class EngineeringRegistry:
         reasons = []
         for name in order:
             if allowed is not None and name not in allowed:
+                if name == requested:
+                    self.last_route['fallback_reason'] = 'route_not_allowed'
                 continue
-            if name in exclude or name not in self.registrations:
+            if name in exclude:
+                if name == requested:
+                    self.last_route['fallback_reason'] = (
+                        'reviewer_independence' if stage == 'reviewing' else 'provider_excluded')
+                continue
+            if name not in self.registrations:
                 continue
             r = self.registrations[name]
             if stage not in r.capabilities or task_type not in r.task_types:
+                if name == requested:
+                    self.last_route['fallback_reason'] = 'capability_mismatch'
                 continue
             if name == 'codex_api' and name != preferred:
                 # A CLI failure cannot create a new API charge. Unknown cost is
@@ -208,6 +217,8 @@ class EngineeringRegistry:
                     self.last_route['fallback_reason'] = 'financial_authorization_required'
                     continue
             if modern and name in {'codex', 'openai', 'claude_code'}:
+                if name == requested:
+                    self.last_route['fallback_reason'] = 'route_not_allowed'
                 continue
             state = self.state(name)
             if state.current_usability not in {'available', 'unknown'}:
@@ -243,7 +254,8 @@ class EngineeringRegistry:
             self.last_route.update(provider_used=name, adapter_type=r.provider_type,
                 billing_class='subscription_cli' if r.provider_type == 'cli' else 'api_billed',
                 fallback_reason=None if name == self.last_route['provider_requested'] else
-                (reasons[0].observation.code if reasons and reasons[0].observation else 'provider_unavailable'))
+                (self.last_route['fallback_reason'] or
+                 (reasons[0].observation.code if reasons and reasons[0].observation else None)))
             return result, name
         raise RoutingBlocked(stage, reasons, exclude=exclude)
 

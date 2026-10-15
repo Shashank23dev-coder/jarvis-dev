@@ -671,9 +671,14 @@ class SelfEditService:
                 }
                 and not (isinstance(exc.__cause__, ToolDenied)
                          and str(exc.__cause__) in SANDBOX_SAFETY_DENIALS))
+            preserve_review_evidence = (action in {'start', 'review'}
+                and isinstance(exc, ProviderFailure) and self.record.get('stage') == 'reviewing'
+                and self.record.get('diff') and self.record.get('fingerprint')
+                and self.record.get('tested_fingerprint') == self.record['fingerprint']
+                and self.record.get('reviewer_result') is None)
             self.record.update(state='needs_revision' if retryable_denial or not isinstance(exc, ToolDenied) else 'rejected',
                                error=str(exc) if isinstance(exc, ToolDenied) else FAILURES[failure['code']][1], failure=failure,
-                               **({} if action == 'operator' and (retryable_denial or not isinstance(exc, ToolDenied)) else
+                               **({} if preserve_review_evidence or action == 'operator' and (retryable_denial or not isinstance(exc, ToolDenied)) else
                                   dict(tested_fingerprint=None, reviewer_result=None)))
             self.store.save(self.record, 'candidate_failed')
         finally:

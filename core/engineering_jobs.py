@@ -482,7 +482,8 @@ def project_provider_route(route, requested):
         raise ToolDenied('Invalid provider billing class')
     if reason is not None and reason not in {'financial_authorization_required', 'provider_authentication',
             'provider_quota', 'provider_rate_limit', 'provider_unavailable', 'provider_invocation_failed',
-            'provider_timeout', 'provider_invalid_response', 'provider_output_limit', 'provider_request_rejected'}:
+            'provider_timeout', 'provider_invalid_response', 'provider_output_limit', 'provider_request_rejected',
+            'reviewer_independence', 'provider_excluded', 'capability_mismatch', 'route_not_allowed'}:
         raise ToolDenied('Invalid provider fallback reason')
     return dict(provider_requested=requested, provider_used=used, adapter_type=adapter,
                 billing_class=billing, fallback_reason=reason,

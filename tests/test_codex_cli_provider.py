@@ -41,6 +41,31 @@ def test_cli_default_and_api_never_called_when_healthy(tmp_path):
     assert calls == ['codex_cli', 'claude_cli']
 
 
+@pytest.mark.parametrize('stage,preferred,allowed,exclude,capabilities,expected', [
+    ('reviewing', 'codex_cli', None, ('codex_cli',), ('implementing', 'reviewing'),
+     'reviewer_independence'),
+    ('implementing', 'codex_cli', None, ('codex_cli',), ('implementing', 'reviewing'),
+     'provider_excluded'),
+    ('reviewing', 'codex_cli', None, (), ('implementing',), 'capability_mismatch'),
+    ('implementing', 'codex_cli', ('claude_cli',), (), ('implementing', 'reviewing'),
+     'route_not_allowed'),
+])
+def test_intentional_routing_skip_has_accurate_attribution(
+        tmp_path, stage, preferred, allowed, exclude, capabilities, expected):
+    from core.engineering_jobs import project_provider_route
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls), 'cli', True, capabilities=capabilities),
+        Registration(fake('claude_cli', calls), 'cli', True)])
+    _, used = routes.complete({}, '', 2, stage=stage, preferred=preferred,
+                              allowed=allowed, exclude=exclude)
+    assert used == 'claude_cli' and calls == ['claude_cli']
+    assert routes.last_route['fallback_reason'] == expected
+    assert project_provider_route(routes.last_route, preferred)['fallback_state'] == 'used'
+    assert routes.state(preferred).last_failure is None
+    assert routes.state(preferred).current_usability == 'unknown'
+
+
 def test_api_fallback_blocked_without_financial_authorization(tmp_path):
     calls = []
     routes = registry(tmp_path, calls, 'provider_invalid_response', 'provider_unavailable')

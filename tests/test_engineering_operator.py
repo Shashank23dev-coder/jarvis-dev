@@ -60,6 +60,8 @@ def harness(setup, monkeypatch, tmp_path):
         if role == 'implement' and behavior.get('cli_quota'):
             raise ProviderFailure(provider, 'provider_quota')
         if role == 'review':
+            if behavior.get('review_failure') and not calls:
+                raise ProviderFailure(provider, behavior['review_failure'])
             if behavior.get('quota') and not calls:
                 raise ProviderFailure(provider, 'provider_quota')
             if behavior.get('interrupt') and not calls:
@@ -216,6 +218,39 @@ def test_resume_preserves_implementation_tests_and_worktree_across_restart(harne
     assert len([e for e in events if e.get('role') == 'implement']) == 1
     assert [e['test'] for e in events if 'test' in e] == ['baseline', 'targeted']
     assert len(second['failures']) >= 1
+
+
+@pytest.mark.parametrize('failure', [
+    'provider_quota', 'provider_authentication', 'provider_unavailable'])
+def test_default_job_resumes_review_without_reimplementing(harness, monkeypatch, failure):
+    from test_engineering_jobs import enqueue
+    h = harness
+    h['behavior']['review_failure'] = failure
+    job = enqueue(h['db'])
+    first = h['worker']().once()
+    assert first['status'] == 'blocked' and first['failure']['code'] == failure
+    candidate = h['worker']().service.store.get(first['candidate_id'])
+    assert candidate['diff'] and candidate['tested_fingerprint'] == candidate['fingerprint']
+    assert candidate['reviewer_result'] is None and not candidate['busy']
+    worktree = candidate['worktree']
+    tests = candidate['test_results']
+    before = tree_bytes(Path(worktree))
+    assert [e['provider'] for e in read_events(h['log']) if 'role' in e] == ['codex_cli', 'claude_cli']
+
+    h['db'].close()
+    reopened = Database(h['db'].path)
+    EngineeringJobs(reopened).control(job['id'], 'resume')
+    monkeypatch.setattr(EngineeringRegistry, 'ttl_seconds', 0)
+    second = h['worker'](reopened).once()
+    assert second['status'] == 'completed', second
+    assert second['candidate_ids'] == first['candidate_ids']
+    assert second['candidate_id'] == first['candidate_id']
+    reviewed = h['worker'](reopened).service.store.get(second['candidate_id'])
+    assert reviewed['worktree'] == worktree and tree_bytes(Path(worktree)) == before
+    assert reviewed['test_results'] == tests
+    assert reviewed['reviewer_result']['verdict'] == 'passed'
+    assert [e['provider'] for e in read_events(h['log']) if 'role' in e] == [
+        'codex_cli', 'claude_cli', 'claude_cli']
 
 
 @pytest.mark.parametrize('denial,code', [

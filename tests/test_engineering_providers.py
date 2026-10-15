@@ -59,6 +59,7 @@ def test_codex_failure_falls_back_and_observations_survive_restart(tmp_path, cod
     r = registry(tmp_path, codex=adapter('codex', code))
     result, name = r.complete({}, '', 1, stage='implementing')
     assert name == 'claude_code' and result == {'edits': []}
+    assert r.last_route['fallback_reason'] == code
     assert r.state('codex').last_failure.code == code
     r.database.close()
     assert registry(tmp_path).snapshot()['last_successful_route']['provider'] == 'claude_code'

@@ -47,11 +47,29 @@ class EngineeringWorker:
                     from .engineering_operator import run_job
                     candidate = run_job(service, self.jobs, job, owner)
                     return self.jobs.finish(job['id'], owner, candidate)
+                continued_review = False
                 if job['candidate_id']:
                     prior = service.store.get(job['candidate_id'], recover=False)
-                    if prior and prior['state'] == 'passed' and not prior['busy']:
+                    if prior and not prior['busy'] and prior['state'] == 'passed':
                         candidate = service.inspect(prior['id'])
-                if candidate is None or candidate['state'] != 'passed':
+                    elif (prior and not prior['busy'] and prior['state'] == 'needs_revision'
+                          and prior.get('diff') and prior.get('fingerprint')
+                          and prior.get('tested_fingerprint') == prior['fingerprint']
+                          and prior.get('reviewer_result') is None):
+                        candidate = service.inspect(prior['id'])
+                        if (candidate and candidate['state'] == 'needs_revision'
+                                and candidate.get('diff') and candidate.get('fingerprint')
+                                and candidate.get('tested_fingerprint') == candidate['fingerprint']
+                                and candidate.get('reviewer_result') is None):
+                            record = service.store.get(prior['id'], internal=True)
+                            record['source_context'].update(lease_owner=owner, attempt=job['attempts'])
+                            service.store.save(record)
+                            # The worker already holds the engineering fence and
+                            # job lease; the owner-facing review path would
+                            # reject that active lease.
+                            candidate = service._operate_locked(prior['id'], 'review')
+                            continued_review = True
+                if not continued_review and (candidate is None or candidate['state'] != 'passed'):
                     context = dict(job['source'], source='engineering_job', engineering_job_id=job['id'],
                                    lease_owner=owner, attempt=job['attempts'], project_id=job.get('project_id'),
                                    decision_id=(job.get('decision') or {}).get('id'))
