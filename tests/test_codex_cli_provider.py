@@ -8,7 +8,8 @@ import pytest
 from core import candidate_codex_cli as cli
 from core.candidate_provider import ProviderFailure
 from core.database import Database
-from core.engineering_providers import EngineeringRegistry, Registration, RoutingBlocked
+from core.engineering_providers import (EngineeringRegistry, Registration, RoutingBlocked,
+                                        _successful_fallback_reason)
 
 
 def fake(name, calls, failure=None):
@@ -73,11 +74,61 @@ def test_api_fallback_blocked_without_financial_authorization(tmp_path):
         routes.complete({}, '', 2, stage='implementing', api_fallback_authorized=True)
     assert calls == ['codex_cli']
     assert routes.last_route['provider_used'] is None
-    assert routes.last_route['fallback_reason'] == 'financial_authorization_required'
+    assert routes.last_route['fallback_reason'] == 'provider_invalid_response'
     # Explicit selection remains distinguishable from a surprise fallback.
     assert routes.complete({}, '', 2, stage='implementing', preferred='codex_api')[1] == 'codex_api'
     assert calls[-1] == 'codex_api'
     assert routes.last_route['billing_class'] == 'api_billed'
+
+
+def test_requested_quota_reason_precedes_later_api_financial_skip():
+    # Production routing stops on CLI quota. Exercise the attribution decision
+    # for the stated later-provider sequence without changing that routing rule.
+    assert _successful_fallback_reason('provider_quota', []) == 'provider_quota'
+    assert _successful_fallback_reason('provider_quota', [SimpleNamespace(
+        observation=SimpleNamespace(code='financial_authorization_required'))]) == 'provider_quota'
+
+
+def test_requested_failure_survives_api_skip_before_later_success(tmp_path):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls, 'provider_invalid_response'), 'cli', True),
+        Registration(fake('claude_cli', calls, 'provider_invalid_response'), 'cli', True),
+        Registration(fake('codex_api', calls), 'api', True),
+        Registration(fake('later_cli', calls), 'cli', True)])
+    _, used = routes.complete({}, '', 2, stage='implementing')
+    assert used == 'later_cli'
+    assert calls == ['codex_cli', 'claude_cli', 'later_cli']
+    assert routes.last_route['fallback_reason'] == 'provider_invalid_response'
+
+
+@pytest.mark.parametrize('unregistered,expected', [
+    (True, 'provider_unavailable'),
+    (False, 'provider_invocation_failed'),
+])
+def test_missing_or_unusable_requested_provider_has_truthful_reason(
+        tmp_path, unregistered, expected):
+    calls = []
+    registrations = [Registration(fake('claude_cli', calls), 'cli', True)]
+    if not unregistered:
+        registrations.insert(0, Registration(fake('codex_cli', calls), 'cli', True))
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), registrations)
+    if not unregistered:
+        routes.observe('codex_cli', 'invocation_failed', 'provider_failure',
+                       'engineering_request', 'provider_invocation_failed')
+    _, used = routes.complete({}, '', 2, stage='implementing', preferred='codex_cli')
+    assert used == 'claude_cli' and calls == ['claude_cli']
+    assert routes.last_route['provider_requested'] == 'codex_cli'
+    assert routes.last_route['fallback_reason'] == expected
+
+
+def test_configured_unavailable_requested_route_has_reason_even_when_blocked(tmp_path):
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', []), 'cli', False),
+        Registration(fake('claude_cli', []), 'cli', True)])
+    with pytest.raises(RoutingBlocked):
+        routes.complete({}, '', 2, stage='implementing')
+    assert routes.last_route['fallback_reason'] == 'provider_unavailable'
 
 
 def test_cli_invocation_is_subscription_only_and_cannot_edit_checkout(monkeypatch):
@@ -141,6 +192,7 @@ def test_quota_on_stderr_blocks_without_cli_or_api_fallback(tmp_path, monkeypatc
     assert routes.last_route['provider_requested'] == 'codex_cli'
     assert routes.last_route['provider_used'] is None
     assert routes.last_route['billing_class'] == 'subscription_cli'
+    assert routes.last_route['fallback_reason'] == 'provider_quota'
 
     monkeypatch.setattr(cli, 'codex_executable', lambda: '/usr/local/bin/codex')
     monkeypatch.setattr(cli.subprocess, 'run', lambda *a, **kw:

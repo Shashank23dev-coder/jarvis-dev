@@ -224,7 +224,14 @@ def test_resume_preserves_implementation_tests_and_worktree_across_restart(harne
     'provider_quota', 'provider_authentication', 'provider_unavailable'])
 def test_default_job_resumes_review_without_reimplementing(harness, monkeypatch, failure):
     from test_engineering_jobs import enqueue
+    from core.candidate_apply import CandidateApply
+    from core.deployment_release import ReleaseService
     h = harness
+    source_before = tree_bytes(h['source'])
+    monkeypatch.setattr(CandidateApply, 'apply',
+        lambda *args, **kwargs: pytest.fail('Review resume must not apply a candidate'))
+    monkeypatch.setattr(ReleaseService, 'deploy',
+        lambda *args, **kwargs: pytest.fail('Review resume must not deploy'))
     h['behavior']['review_failure'] = failure
     job = enqueue(h['db'])
     first = h['worker']().once()
@@ -249,6 +256,8 @@ def test_default_job_resumes_review_without_reimplementing(harness, monkeypatch,
     assert reviewed['worktree'] == worktree and tree_bytes(Path(worktree)) == before
     assert reviewed['test_results'] == tests
     assert reviewed['reviewer_result']['verdict'] == 'passed'
+    assert not reviewed.get('apply') and not reviewed.get('deployment')
+    assert tree_bytes(h['source']) == source_before
     assert [e['provider'] for e in read_events(h['log']) if 'role' in e] == [
         'codex_cli', 'claude_cli', 'claude_cli']
 
