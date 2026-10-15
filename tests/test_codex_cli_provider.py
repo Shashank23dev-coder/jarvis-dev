@@ -67,6 +67,26 @@ def test_intentional_routing_skip_has_accurate_attribution(
     assert routes.state(preferred).current_usability == 'unknown'
 
 
+@pytest.mark.parametrize('allowed,capabilities,expected', [
+    (('claude_cli', 'later_cli'), ('implementing',), 'route_not_allowed'),
+    (None, ('reviewing',), 'capability_mismatch'),
+])
+def test_requested_skip_survives_later_failure_and_success(
+        tmp_path, allowed, capabilities, expected):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls), 'cli', True, capabilities=capabilities),
+        Registration(fake('claude_cli', calls, 'provider_invalid_response'), 'cli', True),
+        Registration(fake('later_cli', calls), 'cli', True)])
+    _, used = routes.complete({}, '', 2, stage='implementing', preferred='codex_cli',
+                              allowed=allowed)
+    assert used == 'later_cli'
+    assert calls == ['claude_cli', 'later_cli']
+    assert routes.last_route['fallback_reason'] == expected
+    assert routes.last_route['fallback_reason'] is not None
+    assert routes.state('codex_cli').last_failure is None
+
+
 def test_api_fallback_blocked_without_financial_authorization(tmp_path):
     calls = []
     routes = registry(tmp_path, calls, 'provider_invalid_response', 'provider_unavailable')
@@ -87,6 +107,27 @@ def test_requested_quota_reason_precedes_later_api_financial_skip():
     assert _successful_fallback_reason('provider_quota', []) == 'provider_quota'
     assert _successful_fallback_reason('provider_quota', [SimpleNamespace(
         observation=SimpleNamespace(code='financial_authorization_required'))]) == 'provider_quota'
+
+
+def test_financial_skip_attribution_ignores_later_provider_failure():
+    later_failure = [SimpleNamespace(observation=SimpleNamespace(code='provider_quota'))]
+    assert _successful_fallback_reason('financial_authorization_required', later_failure) == (
+        'financial_authorization_required')
+
+
+def test_successful_fallback_without_specific_requested_reason_uses_last_resort():
+    later_failure = [SimpleNamespace(observation=SimpleNamespace(code='provider_quota'))]
+    assert _successful_fallback_reason(None, later_failure) == 'provider_unavailable'
+
+
+def test_requested_quota_failure_survives_later_success(tmp_path):
+    calls = []
+    routes = EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex', calls, 'provider_quota'), 'api', True),
+        Registration(fake('claude_code', calls), 'cli', True)])
+    _, used = routes.complete({}, '', 2, stage='implementing')
+    assert used == 'claude_code' and calls == ['codex', 'claude_code']
+    assert routes.last_route['fallback_reason'] == 'provider_quota'
 
 
 def test_requested_failure_survives_api_skip_before_later_success(tmp_path):

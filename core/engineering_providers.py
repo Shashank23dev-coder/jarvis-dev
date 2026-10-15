@@ -70,9 +70,8 @@ class RoutingBlocked(ProviderFailure):
 
 
 def _successful_fallback_reason(requested_reason, reasons):
-    """A requested-route reason outranks evidence from later fallback attempts."""
-    return (requested_reason or next((state.observation.code for state in reasons
-        if state.observation and state.observation.code), None) or 'provider_unavailable')
+    """Only the requested provider can explain a successful fallback."""
+    return requested_reason or 'provider_unavailable'
 
 
 @dataclass(frozen=True)
@@ -222,6 +221,8 @@ class EngineeringRegistry:
                 # rejected by the existing financial policy until authorized.
                 from .engineering_authority import assess_action
                 if not api_fallback_authorized or not assess_action('spend', amount=None).allowed:
+                    if name == requested:
+                        self.last_route['fallback_reason'] = 'financial_authorization_required'
                     continue
             if modern and name in {'codex', 'openai', 'claude_code'}:
                 if name == requested:
