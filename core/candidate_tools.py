@@ -28,7 +28,7 @@ class EngineeringArguments(CreateArguments):
 
 
 class BrainEngineeringArguments(EngineeringArguments):
-    provider: ProviderId = 'codex'
+    provider: ProviderId = 'codex_cli'
     execution_mode: Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW'] | None = None
 
 
@@ -37,7 +37,7 @@ class OperatorArguments(EngineeringArguments):
 
 
 class PrepareEngineeringArguments(StrictModel):
-    provider: ProviderId = 'codex'
+    provider: ProviderId = 'codex_cli'
     scope: Literal['documentation', 'code'] = 'code'
     project_id: Annotated[str, Field(pattern=r'^[a-z][a-z0-9_-]{0,63}$')] | None = None
 
@@ -61,7 +61,7 @@ APPLY_READ = re.compile(PREFIX + r'(?:show (?:the )?apply eligibility preview fo
 
 class CandidateTools:
     CONTINUE_ENGINEERING = ('The current task has an authorized, prepared engineering action but no candidate. '
-        'Continue this same task by calling create_engineering_job with provider=codex and paths from the returned workspace catalog. '
+        'Continue this same task by calling create_engineering_job with provider=codex_cli and paths from the returned workspace catalog. '
         'One tool per response allows additional tool responses in this task. Do not ask for another user request. '
         'Return the queued job ID; the separate worker implements, tests and reviews. Never apply or deploy.')
 
@@ -224,7 +224,7 @@ always requires approval for the exact commit and verified release evidence.
         self.ids.add(record['id'])
         return self._record(record)
 
-    def prepare(self, provider='codex', scope='code', project_id=None):
+    def prepare(self, provider='codex_cli', scope='code', project_id=None):
         require_owner(self.authority)
         from .engineering_decision import resolve_project
         project_id = resolve_project(self.project_reference, self.projects, project_id)
@@ -256,7 +256,7 @@ always requires approval for the exact commit and verified release evidence.
         return self.engineer(inspect_paths, targeted_tests, problem_detected, hypothesis,
                              project_id=project_id, execution_mode=execution_mode)
 
-    def engineer(self, inspect_paths, targeted_tests, problem_detected, hypothesis, provider='codex', project_id=None, execution_mode=None):
+    def engineer(self, inspect_paths, targeted_tests, problem_detected, hypothesis, provider='codex_cli', project_id=None, execution_mode=None):
         if self.created:
             raise ToolDenied('One candidate per authorized task')
         require_owner(self.authority)

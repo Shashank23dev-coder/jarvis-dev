@@ -101,6 +101,16 @@ def test_claude_authentication_detection(monkeypatch, installed, status, expecte
         assert 'HIDDEN' not in str(error.value)
 
 
+def test_claude_cli_requires_subscription_authentication(monkeypatch):
+    monkeypatch.setattr(claude, 'claude_executable', lambda: '/user/claude')
+    monkeypatch.setattr(claude, 'run_claude', lambda *a, **kw:
+        (0, b'{"loggedIn":true,"authMethod":"api_key"}'))
+    assert claude.probe_claude(subscription_only=True) == 'not_authenticated'
+    with pytest.raises(ProviderFailure) as error:
+        claude.claude_request({}, '', 2, subscription_only=True)
+    assert error.value.code == 'provider_authentication'
+
+
 def test_claude_noninteractive_tool_disabled_request(monkeypatch):
     monkeypatch.setattr(claude, 'probe_claude', lambda _: 'unknown')
     seen = []
@@ -167,6 +177,17 @@ def test_engineering_job_routes_and_durable_attribution(setup, monkeypatch, mode
             return {'edits': [{'path': 'src/app.py', 'content': 'value = 3\n'}]}
         return model(payload, instructions, timeout)
     monkeypatch.setattr(self_edit, 'model_request', transport)
+    # Historical provider IDs remain readable and routable in the legacy-only
+    # registry; production defaults use the explicit CLI/API registrations.
+    def legacy_defaults(database, model_request):
+        def historical(name):
+            return NS(name=name, complete=lambda payload, instructions, timeout:
+                model_request(payload, instructions, timeout, provider=name),
+                probe=lambda timeout: 'unknown')
+        return EngineeringRegistry(database, [Registration(historical('codex'), 'api', True),
+            Registration(historical('claude_code'), 'cli', True),
+            Registration(historical('openai'), 'api', True, capabilities=('reviewing',))])
+    monkeypatch.setattr(EngineeringRegistry, 'defaults', staticmethod(legacy_defaults))
     monkeypatch.setenv('OPENAI_API_KEY', 'configured-test-key')
     monkeypatch.setattr(claude, 'claude_executable', lambda: '/user/claude')
     monkeypatch.setattr(claude, 'probe_claude', lambda _: 'unknown')
@@ -216,7 +237,7 @@ def test_external_worktree_change_marks_operator_assisted(setup, monkeypatch, op
     monkeypatch.setenv('OPENAI_API_KEY', 'configured-test-key')
     service = factory(model=transport, tester=run_checks)
     candidate = service.engineer('Fix value', **ARGS)
-    assert candidate['attribution']['outcome'] == 'codex_autonomous'
+    assert candidate['attribution']['outcome'] == 'multi_provider'
     Path(candidate['worktree'], 'src/app.py').write_text('value = 2\n# Operator adjustment\n')
     result = getattr(service, operation)(candidate['id'])
     assert result['attribution']['outcome'] == 'operator_assisted'

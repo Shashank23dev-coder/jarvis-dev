@@ -1,0 +1,153 @@
+"""Codex subscription routing and data-only CLI invocation."""
+import io
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from core import candidate_codex_cli as cli
+from core.candidate_provider import ProviderFailure
+from core.database import Database
+from core.engineering_providers import EngineeringRegistry, Registration, RoutingBlocked
+
+
+def fake(name, calls, failure=None):
+    def complete(*args):
+        calls.append(name)
+        if failure:
+            raise ProviderFailure(name, failure)
+        return {'edits': [{'path': 'src/app.py', 'content': 'value = 2\n'}]}
+    return SimpleNamespace(name=name, complete=complete)
+
+
+def registry(tmp_path, calls, cli_failure=None, reviewer_failure=None):
+    return EngineeringRegistry(Database(tmp_path / 'routes.db'), [
+        Registration(fake('codex_cli', calls, cli_failure), 'cli', True,
+                     capabilities=('implementing',)),
+        Registration(fake('claude_cli', calls, reviewer_failure), 'cli', True,
+                     capabilities=('reviewing',)),
+        Registration(fake('codex_api', calls), 'api', True,
+                     capabilities=('implementing', 'reviewing'))])
+
+
+def test_cli_default_and_api_never_called_when_healthy(tmp_path):
+    calls = []
+    routes = registry(tmp_path, calls)
+    _, used = routes.complete({}, '', 2, stage='implementing')
+    assert used == 'codex_cli' and calls == ['codex_cli']
+    assert routes.last_route == dict(provider_requested='codex_cli', provider_used='codex_cli',
+        adapter_type='cli', billing_class='subscription_cli', fallback_reason=None)
+    assert routes.complete({}, '', 2, stage='reviewing', exclude=('codex_cli',))[1] == 'claude_cli'
+    assert calls == ['codex_cli', 'claude_cli']
+
+
+def test_api_fallback_blocked_without_financial_authorization(tmp_path):
+    calls = []
+    routes = registry(tmp_path, calls, 'provider_invalid_response', 'provider_unavailable')
+    with pytest.raises(RoutingBlocked):
+        routes.complete({}, '', 2, stage='implementing', api_fallback_authorized=True)
+    assert calls == ['codex_cli']
+    assert routes.last_route['provider_used'] is None
+    assert routes.last_route['fallback_reason'] == 'financial_authorization_required'
+    # Explicit selection remains distinguishable from a surprise fallback.
+    assert routes.complete({}, '', 2, stage='implementing', preferred='codex_api')[1] == 'codex_api'
+    assert calls[-1] == 'codex_api'
+    assert routes.last_route['billing_class'] == 'api_billed'
+
+
+def test_cli_invocation_is_subscription_only_and_cannot_edit_checkout(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, 'codex_executable', lambda: '/usr/local/bin/codex')
+    monkeypatch.setenv('OPENAI_API_KEY', 'DO_NOT_PASS')
+    monkeypatch.setenv('OPENAI_BASE_URL', 'https://api.invalid')
+    monkeypatch.setattr(cli.subprocess, 'run', lambda argv, **kw: (
+        seen.setdefault('login', (argv, kw)) or None) and
+        SimpleNamespace(returncode=0, stdout=b'Logged in using ChatGPT\n'))
+
+    class Process:
+        pid = 99999999
+        returncode = 0
+        stdin = io.BytesIO()
+
+        def __init__(self, argv, **kwargs):
+            seen['exec'] = argv, kwargs
+            kwargs['stdout'].write(json.dumps({'edits': [{'path': 'src/app.py',
+                'content': 'value = 2\n'}]}).encode())
+
+        def communicate(self, data, timeout):
+            seen['prompt'] = data
+
+        def wait(self):
+            pass
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(cli.subprocess, 'Popen', Process)
+    result = cli.codex_request({'goal': 'fix'}, 'Return proposal JSON', 2)
+    argv, kwargs = seen['exec']
+    assert argv[:2] == ['/usr/local/bin/codex', 'exec']
+    assert argv[argv.index('--sandbox') + 1] == 'read-only'
+    assert '--skip-git-repo-check' in argv and '--ephemeral' in argv
+    assert 'OPENAI_API_KEY' not in kwargs['env'] and 'OPENAI_BASE_URL' not in kwargs['env']
+    assert 'OPENAI_API_KEY' not in seen['login'][1]['env']
+    assert kwargs['cwd'].startswith('/tmp/jarvis-codex-')
+    assert b'src/app.py' not in seen['prompt']
+    assert result['edits'][0]['path'] == 'src/app.py'
+
+
+def test_non_chatgpt_login_stops_before_exec(monkeypatch):
+    monkeypatch.setattr(cli, 'codex_executable', lambda: '/usr/local/bin/codex')
+    monkeypatch.setattr(cli.subprocess, 'run', lambda *a, **kw:
+        SimpleNamespace(returncode=0, stdout=b'Logged in using API key'))
+    monkeypatch.setattr(cli.subprocess, 'Popen', lambda *a, **kw:
+        pytest.fail('API-authenticated CLI must not be invoked'))
+    with pytest.raises(ProviderFailure) as error:
+        cli.codex_request({}, 'Return JSON', 2)
+    assert error.value.code == 'provider_authentication'
+
+
+def test_quota_on_stderr_blocks_without_cli_or_api_fallback(tmp_path, monkeypatch):
+    calls = []
+    routes = registry(tmp_path, calls, 'provider_quota')
+    with pytest.raises(RoutingBlocked):
+        routes.complete({}, '', 2, stage='implementing')
+    assert calls == ['codex_cli']
+    assert routes.last_route['provider_requested'] == 'codex_cli'
+    assert routes.last_route['provider_used'] is None
+    assert routes.last_route['billing_class'] == 'subscription_cli'
+
+    monkeypatch.setattr(cli, 'codex_executable', lambda: '/usr/local/bin/codex')
+    monkeypatch.setattr(cli.subprocess, 'run', lambda *a, **kw:
+        SimpleNamespace(returncode=0, stdout=b'Logged in using ChatGPT'))
+
+    class QuotaProcess:
+        returncode = 1
+        stdin = io.BytesIO()
+
+        def __init__(self, argv, **kwargs):
+            kwargs['stderr'].write(b'Usage limit reached')
+
+        def communicate(self, data, timeout):
+            pass
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self):
+            pass
+
+    monkeypatch.setattr(cli.subprocess, 'Popen', QuotaProcess)
+    with pytest.raises(ProviderFailure) as error:
+        cli.codex_request({}, 'Return JSON', 2)
+    assert error.value.code == 'provider_quota'
+
+
+def test_cli_unavailability_blocks_without_api_charge(tmp_path):
+    calls = []
+    routes = registry(tmp_path, calls, 'provider_unavailable')
+    with pytest.raises(RoutingBlocked):
+        routes.complete({}, '', 2, stage='implementing')
+    assert calls == ['codex_cli']
+    assert routes.last_route['provider_used'] is None
+    assert routes.last_route['billing_class'] == 'subscription_cli'

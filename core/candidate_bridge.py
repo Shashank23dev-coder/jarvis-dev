@@ -205,10 +205,13 @@ def project(record):
     from .candidate_provider import project_failure, project_provider_results
     from .candidate_provider import work_attribution, WorkAttribution
     from .engineering_providers import ProviderBlocker
+    from .engineering_jobs import project_provider_route
     projected = dict(id=record['id'], state=record['state'], busy=bool(record.get('busy')),
                 failure=project_failure(record.get('failure')),
                 failures=[project_failure(item) for item in record.get('failures', [])[-8:]],
                 provider_results=project_provider_results(record.get('provider_results', [])),
+                provider_route=project_provider_route(
+                    record.get('provider_route'), (record.get('improvement') or {}).get('implementation_provider', 'openai')),
                 attribution=WorkAttribution.model_validate(record.get('attribution') or work_attribution(record)).model_dump(),
                 provider_blocker=ProviderBlocker.model_validate(record['provider_blocker']).model_dump() if record.get('provider_blocker') else None,
                 diff_summary=summary, files_changed=[], test_results=tests,

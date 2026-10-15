@@ -57,6 +57,8 @@ def harness(setup, monkeypatch, tmp_path):
         role = 'review' if 'candidate' in payload else 'implement'
         calls = [e for e in read_events(log) if e.get('role') == role]
         emit(dict(role=role, provider=provider, payload=payload))
+        if role == 'implement' and behavior.get('cli_quota'):
+            raise ProviderFailure(provider, 'provider_quota')
         if role == 'review':
             if behavior.get('quota') and not calls:
                 raise ProviderFailure(provider, 'provider_quota')
@@ -74,7 +76,7 @@ def harness(setup, monkeypatch, tmp_path):
 
     def registry(database, ignored):
         return EngineeringRegistry(database, [Registration(ProposalProvider(name, transport),
-            'cli' if name == 'claude_code' else 'api', True) for name in ('codex', 'claude_code', 'openai')])
+            'api' if name == 'codex_api' else 'cli', True) for name in ('codex_cli', 'claude_cli', 'codex_api')])
 
     monkeypatch.setattr(EngineeringRegistry, 'defaults', staticmethod(registry))
     monkeypatch.setattr(EngineeringRegistry, 'refresh_claude', lambda *a, **kw: None)
@@ -118,8 +120,8 @@ def harness(setup, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize('mode,builder,reviewer', [
-    ('CODEX_ONLY', 'codex', 'openai'), ('CLAUDE_ONLY', 'claude_code', 'openai'),
-    ('CODEX_BUILD_CLAUDE_REVIEW', 'codex', 'claude_code')])
+    ('CODEX_ONLY', 'codex_cli', 'claude_cli'), ('CLAUDE_ONLY', 'claude_cli', 'codex_cli'),
+    ('CODEX_BUILD_CLAUDE_REVIEW', 'codex_cli', 'claude_cli')])
 def test_modes_commit_private_readiness_and_no_promotion(harness, mode, builder, reviewer):
     h = harness
     before = tree_bytes(h['source'])
@@ -148,6 +150,28 @@ def test_modes_commit_private_readiness_and_no_promotion(harness, mode, builder,
     assert h['worker']().once() is None
 
 
+def test_cli_quota_preserves_operator_job_and_candidate(harness, monkeypatch):
+    h = harness
+    h['behavior']['cli_quota'] = True
+    job = h['enqueue']()
+    first = h['worker']().once()
+    assert first['id'] == job['id'] and first['status'] == 'blocked'
+    assert first['operator']['phase'] == 'implement'
+    assert first['failure']['code'] == 'provider_quota'
+    assert first['candidate_id'] and first['worktree']
+    assert project_job(first)['provider_route']['provider_requested'] == 'codex_cli'
+    assert project_job(first)['provider_route']['provider_used'] is None
+    assert project_job(first)['provider_route']['billing_class'] == 'subscription_cli'
+    assert [e['provider'] for e in read_events(h['log']) if 'role' in e] == ['codex_cli']
+    h['behavior'].pop('cli_quota')
+    EngineeringJobs(h['db']).control(job['id'], 'resume')
+    monkeypatch.setattr(EngineeringRegistry, 'ttl_seconds', 0)
+    second = h['worker']().once()
+    assert second['candidate_id'] == first['candidate_id']
+    assert second['worktree'] == first['worktree']
+    assert second['operator']['ready']
+
+
 def test_needs_revision_sends_only_concrete_findings_then_pass(harness):
     h = harness
     h['behavior']['revision'] = True
@@ -156,7 +180,7 @@ def test_needs_revision_sends_only_concrete_findings_then_pass(harness):
     assert result['operator']['ready'], result
     events = read_events(h['log'])
     calls = [e for e in events if 'role' in e]
-    assert [e['provider'] for e in calls] == ['codex', 'claude_code', 'codex', 'claude_code']
+    assert [e['provider'] for e in calls] == ['codex_cli', 'claude_cli', 'codex_cli', 'claude_cli']
     assert calls[2]['payload']['findings'][0]['path'] == 'src/app.py'
     assert 'PRIVATE_REVIEW_COMMENTARY' not in json.dumps(calls[2]['payload'])
     assert not {'review', 'messages', 'history'} & calls[2]['payload'].keys()
@@ -293,7 +317,7 @@ def test_provider_modes_do_not_silently_fall_back(harness):
     h['enqueue']()
     result = h['worker']().once()
     assert result['status'] == 'blocked'
-    assert [e['provider'] for e in read_events(h['log']) if 'role' in e] == ['codex', 'claude_code']
+    assert [e['provider'] for e in read_events(h['log']) if 'role' in e] == ['codex_cli', 'claude_cli']
     assert result['provider_blocker']['reasons'][0]['current_usability'] == 'quota_blocked'
 
 

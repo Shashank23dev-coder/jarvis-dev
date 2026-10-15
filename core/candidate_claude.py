@@ -38,10 +38,14 @@ def run_claude(arguments, *, timeout, prompt=None):
     with tempfile.TemporaryDirectory(prefix='jarvis-claude-') as directory, tempfile.TemporaryFile() as output:
         process = None
         try:
+            environment = {key: value for key, value in os.environ.items() if key not in {
+                'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+                'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'}}
+            environment['PATH'] = str(Path(executable).parent) + os.pathsep + environment.get('PATH', '')
             process = subprocess.Popen([executable, *arguments], cwd=directory,
                 stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
                 stdout=output, stderr=subprocess.DEVNULL, start_new_session=True,
-                env=dict(os.environ, PATH=str(Path(executable).parent) + os.pathsep + os.environ.get('PATH', '')))
+                env=environment)
             process.communicate(prompt.encode() if prompt is not None else None, timeout=timeout)
             output.seek(0)
             data = output.read(256001)
@@ -63,13 +67,16 @@ def run_claude(arguments, *, timeout, prompt=None):
                     process.stdin.close()
 
 
-def probe_claude(timeout=5):
+def probe_claude(timeout=5, *, subscription_only=False):
     if not claude_executable():
         return 'unavailable'
     try:
         code, data = run_claude(['auth', 'status'], timeout=timeout)
         status = json.loads(data)
         if isinstance(status, dict) and status.get('loggedIn') is False:
+            return 'not_authenticated'
+        if subscription_only and (not isinstance(status, dict) or
+                                  status.get('authMethod') != 'claude.ai'):
             return 'not_authenticated'
         # Unsupported auth status, malformed output, and successful login all
         # leave remote usability unknown. Never infer authentication from code 1.
@@ -94,11 +101,11 @@ def claude_failure_code(value):
     return 'provider_invocation_failed'
 
 
-def claude_request(payload, instructions, timeout):
+def claude_request(payload, instructions, timeout, *, subscription_only=False):
     # Authentication is checked per invocation, including after a stale success.
     import time
     deadline = time.monotonic() + timeout
-    state = probe_claude(min(5, timeout))
+    state = probe_claude(min(5, timeout), subscription_only=True) if subscription_only else probe_claude(min(5, timeout))
     if state in {'not_authenticated', 'unavailable'}:
         raise ProviderFailure('claude_code', 'provider_authentication' if state == 'not_authenticated' else 'provider_unavailable')
     remaining = deadline - time.monotonic()
@@ -135,3 +142,10 @@ class ClaudeCodeProvider:
 
     def complete(self, payload, instructions, timeout):
         return self.transport(payload, instructions, timeout, provider=self.name)
+
+
+class ClaudeCLIProvider(ClaudeCodeProvider):
+    name = 'claude_cli'
+
+    def probe(self, timeout):
+        return probe_claude(timeout, subscription_only=True)

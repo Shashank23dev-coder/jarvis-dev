@@ -103,9 +103,14 @@ def model_request(payload, instructions, timeout, *, provider='openai'):
                           'timeout': timeout}).encode()
     if len(encoded) > 256000:
         raise ToolDenied('Model context limit exceeded')
+    environment = None
+    if provider == 'codex_cli':
+        environment = {key: value for key, value in os.environ.items()
+            if key not in {'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT_ID'}}
     process = subprocess.Popen([sys.executable, '-B', '-m', 'core.candidate_model'],
         cwd=Path(__file__).resolve().parents[1], stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
+        env=environment)
     try:
         output, _ = process.communicate(encoded, timeout=timeout)
         if process.returncode or len(output) > 256000:
@@ -192,7 +197,7 @@ class SelfEditService:
         for path in reader.list_files('tests'):
             if Path(path).suffix in {'.py', '.cjs', '.js'}:
                 tests.append(path)
-        return EngineeringWorkspace(provider='codex', scope=scope, editable_paths=editable[:200],
+        return EngineeringWorkspace(provider='codex_cli', scope=scope, editable_paths=editable[:200],
             test_paths=tests[:200], truncated=len(editable) > 200 or len(tests) > 200).checked().model_dump()
 
     def _paths(self, record):
@@ -293,8 +298,8 @@ class SelfEditService:
         self.record['iterations'] += 1
         self._tick('independent_review' if schema is Review else 'generate_proposal')
         stage = 'reviewing' if schema is Review else 'implementing'
-        provider = ('openai' if schema is Review else
-                    self.record.get('improvement', {}).get('implementation_provider', 'openai'))
+        provider = ('claude_cli' if schema is Review else
+                    self.record.get('improvement', {}).get('implementation_provider', 'codex_cli'))
         operator = self.record.get('operator')
         if operator:
             from .engineering_operator import routes
@@ -308,20 +313,22 @@ class SelfEditService:
             try:
                 result, provider = providers.complete(payload, instructions, min(120, self._check()),
                     stage=stage, task_type=self.record['improvement'].get('scope', 'code'),
-                    preferred=provider if operator or schema is not Review else None,
+                    preferred=provider,
                     allowed=(provider,) if operator else None,
                     exclude=authors if schema is Review else (), validate=schema.model_validate)
             except ProviderFailure as exc:
+                self.record['provider_route'] = providers.last_route
                 if isinstance(exc, RoutingBlocked):
                     self.record['provider_blocker'] = exc.blocker
                 code = exc.code
-                if operator and isinstance(exc, RoutingBlocked) and exc.blocker['reasons']:
+                if isinstance(exc, RoutingBlocked) and exc.blocker['reasons']:
                     code = (exc.blocker['reasons'][0].get('observation') or {}).get('code') or code
                 self.record['failure'] = failure_evidence(exc.provider, code,
                     stage,
                     self.record.get('source_context', {}).get('attempt', 1))
                 raise
             self.record['provider_blocker'] = None
+            self.record['provider_route'] = providers.last_route
             self.record['improvement']['review_provider' if schema is Review else 'implementation_provider'] = provider
         else:
             result = self.model(payload, instructions, min(30, self._check()))
@@ -336,6 +343,9 @@ class SelfEditService:
         # Closed response evidence, never raw model text or rejected content.
         self.record.setdefault('provider_results', []).append(dict(
             provider=provider, stage=stage, execution_origin=origin,
+            **({k: self.record['provider_route'].get(k) for k in
+                ('provider_requested', 'adapter_type', 'billing_class', 'fallback_reason')}
+               if self.record.get('provider_route') else {}),
             attempt=self.record.get('source_context', {}).get('attempt', 1),
             iteration=self.record['iterations'], status='received',
             response_sha256=digest(parsed.model_dump_json().encode())))
@@ -853,7 +863,7 @@ class SelfEditService:
             text_value(value, 2000)
             safe_text(value)
         improvement = dict(problem_detected=problem_detected, hypothesis=hypothesis,
-            implementation_provider='codex', review_provider='openai', files_changed=[], tests_run=[],
+            implementation_provider='codex_cli', review_provider='claude_cli', files_changed=[], tests_run=[],
             failures_revisions=[], baseline_comparison={'result': 'not_run'}, review_result=None,
             confidence='insufficient')
         if action:

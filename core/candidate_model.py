@@ -2,22 +2,28 @@
 
 import json
 import sys
-from models.openai_client import request_agent_turn
 from .candidate_provider import ProviderFailure, provider_error_code
 
 
 def main():
     request = json.loads(sys.stdin.read(256001))
     provider = request.get('provider', 'openai')
-    if provider not in {'codex', 'openai', 'claude_code'}:
+    if provider not in {'codex', 'openai', 'claude_code', 'codex_cli', 'codex_api', 'claude_cli'}:
         raise ValueError('Unavailable engineering provider')
-    options = {'model': 'gpt-5.3-codex'} if provider == 'codex' else {}
+    options = {'model': 'gpt-5.3-codex'} if provider in {'codex', 'codex_api'} else {}
     try:
-        if provider == 'claude_code':
+        if provider == 'codex_cli':
+            from .candidate_codex_cli import codex_request
+            print(json.dumps({'ok': True, 'text': json.dumps(codex_request(request['input'],
+                request['instructions'], request.get('timeout', 120)))}))
+            return
+        if provider in {'claude_code', 'claude_cli'}:
             from .candidate_claude import claude_request
             print(json.dumps({'ok': True, 'text': claude_request(request['input'],
-                request['instructions'], request.get('timeout', 120))}))
+                request['instructions'], request.get('timeout', 120),
+                **({'subscription_only': True} if provider == 'claude_cli' else {}))}))
             return
+        from models.openai_client import request_agent_turn
         turn = request_agent_turn(input=[{'role': 'user', 'content': json.dumps(request['input'])}],
             tools=[], instructions=request['instructions'], allow_tools=False,
             timeout=request.get('timeout', 120), max_output_tokens=24000, **options)

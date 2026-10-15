@@ -8,7 +8,7 @@ from typing import Literal, Annotated
 from pydantic import Field
 from tools.schemas import StrictModel
 
-PROVIDERS = {'codex', 'openai', 'claude_code'}
+PROVIDERS = {'codex', 'openai', 'claude_code', 'codex_cli', 'codex_api', 'claude_cli'}
 SANDBOX_SAFETY_DENIALS = frozenset({
     'Docker runtime must have no implicit volumes',
     'Docker hardened runtime probe failed',
@@ -81,6 +81,10 @@ class ProviderResult(StrictModel):
     status: Literal['received', 'no_changes', 'applied']
     response_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     execution_origin: Literal['provider', 'operator_assisted', 'legacy_unknown'] = 'legacy_unknown'
+    provider_requested: ProviderId | None = None
+    adapter_type: Literal['cli', 'api'] | None = None
+    billing_class: Literal['subscription_cli', 'api_billed'] | None = None
+    fallback_reason: str | None = None
 
 
 def project_provider_results(values):
@@ -112,8 +116,8 @@ def _attribution(authors, reviewers, assisted):
     agents = set(authors) | (set(reviewers) - {'openai'})
     outcome = ('operator_assisted' if assisted else 'unknown' if not authors else
                'multi_provider' if len(agents) > 1 else
-               'codex_autonomous' if authors == ['codex'] else
-               'claude_autonomous' if authors == ['claude_code'] else 'multi_provider')
+               'codex_autonomous' if authors in (['codex'], ['codex_api'], ['codex_cli']) else
+               'claude_autonomous' if authors in (['claude_code'], ['claude_cli']) else 'multi_provider')
     return WorkAttribution(outcome=outcome, implementation_providers=authors,
                            review_providers=reviewers, operator_assisted=assisted).model_dump()
 

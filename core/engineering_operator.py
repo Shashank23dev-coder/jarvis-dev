@@ -23,8 +23,9 @@ Phase = Literal['inspect', 'baseline', 'implement', 'apply', 'validate', 'review
 
 
 def routes(mode):
-    return {'CODEX_ONLY': ('codex', 'openai'), 'CLAUDE_ONLY': ('claude_code', 'openai'),
-            'CODEX_BUILD_CLAUDE_REVIEW': ('codex', 'claude_code')}[mode]
+    return {'CODEX_ONLY': ('codex_cli', 'claude_cli'),
+            'CLAUDE_ONLY': ('claude_cli', 'codex_cli'),
+            'CODEX_BUILD_CLAUDE_REVIEW': ('codex_cli', 'claude_cli')}[mode]
 
 
 class OperatorEvidence(StrictModel):
@@ -56,22 +57,28 @@ def project_operator(value):
 def owner_status(job):
     op = project_operator(job.get('operator'))
     label = f"Engineering job {job['id']}"
+    from .engineering_jobs import project_provider_route
+    route = project_provider_route(job.get('provider_route'), job.get('provider'))
+    provider_status = (f" Provider requested: {route['provider_requested']}; used: "
+        f"{route['provider_used'] or 'none'}; adapter: {route['adapter_type'] or 'unreported'}; "
+        f"billing: {route['billing_class'] or 'unreported'}; fallback: {route['fallback_state']}"
+        + (f" ({route['fallback_reason']})." if route['fallback_reason'] else '.'))
     if not op:
-        return f"{label}: {job['status']}."
+        return f"{label}: {job['status']}.{provider_status}"
     if job.get('control'):
         state = 'cancelled' if job['control'] == 'cancel' else 'paused'
-        return f'{label}: {state}. Completed work is retained.'
+        return f'{label}: {state}. Completed work is retained.{provider_status}'
     if job['status'] in {'blocked', 'failed'}:
         from .candidate_provider import FAILURES
         code = (job.get('failure') or {}).get('code', 'worker_failed')
-        return f"{label}: blocked at {op['phase']}. {FAILURES.get(code, FAILURES['worker_failed'])[1]} Completed work is retained."
+        return f"{label}: blocked at {op['phase']}. {FAILURES.get(code, FAILURES['worker_failed'])[1]} Completed work is retained.{provider_status}"
     if (op['ready'] and job['status'] in {'completed', 'waiting_for_approval'}
             and (job.get('review_result') or {}).get('verdict') == 'passed'):
         next_step = ('Ready for the existing promotion/approval path; production controller validation is still required.'
                      if job.get('project_id') == 'jarvis-core' else 'Ready for the existing candidate apply path.')
         return (f"{label}: review PASS; candidate {op['commit_sha']} is prepared. "
-                + next_step)
-    return f"{label}: {op['mode']}, {op['phase']}. Review: {op['review_verdict'] or 'pending'}."
+                + next_step + provider_status)
+    return f"{label}: {op['mode']}, {op['phase']}. Review: {op['review_verdict'] or 'pending'}.{provider_status}"
 
 
 def checked_findings(record, review):
@@ -97,7 +104,7 @@ def step(service, phase, operation, *, provider=None):
     """A durable start and result; interrupted calls never count as success."""
     op = service.record['operator']
     model = None
-    if provider == 'codex':
+    if provider == 'codex_api':
         model = 'gpt-5.3-codex'
     elif provider == 'openai':
         from models.openai_client import MODEL
@@ -119,6 +126,7 @@ def step(service, phase, operation, *, provider=None):
     # Provider output itself is held in the validated proposal/review checkpoint.
     if provider and service.record.get('provider_results'):
         entry['response_sha256'] = service.record['provider_results'][-1]['response_sha256']
+        entry['route'] = service.record.get('provider_route')
     service.store.save(service.record, 'operator_step_completed')
     return result
 

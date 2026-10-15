@@ -102,7 +102,7 @@ class EngineeringJobs:
         text_value(goal)
         if action is None:
             from .candidate_action import goal_digest
-            action = dict(provider='codex', scope='code', task_id=context.get('task_id'),
+            action = dict(provider='codex_cli', scope='code', task_id=context.get('task_id'),
                 conversation_id=context.get('conversation_id'), goal_digest=goal_digest(goal))
         action = EngineeringAction.model_validate(action).check(goal, context)
         if not all(valid_id(context.get(key)) for key in ('task_id', 'conversation_id')):
@@ -354,6 +354,7 @@ class EngineeringJobs:
                 improvement = candidate.get('improvement', {})
                 job.update(provider=improvement.get('implementation_provider', job['provider']),
                     provider_results=candidate.get('provider_results', []),
+                    provider_route=candidate.get('provider_route'),
                     provider_blocker=candidate.get('provider_blocker'))
                 job.update(test_result=candidate['test_results'], review_result=candidate['reviewer_result'])
                 job['improvement'].update(baseline_evidence=improvement.get('baseline_comparison'),
@@ -459,8 +460,34 @@ def project_job(job):
         'lease': lease, 'recovery': recovery, 'history': history,
         'attribution': WorkAttribution.model_validate(job.get('attribution') or work_attribution(job)).model_dump(),
         'provider_results': project_provider_results(job.get('provider_results', [])),
+        'provider_route': project_provider_route(job.get('provider_route'), job.get('provider')),
         'provider_blocker': ProviderBlocker.model_validate(job['provider_blocker']).model_dump() if job.get('provider_blocker') else None,
         'test_result': tests, 'review_result': {'verdict': verdict}}
+
+
+def project_provider_route(route, requested):
+    from .candidate_provider import ProviderId
+    from pydantic import TypeAdapter
+    if route is None:
+        route = dict(provider_requested=requested, provider_used=None, adapter_type=None,
+                     billing_class=None, fallback_reason=None)
+    requested = TypeAdapter(ProviderId).validate_python(route['provider_requested'])
+    used = TypeAdapter(ProviderId | None).validate_python(route.get('provider_used'))
+    adapter = route.get('adapter_type')
+    billing = route.get('billing_class')
+    reason = route.get('fallback_reason')
+    if adapter not in {None, 'cli', 'api'} or billing not in {None, 'subscription_cli', 'api_billed'}:
+        raise ToolDenied('Invalid provider route')
+    if billing != (None if adapter is None else 'subscription_cli' if adapter == 'cli' else 'api_billed'):
+        raise ToolDenied('Invalid provider billing class')
+    if reason is not None and reason not in {'financial_authorization_required', 'provider_authentication',
+            'provider_quota', 'provider_rate_limit', 'provider_unavailable', 'provider_invocation_failed',
+            'provider_timeout', 'provider_invalid_response', 'provider_output_limit', 'provider_request_rejected'}:
+        raise ToolDenied('Invalid provider fallback reason')
+    return dict(provider_requested=requested, provider_used=used, adapter_type=adapter,
+                billing_class=billing, fallback_reason=reason,
+                fallback_state='blocked' if reason == 'financial_authorization_required' else
+                'used' if used and used != requested else 'none')
 
 
 def project_reference(value):
