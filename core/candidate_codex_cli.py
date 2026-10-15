@@ -27,6 +27,12 @@ def codex_failure_code(data):
     return 'provider_invocation_failed'
 
 
+def chatgpt_login(status):
+    """`codex login status` reports on stderr; only a ChatGPT login is subscription-billed."""
+    text = (getattr(status, 'stderr', None) or b'') + b'\n' + (getattr(status, 'stdout', None) or b'')
+    return status.returncode == 0 and b'ChatGPT' in text and b'API key' not in text
+
+
 def codex_request(payload, instructions, timeout):
     executable = codex_executable()
     if not executable:
@@ -44,9 +50,9 @@ def codex_request(payload, instructions, timeout):
         process = None
         try:
             status = subprocess.run([executable, 'login', 'status'], cwd=directory, env=env,
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=min(timeout, 5), check=False)
-            if status.returncode or status.stdout.strip() != b'Logged in using ChatGPT':
+            if not chatgpt_login(status):
                 raise ProviderFailure('codex_cli', 'provider_authentication')
             process = subprocess.Popen([executable, 'exec', '--sandbox', 'read-only',
                 '--skip-git-repo-check', '--ephemeral', '--ignore-user-config',

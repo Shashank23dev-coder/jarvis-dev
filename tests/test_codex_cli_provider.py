@@ -392,6 +392,18 @@ def test_non_chatgpt_login_stops_before_exec(monkeypatch):
     assert error.value.code == 'provider_authentication'
 
 
+@pytest.mark.parametrize('returncode,stdout,stderr,expected', [
+    (0, b'', b'Logged in using ChatGPT\n', True),  # codex-cli 0.157 reports on stderr
+    (0, b'Logged in using ChatGPT\n', b'', True),
+    (1, b'', b'Logged in using ChatGPT\n', False),
+    (0, b'', b'Logged in using API key\n', False),
+    (0, b'', b'Not logged in\n', False),
+])
+def test_login_status_reads_stderr_and_requires_success(returncode, stdout, stderr, expected):
+    status = SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    assert cli.chatgpt_login(status) is expected
+
+
 def test_quota_on_stderr_blocks_without_cli_or_api_fallback(tmp_path, monkeypatch):
     calls = []
     routes = registry(tmp_path, calls, 'provider_quota')
