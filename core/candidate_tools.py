@@ -200,7 +200,8 @@ always requires approval for the exact commit and verified release evidence.
         # Avoid returning the internal manifest, lease, author context or events.
         evidence = {key: record.get(key) for key in (
             'branch', 'worktree', 'files_changed', 'diff_summary', 'diff',
-            'test_results', 'reviewer_result', 'error', 'iterations', 'tool_calls', 'elapsed_seconds', 'improvement', 'failure', 'failures', 'provider_results', 'attribution', 'provider_blocker')}
+            'test_results', 'reviewer_result', 'error', 'iterations', 'tool_calls', 'elapsed_seconds', 'improvement', 'failure', 'failures', 'provider_results', 'attribution', 'provider_blocker',
+            'baseline_outcome', 'execution_state', 'manual_operations')}
         encoded = json.dumps(evidence)
         return CandidateEvidence(candidate_id=record['id'], state=record['state'],
                                  busy=record.get('busy', False), evidence=encoded[:12000],
@@ -477,6 +478,19 @@ always requires approval for the exact commit and verified release evidence.
         # rejection into success or claiming a candidate was applied to main.
         summaries = []
         for record in self.records.values():
+            baseline = record.get('baseline_outcome')
+            if record.get('execution_state') == 'blocked_before_implementation' and baseline:
+                manual = record.get('manual_operations') or []
+                summary = (f"Candidate {record['id']}: Blocked before implementation.\n"
+                    f"Stage: Baseline validation. Result: {baseline['result'].title()}.\n"
+                    f"{(record.get('improvement') or {}).get('implementation_provider', 'Provider')} invoked: "
+                    f"{'Yes' if baseline['provider_invoked'] else 'No'}.\n"
+                    f"Files changed: {record.get('diff_summary', {}).get('files', 0)}. "
+                    f"Retryable: {'Yes' if (record.get('failure') or {}).get('retryable') else 'No'}.")
+                if manual and manual[-1]['result'] == 'unchanged_candidate':
+                    summary += '\nManual tests: unchanged candidate; no implementation attempt.'
+                summaries.append(summary)
+                continue
             tests = ', '.join(f"{item['phase']}: exit {item['returncode']}"
                               + (' (incomplete)' if item.get('timed_out') or item.get('truncated') else '')
                               for item in record.get('test_results', [])[-3:]) or 'not run'

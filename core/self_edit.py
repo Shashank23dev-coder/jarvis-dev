@@ -297,6 +297,9 @@ class SelfEditService:
             raise ToolDenied('Candidate iteration limit exceeded')
         self.record['iterations'] += 1
         self._tick('independent_review' if schema is Review else 'generate_proposal')
+        if schema is Proposal and self.record.get('improvement', {}).get('baseline_outcome'):
+            self.record['improvement']['baseline_outcome']['provider_invoked'] = True
+            self.store.save(self.record)
         stage = 'reviewing' if schema is Review else 'implementing'
         provider = ('claude_cli' if schema is Review else
                     self.record.get('improvement', {}).get('implementation_provider', 'codex_cli'))
@@ -425,8 +428,25 @@ class SelfEditService:
         _, _, worktree = self._paths(self.record)
         repository = CandidateRepository(worktree, source_root=self.source, check=self._check)
         self._tick('baseline_tests')
-        result = (self.tester(repository, 'baseline', self.record['targeted_tests']) if self.tester
-                  else repository.run_pytest(self.record['targeted_tests']))
+        baseline_started = time.monotonic()
+        improvement['baseline_outcome'] = dict(stage='baseline_validation', result='running',
+            elapsed_seconds=0, failure_code=None, provider_invoked=False)
+        self.store.save(self.record)
+        try:
+            result = (self.tester(repository, 'baseline', self.record['targeted_tests']) if self.tester
+                      else repository.run_pytest(self.record['targeted_tests']))
+        except Exception:
+            improvement['baseline_outcome'].update(result='fail',
+                elapsed_seconds=min(900.0, round(time.monotonic() - baseline_started, 3)),
+                failure_code='baseline_failed')
+            self.store.save(self.record, 'baseline_failed')
+            raise
+        outcome = improvement['baseline_outcome']
+        outcome.update(result='timeout' if result.timed_out else 'fail' if result.returncode not in (0, 1) or result.truncated else 'pass',
+                       elapsed_seconds=min(900.0, round(time.monotonic() - baseline_started, 3)),
+                       failure_code=('baseline_timeout' if result.timed_out else 'baseline_failed'
+                                     if result.returncode not in (0, 1) or result.truncated else None))
+        self.store.save(self.record)
         self._check()
         baseline = dict(commit=self.record['base_commit'], paths=self.record['targeted_tests'],
                         returncode=result.returncode, timed_out=result.timed_out,
@@ -440,8 +460,8 @@ class SelfEditService:
             from .candidate_provider import failure_evidence
             improvement['baseline_comparison']['result'] = 'inconclusive'
             self.record['error'] = 'Baseline tests did not complete; comparison unavailable.'
-            self.record['failure'] = failure_evidence(improvement['implementation_provider'],
-                'tests_failed', 'testing', self.record.get('source_context', {}).get('attempt', 1))
+            self.record['failure'] = failure_evidence('baseline_validator', outcome['failure_code'],
+                'testing', self.record.get('source_context', {}).get('attempt', 1))
             self.store.save(self.record, 'tests_failed')
             return
         for attempt in range(2):
@@ -513,11 +533,11 @@ class SelfEditService:
             'unchanged_pass' if target['returncode'] == 0 else 'unchanged_failure')
         comparison['candidate'] = {key: target[key] for key in ('paths', 'returncode', 'fingerprint')}
 
-    def _improvement_evidence(self):
+    def _improvement_evidence(self, *, record_attempt=True):
         improvement = self.record.get('improvement')
         if improvement is not None:
             attempts = improvement['failures_revisions']
-            if self.record.get('error') and (not attempts or attempts[-1].get('error') != self.record['error']):
+            if record_attempt and self.record.get('error') and (not attempts or attempts[-1].get('error') != self.record['error']):
                 if len(attempts) < 2:
                     attempts.append(dict(attempt=len(attempts) + 1, state=self.record['state'], error=self.record['error']))
             improvement.update(files_changed=self.record['files_changed'],
@@ -642,7 +662,19 @@ class SelfEditService:
             elif action == 'start':
                 self._prepare()
             elif action == 'tests':
-                self._tests()
+                operation = dict(kind='manual_tests', result='running', started_at=timestamp())
+                self.record.setdefault('manual_operations', []).append(operation)
+                self.record['manual_operations'] = self.record['manual_operations'][-16:]
+                self.store.save(self.record, 'manual_tests_started')
+                if not self.record['files_changed']:
+                    self._diff()
+                if not self.record['files_changed']:
+                    operation.update(result='unchanged_candidate', ended_at=timestamp())
+                    self.store.save(self.record, 'manual_tests_on_unchanged_candidate')
+                else:
+                    self._tests()
+                    operation.update(result='completed', ended_at=timestamp())
+                    self.store.save(self.record, 'manual_tests_finished')
             elif action == 'review':
                 self._review()
             elif action == 'discard':
@@ -650,6 +682,11 @@ class SelfEditService:
             else:
                 raise ValueError('Unknown candidate operation')
         except Exception as exc:
+            if action == 'tests' and self.record.get('manual_operations'):
+                operation = self.record['manual_operations'][-1]
+                if operation['result'] == 'running':
+                    operation.update(result='failed', ended_at=timestamp())
+                    self.store.save(self.record, 'manual_tests_failed')
             from .candidate_provider import (ProviderFailure, failure_evidence, execution_error_code,
                                              FAILURES, SANDBOX_SAFETY_DENIALS)
             failure = (self.record.get('failure') if isinstance(exc, ProviderFailure) else None) or failure_evidence(
@@ -682,7 +719,7 @@ class SelfEditService:
                                   dict(tested_fingerprint=None, reviewer_result=None)))
             self.store.save(self.record, 'candidate_failed')
         finally:
-            self._improvement_evidence()
+            self._improvement_evidence(record_attempt=action == 'start' and self.record['iterations'] > 0)
             self.record['elapsed_seconds'] += time.monotonic() - started
             self.store.save(self.record)
         return self.store.get(candidate_id)

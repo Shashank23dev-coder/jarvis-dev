@@ -33,6 +33,8 @@ FAILURES = {
     'candidate_deadline': (True, 'Resume with a fresh candidate budget.'),
     'candidate_policy_denied': (False, 'Keep edits within approved development paths and limits.'),
     'tests_failed': (True, 'Revise the candidate using test evidence.'),
+    'baseline_timeout': (True, 'Baseline validation timed out before implementation.'),
+    'baseline_failed': (True, 'Baseline validation did not complete before implementation.'),
     'review_failed': (True, 'Revise the candidate using independent review evidence.'),
     'worker_failed': (True, 'Inspect the development worker and resume.'),
 }
@@ -45,6 +47,63 @@ class FailureEvidence(StrictModel):
     stage: Literal['planning', 'implementing', 'testing', 'reviewing']
     attempt: int = Field(ge=1)
     reason: str
+
+
+class BaselineOutcome(StrictModel):
+    stage: Literal['baseline_validation']
+    result: Literal['running', 'pass', 'fail', 'timeout']
+    elapsed_seconds: float = Field(ge=0, le=900)
+    failure_code: Literal['baseline_timeout', 'baseline_failed'] | None = None
+    provider_invoked: bool
+
+
+def project_baseline_outcome(value):
+    if value is None:
+        return None
+    return BaselineOutcome.model_validate({key: value[key] for key in BaselineOutcome.model_fields}).model_dump()
+
+
+def baseline_outcome_for(record):
+    improvement = record.get('improvement') or {}
+    value = improvement.get('baseline_outcome') or record.get('baseline_outcome')
+    if value is None:
+        # Older jobs have a baseline result but no distinct stage record.
+        baseline = (improvement.get('baseline_evidence') or
+                    improvement.get('baseline_comparison') or {}).get('baseline')
+        if baseline and (baseline.get('timed_out') or baseline.get('returncode') not in (0, 1)
+                         or baseline.get('truncated')) and not record.get('provider_results'):
+            failed = baseline.get('returncode') not in (0, 1) or baseline.get('truncated')
+            timed_out = baseline.get('timed_out') is True
+            value = dict(stage='baseline_validation',
+                result='timeout' if timed_out else 'fail' if failed else 'pass',
+                elapsed_seconds=0, failure_code='baseline_timeout' if timed_out else
+                    'baseline_failed' if failed else None, provider_invoked=False)
+    return project_baseline_outcome(value)
+
+
+def project_manual_operations(values):
+    result = []
+    for item in values[-4:]:
+        if item.get('kind') != 'manual_tests' or item.get('result') not in {
+                'running', 'completed', 'unchanged_candidate', 'failed'}:
+            raise ValueError('Invalid manual operation evidence')
+        result.append(dict(kind='manual_tests', result=item['result']))
+    return result
+
+
+def project_execution_state(record, status):
+    baseline = baseline_outcome_for(record)
+    manual = project_manual_operations(record.get('manual_operations', []))
+    changed = record.get('files_changed_count', len(record.get('files_changed', [])))
+    if baseline and baseline['result'] in {'timeout', 'fail'} and not baseline['provider_invoked']:
+        return 'blocked_before_implementation'
+    if status == 'implementing' and baseline and baseline['provider_invoked']:
+        return 'implementation_running'
+    if changed and (record.get('failure') or {}).get('code') == 'tests_failed':
+        return 'tests_failed_after_changes'
+    if manual and manual[-1]['result'] == 'unchanged_candidate':
+        return 'manual_tests_on_unchanged_candidate'
+    return None
 
 
 def failure_evidence(provider, code, stage, attempt):

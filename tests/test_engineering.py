@@ -213,9 +213,11 @@ def test_engineering_failures_never_earn_approval(setup, kind):
     assert 'PRIVATE_PROVIDER_EXCEPTION' not in json.dumps(candidate)
     assert tree_bytes(source) == before
     if kind.startswith('baseline_'):
-        assert candidate['failure']['code'] == 'tests_failed'
+        assert candidate['failure']['code'] == ('baseline_timeout' if kind == 'baseline_timeout' else 'baseline_failed')
         assert candidate['failure']['stage'] == 'testing'
         assert candidate['failures'] == [candidate['failure']]
+        assert candidate['improvement']['failures_revisions'] == []
+        assert candidate['improvement']['baseline_outcome']['provider_invoked'] is False
 
 
 def test_engineering_budget_and_shared_one_candidate_limit(setup):

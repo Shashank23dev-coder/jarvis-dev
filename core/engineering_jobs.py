@@ -347,6 +347,8 @@ class EngineeringJobs:
                        block_reason=None if passed else 'Explicit retry required',
                        completed_at=timestamp() if status in {'failed', 'completed'} else None)
             if candidate:
+                job['manual_operations'] = candidate.get('manual_operations', [])
+                job['files_changed_count'] = len(candidate['files_changed'])
                 if candidate.get('operator'):
                     job.update(operator=candidate['operator'], worktree=candidate['worktree'],
                                branch=candidate['branch'], commit_sha=candidate['operator'].get('commit_sha'))
@@ -358,6 +360,7 @@ class EngineeringJobs:
                     provider_blocker=candidate.get('provider_blocker'))
                 job.update(test_result=candidate['test_results'], review_result=candidate['reviewer_result'])
                 job['improvement'].update(baseline_evidence=improvement.get('baseline_comparison'),
+                    baseline_outcome=improvement.get('baseline_outcome'),
                     implementation_attempts=improvement.get('failures_revisions', []),
                     test_evidence=candidate['test_results'], review_evidence=candidate['reviewer_result'],
                     candidate_result=candidate['state'])
@@ -379,7 +382,8 @@ class EngineeringJobs:
 
 def project_job(job):
     """Closed production projection: no paths, model prose, logs or host config."""
-    from .candidate_provider import ProviderId, project_failure
+    from .candidate_provider import (ProviderId, project_failure, failure_evidence, baseline_outcome_for,
+                                     project_manual_operations, project_execution_state)
     from pydantic import TypeAdapter
     from .candidate_provider import WorkAttribution, project_provider_results, work_attribution
     from .engineering_providers import ProviderBlocker
@@ -444,16 +448,31 @@ def project_job(job):
             or type(recovery['count']) is not int or recovery['count'] < 0
             or type(recovery['retry_available']) is not bool):
         raise ToolDenied('Invalid engineering recovery metadata')
+    baseline_outcome = baseline_outcome_for(job)
+    execution_state = project_execution_state(job, job['current_stage'])
+    visible_failure = (failure_evidence('baseline_validator', baseline_outcome['failure_code'],
+        'testing', max(1, attempts)) if execution_state == 'blocked_before_implementation'
+        and baseline_outcome and baseline_outcome['failure_code'] else job.get('failure'))
+    manual_operations = project_manual_operations(job.get('manual_operations', []))
+    changed_count = job.get('files_changed_count', 0)
+    if type(changed_count) is not int or not 0 <= changed_count <= 400:
+        raise ToolDenied('Invalid changed file count')
+    owner_status = None
+    if job['status'] == 'blocked' and execution_state == 'blocked_before_implementation' and baseline_outcome:
+        owner_status = ('Blocked before implementation. Stage: Baseline validation. '
+            f"Result: {baseline_outcome['result'].title()}. "
+            f"{job['provider']} invoked: {'Yes' if baseline_outcome['provider_invoked'] else 'No'}. "
+            f"Files changed: {changed_count}. Retryable: {'Yes' if baseline_outcome['result'] in {'timeout', 'fail'} else 'No'}.")
     return {key: job.get(key) for key in ('id', 'type', 'status', 'provider', 'created_at',
         'started_at', 'completed_at', 'current_stage', 'attempts', 'candidate_id', 'control')} | {
         'project_id': project_reference(job.get('project_id')),
         **({'operator': project_operator(job['operator'])} if job.get('operator') else {}),
         'decision': project_decision(job.get('decision')),
         'error': 'Engineering job requires attention' if job.get('error') else None,
-        'failure': project_failure(job.get('failure')),
+        'failure': project_failure(visible_failure),
         'failures': failures, 'failure_count': failure_count,
         'failures_truncated': failure_count > len(failures),
-        'blocker': control or ((job.get('failure') or {}).get('code') if job.get('failure') and job['status'] in {'blocked', 'failed'} else
+        'blocker': control or ((visible_failure or {}).get('code') if visible_failure and job['status'] in {'blocked', 'failed'} else
             'retry_limit' if attempts >= MAX_ATTEMPTS and job['status'] == 'failed'
             else 'execution_not_passed' if job['status'] in {'blocked', 'failed'}
             else 'human_approval_required' if job['status'] == 'waiting_for_approval' else None),
@@ -462,7 +481,12 @@ def project_job(job):
         'provider_results': project_provider_results(job.get('provider_results', [])),
         'provider_route': project_provider_route(job.get('provider_route'), job.get('provider')),
         'provider_blocker': ProviderBlocker.model_validate(job['provider_blocker']).model_dump() if job.get('provider_blocker') else None,
-        'test_result': tests, 'review_result': {'verdict': verdict}}
+        'test_result': tests, 'review_result': {'verdict': verdict},
+        'baseline_outcome': baseline_outcome, 'execution_state': execution_state,
+        'manual_operations': manual_operations, 'files_changed_count': changed_count,
+        'implementation_attempts': 0 if execution_state == 'blocked_before_implementation' else
+            job.get('implementation_attempts', len((job.get('improvement') or {}).get('implementation_attempts', []))),
+        'owner_status': owner_status}
 
 
 def project_provider_route(route, requested):

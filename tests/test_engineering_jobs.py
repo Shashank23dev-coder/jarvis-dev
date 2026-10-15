@@ -1,5 +1,6 @@
 """Durable queue, execution fencing, provider path and approval invariants."""
 import fcntl
+import copy
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -11,10 +12,14 @@ pytestmark = pytest.mark.usefixtures("owner")
 from core.candidate_action import EngineeringAction, goal_digest
 from core.database import Database
 from core.engineering_jobs import EngineeringJobs, project_job
+from core.candidate_bridge import project
+from core.candidate_provider import project_execution_state
+from core.candidate_tools import CandidateTools
 from core.engineering_worker import EngineeringWorker
 from tools.policy import ToolDenied
 from test_self_edit import setup, tree_bytes
 from test_engineering import ARGS, model, run_checks
+from tools import CommandResult
 
 
 def enqueue(database, goal='Fix the value in Jarvis', **changes):
@@ -57,6 +62,80 @@ def test_worker_candidate_tests_review_and_no_apply_deploy(setup, monkeypatch):
     assert EngineeringWorker(factory(), source=source).once() is None
     db.close()
     assert EngineeringJobs(Database(db.path)).get(job['id'])['status'] == 'completed'
+
+
+def test_baseline_timeout_is_visible_without_a_provider_or_fake_attempt(setup, monkeypatch):
+    source, db, factory = setup
+    monkeypatch.setenv('JARVIS_MODE', 'development')
+    calls = []
+    def author(*args):
+        calls.append(args)
+        return model(*args)
+    def checks(repository, phase, paths):
+        return CommandResult(('pytest',), -9, '', timed_out=True)
+    job = enqueue(db)
+    service = factory(model=author, tester=checks)
+    result = EngineeringWorker(service, source=source).once()
+    candidate = service.store.get(result['candidate_id'])
+    projected = project_job(result)
+    assert result['status'] == 'blocked' and result['attempts'] == 1
+    assert calls == [] and candidate['iterations'] == 0
+    assert candidate['improvement']['failures_revisions'] == []
+    assert candidate['improvement']['baseline_outcome']['stage'] == 'baseline_validation'
+    assert candidate['improvement']['baseline_outcome']['result'] == 'timeout'
+    assert candidate['improvement']['baseline_outcome']['elapsed_seconds'] >= 0
+    assert candidate['failure']['code'] == 'baseline_timeout' and candidate['failure']['retryable']
+    assert projected['execution_state'] == 'blocked_before_implementation'
+    assert projected['baseline_outcome']['provider_invoked'] is False
+    assert projected['implementation_attempts'] == 0
+    assert 'invoked: No' in projected['owner_status']
+    assert 'Result: Timeout' in projected['owner_status']
+    assert projected['failure']['code'] == projected['blocker'] == 'baseline_timeout'
+    assert project(candidate)['execution_state'] == 'blocked_before_implementation'
+    assert project(candidate)['baseline_outcome']['failure_code'] == 'baseline_timeout'
+    owner = CandidateTools('Show candidate status', db)
+    owner.records[candidate['id']] = project(candidate)
+    owner_text = owner.final_response('generic status')
+    assert 'Blocked before implementation' in owner_text
+    assert 'Result: Timeout' in owner_text and 'invoked: No' in owner_text
+    assert 'Files changed: 0' in owner_text and 'Retryable: Yes' in owner_text
+    assert project_job(projected) == projected
+    before = candidate['state']
+    service.tests(candidate['id'])
+    candidate = service.store.get(candidate['id'])
+    updated = project_job(EngineeringJobs(db).get(job['id']))
+    assert candidate['state'] == before
+    assert candidate['improvement']['failures_revisions'] == []
+    assert candidate['manual_operations'][-1]['result'] == 'unchanged_candidate'
+    assert updated['manual_operations'][-1] == dict(kind='manual_tests', result='unchanged_candidate')
+    assert updated['implementation_attempts'] == 0
+    assert updated['execution_state'] == 'blocked_before_implementation'
+    owner.records[candidate['id']] = project(candidate)
+    assert 'Manual tests: unchanged candidate' in owner.final_response('generic status')
+    legacy = copy.deepcopy(candidate)
+    legacy['improvement'].pop('baseline_outcome')
+    legacy['improvement']['failures_revisions'] = [
+        dict(attempt=1, state='needs_revision', error='Baseline tests did not complete'),
+        dict(attempt=2, state='rejected', error='Candidate has no changes')]
+    legacy['state'] = 'rejected'
+    legacy['failure'] = dict(provider='codex_cli', code='candidate_policy_denied',
+        retryable=False, stage='testing', attempt=1,
+        reason='Keep edits within approved development paths and limits.')
+    old_projection = project(legacy)
+    assert old_projection['execution_state'] == 'blocked_before_implementation'
+    assert old_projection['failure']['code'] == 'baseline_timeout'
+    assert old_projection['improvement']['failures_revisions'] == []
+
+
+def test_closed_execution_state_labels():
+    baseline = dict(stage='baseline_validation', result='pass', elapsed_seconds=1,
+                    failure_code=None, provider_invoked=True)
+    assert project_execution_state(dict(improvement=dict(baseline_outcome=baseline)),
+                                   'implementing') == 'implementation_running'
+    assert project_execution_state(dict(files_changed_count=1,
+        failure=dict(code='tests_failed')), 'blocked') == 'tests_failed_after_changes'
+    assert project_execution_state(dict(manual_operations=[dict(kind='manual_tests',
+        result='unchanged_candidate')]), 'needs_revision') == 'manual_tests_on_unchanged_candidate'
 
 
 def test_lease_recovery_and_stale_owner_fenced(setup):

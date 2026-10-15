@@ -202,7 +202,8 @@ def project(record):
         raise ToolDenied('Invalid review result')
     summary = record.get('diff_summary') or {}
     summary = {k: v for k, v in summary.items() if k in {'files', 'added', 'deleted'} and type(v) is int and 0 <= v <= 400}
-    from .candidate_provider import project_failure, project_provider_results
+    from .candidate_provider import (project_failure, project_provider_results, baseline_outcome_for,
+                                     project_manual_operations, project_execution_state)
     from .candidate_provider import work_attribution, WorkAttribution
     from .engineering_providers import ProviderBlocker
     from .engineering_jobs import project_provider_route
@@ -217,6 +218,14 @@ def project(record):
                 diff_summary=summary, files_changed=[], test_results=tests,
                 reviewer_result=dict(verdict=verdict, summary='Host review completed; detailed evidence remains in dev.') if verdict else None,
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)
+    projected['baseline_outcome'] = baseline_outcome_for(record)
+    projected['manual_operations'] = project_manual_operations(record.get('manual_operations', []))
+    projected['execution_state'] = project_execution_state(record, record.get('stage', record['state']))
+    if projected['execution_state'] == 'blocked_before_implementation' and projected['baseline_outcome']['failure_code']:
+        from .candidate_provider import failure_evidence
+        projected['failure'] = project_failure(failure_evidence('baseline_validator',
+            projected['baseline_outcome']['failure_code'], 'testing',
+            max(1, (record.get('source_context') or {}).get('attempt', 1))))
     if record.get('improvement'):
         improvement = record['improvement']
         from pydantic import TypeAdapter
@@ -235,7 +244,8 @@ def project(record):
             failures_revisions=[{'attempt': item['attempt'], 'state': item['state']}
                 for item in improvement.get('failures_revisions', [])[:2]
                 if type(item.get('attempt')) is int and item['attempt'] in (1, 2)
-                and item.get('state') in {'passed', 'needs_revision', 'rejected'}],
+                and item.get('state') in {'passed', 'needs_revision', 'rejected'}
+                and projected['execution_state'] != 'blocked_before_implementation'],
             baseline_comparison={'result': comparison}, review_result=verdict,
             confidence='supported_by_tests_and_review' if record['state'] == 'passed' and not record.get('busy') else 'insufficient',
             implementation_provider=improvement['implementation_provider'], review_provider=improvement['review_provider'])
