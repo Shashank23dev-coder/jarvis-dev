@@ -16,6 +16,8 @@ STATES = {'queued', 'planning', 'implementing', 'testing', 'reviewing',
           'waiting_for_approval', 'completed', 'blocked', 'failed'}
 ACTIVE = {'planning', 'implementing', 'testing', 'reviewing'}
 MAX_ATTEMPTS = 3
+# A claimed job is recovered as worker_failed and re-run once this expires.
+LEASE_SECONDS = 930
 JOB_PAGE_SIZE = 5
 FAILURE_PROJECTION_LIMIT = 16
 
@@ -307,11 +309,23 @@ class EngineeringJobs:
                     self._save(db, job, 'retry_limit')
                     continue
                 job.update(status='planning', current_stage='planning', attempts=job['attempts'] + 1,
-                           lease_owner=owner, lease_until=now + 930,
+                           lease_owner=owner, lease_until=now + LEASE_SECONDS,
                            started_at=job['started_at'] or timestamp())
                 self._save(db, job, 'claimed')
                 return job
         return None
+
+    def advance(self, identifier, owner, status):
+        """Record the live stage of a claimed job. The lease is deliberately not renewed."""
+        if status not in {'implementing', 'testing', 'reviewing'}:
+            raise ValueError('Invalid engineering stage')
+        with self.database.transaction() as db:
+            job = self._get(db, identifier)
+            if job['lease_owner'] != owner:
+                raise ToolDenied('Stale engineering lease')
+            if job['current_stage'] != status:
+                job.update(status=status, current_stage=status)
+                self._save(db, job, 'stage_' + status)
 
     @staticmethod
     def _merge_candidate_failures(job, candidate):

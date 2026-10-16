@@ -13,8 +13,9 @@ from tools.policy import ToolDenied
 
 
 class EngineeringWorker:
-    def __init__(self, service, *, source=SOURCE):
-        self.service = service
+    def __init__(self, service, *, source=SOURCE, direct_dev=False):
+        # Opt-in: only the service entry point routes eligible jobs to DirectDevelopment.
+        self.service, self.direct_dev = service, direct_dev
         self.boundary = Broker(service, source=source)
         self.jobs = EngineeringJobs(service.store.database)
 
@@ -47,6 +48,10 @@ class EngineeringWorker:
                     from .engineering_operator import run_job
                     candidate = run_job(service, self.jobs, job, owner)
                     return self.jobs.finish(job['id'], owner, candidate)
+                from .direct_dev import direct_route, run_direct
+                if self.direct_dev and direct_route(service, job)['path'] == 'direct':
+                    candidate, failure = run_direct(service, self.jobs, job, owner)
+                    return self.jobs.finish(job['id'], owner, candidate, failure=failure)
                 continued_review = False
                 if job['candidate_id']:
                     prior = service.store.get(job['candidate_id'], recover=False)
@@ -96,7 +101,8 @@ def main():
     if STATE.resolve() != STATE or STATE.stat().st_mode & 0o077:
         raise ToolDenied('Unsafe engineering state')
     database = Database(STATE / 'candidates.sqlite3')
-    worker = EngineeringWorker(SelfEditService(database, source_root=SOURCE, candidate_root=STATE / 'candidates'))
+    worker = EngineeringWorker(SelfEditService(database, source_root=SOURCE, candidate_root=STATE / 'candidates'),
+                               direct_dev=True)
     while True:
         worker.once()
         time.sleep(1)
