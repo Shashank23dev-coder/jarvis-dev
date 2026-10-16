@@ -355,20 +355,98 @@ def test_preparation_runs_full_suite_and_second_review_then_apply_accepts(setup,
     assert prepare(factory, source, full([])) is None  # prepared once per commit
 
 
-def test_preparation_full_suite_failure_blocks_like_any_failing_candidate(setup, agents, tmp_path):
-    """Pre-existing failures are not special-cased: a failing full suite means not apply-eligible."""
+def suite(phases, candidate, baseline=None):
+    """Tester for preparation: `candidate`/`baseline` map phase -> CommandResult (default: pass)."""
+    def run(repository, phase, paths):
+        phases.append((phase, repository.root.name))
+        results = baseline if phase.startswith('baseline_') else candidate
+        result = (results or {}).get(phase.removeprefix('baseline_'))
+        if isinstance(result, Exception):
+            raise result
+        return result or CommandResult(('pytest',), 0, '2 passed')
+    return run
+
+
+def pytest_failed(*tests, **kwargs):
+    lines = ''.join(f'FAILED {test} - AssertionError\n' for test in tests)
+    return CommandResult(('pytest',), 1, f'... \n=== short test summary info ===\n{lines}', **kwargs)
+
+
+SEAL = ('state', 'reviewer_result', 'tested_fingerprint', 'reviewed_at', 'reviewed_fingerprint',
+        'reviewed_diff_hash', 'failure', 'failures')
+
+
+def test_new_full_suite_failure_is_the_candidates_fault(setup, agents, tmp_path):
     source, db, factory = setup
     integration_target(setup, tmp_path)
     job = waiting_candidate(setup, agents)
-    result = prepare(factory, source, full([], {'full_python': 1}))
+    phases = []
+    result = prepare(factory, source, suite(phases, {'full_python': pytest_failed(
+        'tests/test_app.py::test_value', 'tests/test_old.py::test_broken')},
+        {'full_python': pytest_failed('tests/test_old.py::test_broken')}))
+    assert [p for p, _ in phases] == ['full_python', 'baseline_full_python']
+    assert phases[1][1] == 'baseline'  # the base commit, not the candidate worktree
     assert result['status'] == 'blocked'
     assert (result['failure']['code'], result['failure']['stage']) == ('tests_failed', 'testing')
     candidate = factory().store.get(job['candidate_id'], internal=True)
-    assert candidate['state'] == 'needs_revision' and candidate['apply_preparation']['status'] == 'tests_failed'
+    preparation = candidate['apply_preparation']
+    assert candidate['state'] == 'needs_revision' and preparation['status'] == 'tests_failed'
+    assert preparation['failing_tests'] == [
+        dict(phase='full_python', test='tests/test_app.py::test_value', pre_existing=False),
+        dict(phase='full_python', test='tests/test_old.py::test_broken', pre_existing=True)]
     assert agents['claude_cli'].calls == ['review']  # no second review of a failing commit
+    assert not (Path(candidate['worktree']).parent / 'baseline').exists()
     assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is False
     check_projections(factory, result)
-    assert prepare(factory, source, full([])) is None
+
+
+@pytest.mark.parametrize('scenario,reason', [
+    ('pre_existing_only', 'pre_existing_failures_only'),
+    ('timeout', 'sandbox_time_limit'),
+    ('sandbox_limit', 'sandbox_time_limit'),
+    ('baseline_timeout', 'sandbox_time_limit'),
+    ('unidentified', 'failures_unidentified'),
+])
+def test_environment_blocked_preparation_leaves_candidate_and_job_unchanged(
+        setup, agents, tmp_path, scenario, reason):
+    source, db, factory = setup
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    before = factory().store.get(job['candidate_id'], internal=True)
+    old = pytest_failed('tests/test_old.py::test_broken')
+    candidate_results, baseline_results = {
+        'pre_existing_only': ({'full_python': old}, {'full_python': old}),
+        'timeout': ({'full_python': CommandResult(('pytest',), -9, '', timed_out=True)}, None),
+        'sandbox_limit': ({'full_python': ToolDenied('Candidate deadline exceeded')}, None),
+        'baseline_timeout': ({'full_python': old},
+                             {'full_python': CommandResult(('pytest',), -9, '', timed_out=True)}),
+        'unidentified': ({'full_python': CommandResult(('pytest',), 1, 'no summary')}, None),
+    }[scenario]
+    phases = []
+    result = prepare(factory, source, suite(phases, candidate_results, baseline_results))
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    preparation = candidate['apply_preparation']
+    assert (preparation['status'], preparation['reason']) == ('environment_blocked', reason)
+    assert preparation['fingerprint'] == candidate['fingerprint']
+    if scenario == 'pre_existing_only':
+        assert preparation['failing_tests'] == [
+            dict(phase='full_python', test='tests/test_old.py::test_broken', pre_existing=True)]
+    # Seal, state and job are exactly as before; no second review ran.
+    assert {k: candidate.get(k) for k in SEAL} == {k: before.get(k) for k in SEAL}
+    assert candidate['state'] == 'passed'
+    assert result['status'] == 'waiting_for_approval'
+    assert len(result['history']) == len(job['history'])
+    assert agents['claude_cli'].calls == ['review']
+    # Apply still refuses: the failing full-suite evidence stays on this fingerprint.
+    assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is False
+    apply = CandidateApply(factory(tester=passed))
+    apply._setup(job['candidate_id'])
+    with pytest.raises(ToolDenied):
+        apply._eligible()
+    check_projections(factory, result)
+    # Never re-run for the same fingerprint.
+    rerun = []
+    assert prepare(factory, source, suite(rerun, {})) is None and rerun == []
 
 
 def test_preparation_never_lets_the_author_review(setup, agents):

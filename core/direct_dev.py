@@ -10,6 +10,7 @@ from dataclasses import asdict
 import json
 import os
 from pathlib import Path
+import re
 import time
 from uuid import uuid4
 
@@ -488,10 +489,12 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
     failures = FailureLog(state_dir / 'failures.jsonl')
     run_id = str(uuid4())
     service.store.claim(candidate_id)
-    stage = 'testing'
+    stage, sealed = 'testing', None
     try:
         record = service.store.get(candidate_id, internal=True)
         record['lease_until'] = time.time() + budget + 1  # crash recovery, as in _operate_locked
+        # _tests clears the review seal before running; an environment block restores it.
+        sealed = json.loads(json.dumps({key: record[key] for key in SEAL_FIELDS if key in record}))
         author = record['improvement']['implementation_provider']
         fingerprint, commit = record['fingerprint'], record['commit']
         preparation = dict(run_id=run_id, started_at=timestamp(), fingerprint=fingerprint, commit=commit,
@@ -504,7 +507,20 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
         if service._workgit('rev-parse', 'HEAD').strip() != commit or service._diff() != fingerprint:
             raise ToolDenied('Candidate changed since its review')
         # Existing phases and evidence format; targeted results on this fingerprint are reused.
-        service._tests(resume=True)
+        # The documented tester hook only captures the raw results, whose pytest summary
+        # (failing test IDs) the stored 16 KB evidence may cut off.
+        raw, tester = {}, service.tester
+
+        def capture(repository, phase, paths):
+            result = (tester(repository, phase, paths) if tester else
+                      repository.run_ui_tests() if phase == 'full_ui' else repository.run_pytest(paths))
+            raw[phase] = result
+            return result
+        service.tester = capture
+        try:
+            service._tests(resume=True)
+        finally:
+            service.tester = tester
         evidence = [dict(phase=t['phase'], paths=t['paths'], returncode=t['returncode'], timed_out=t['timed_out'],
                          truncated=t['truncated'], backend=(t['sandbox'] or {}).get('backend'),
                          stdout_tail=t['stdout'][-1500:])
@@ -512,7 +528,12 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
         preparation['tests'] = [{k: t[k] for k in ('phase', 'returncode', 'timed_out', 'truncated', 'backend')}
                                 for t in evidence]
         if record.get('tested_fingerprint') != fingerprint:
-            preparation['status'] = 'tests_failed'  # _tests already set needs_revision + tests_failed evidence
+            outcome = _attribute_failures(service, record, raw)
+            preparation.update(outcome)
+            if outcome['status'] == 'environment_blocked':
+                return _environment_blocked(service, record, sealed, preparation)
+            # Only failures that are new relative to the base commit are the candidate's fault;
+            # _tests already set needs_revision with tests_failed evidence.
             return _finish_preparation(service, jobs, record, preparation)
 
         stage = 'reviewing'
@@ -553,6 +574,11 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
         from .candidate_provider import execution_error_code
         entry = failures.record(run_id, f'apply_preparation.{stage}', getattr(exc, 'provider', None), exc)
         record = service.store.get(candidate_id, internal=True)
+        if stage == 'testing' and sealed and execution_error_code(exc) in ENVIRONMENT_CODES:
+            # The sandbox or budget ran out: an environment limit, not the candidate's fault.
+            preparation = dict(record.get('apply_preparation') or {}, reason='sandbox_time_limit',
+                               failure=dict(exception=entry['exception'], message=entry['message']))
+            return _environment_blocked(service, record, sealed, preparation)
         code = _blocked_code(exc.decision) if isinstance(exc, NoAgentAvailable) else getattr(exc, 'code', None)
         code = _production_code(code if code in FAILURES else execution_error_code(exc))
         author = (record.get('improvement') or {}).get('implementation_provider', 'codex_cli')
@@ -564,6 +590,81 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
         return _finish_preparation(service, jobs, record, preparation)
     finally:
         service.store.release(candidate_id)
+
+
+SEAL_FIELDS = ('state', 'reviewer_result', 'tested_fingerprint', 'reviewed_at', 'reviewed_fingerprint',
+               'reviewed_diff_hash', 'failure', 'failures', 'error', 'stage')
+ENVIRONMENT_CODES = {'candidate_deadline', 'sandbox_unavailable'}
+FAILED_TEST = re.compile(r'^(?:FAILED|ERROR) (\S+?)(?: - .*)?$', re.M)
+
+
+def failing_tests(result):
+    """pytest's own summary lines (FAILED/ERROR node IDs); None when they cannot be identified."""
+    if not (result.returncode or result.timed_out or result.truncated):
+        return set()
+    found = set(FAILED_TEST.findall(result.stdout or ''))
+    return found if found and not result.timed_out else None
+
+
+def _attribute_failures(service, record, raw):
+    """Compare the failing full phases with the same phases on the candidate's base commit."""
+    failed = {phase: result for phase, result in raw.items()
+              if phase != 'targeted' and (result.returncode or result.timed_out or result.truncated)}
+    if any(result.timed_out for result in failed.values()):
+        return dict(status='environment_blocked', reason='sandbox_time_limit', failing_tests=[])
+    baseline = _baseline_results(service, record, failed)
+    failing, unknown = [], False
+    for phase, result in failed.items():
+        mine, base = failing_tests(result), baseline[phase]
+        if base.timed_out:
+            return dict(status='environment_blocked', reason='sandbox_time_limit', failing_tests=[],
+                        baseline=dict(phase=phase, timed_out=True))
+        theirs = failing_tests(base)
+        if mine is None or theirs is None:
+            unknown = True  # cannot show a failure is new, so it is not blamed on the candidate
+            continue
+        failing += [dict(phase=phase, test=test, pre_existing=test in theirs) for test in sorted(mine)]
+    failing = failing[:50]
+    if any(not item['pre_existing'] for item in failing):
+        return dict(status='tests_failed', reason='new_failures', failing_tests=failing)
+    return dict(status='environment_blocked', failing_tests=failing,
+                reason='failures_unidentified' if unknown else 'pre_existing_failures_only')
+
+
+def _baseline_results(service, record, failed):
+    """Run the failed phases on the base commit, in a temporary detached worktree, same sandbox."""
+    from .self_edit import CandidateRepository
+    container, bare, _ = service._paths(record)
+    tree = container / 'baseline'
+    git = ['--git-dir=' + str(bare)]
+    service._git(container, *git, 'worktree', 'add', '--detach', str(tree), record['base_commit'])
+    try:
+        repository = CandidateRepository(tree, source_root=service.source, check=service._check)
+        results = {}
+        for phase in failed:
+            paths = ['tests/ui.test.cjs'] if phase == 'full_ui' else ['tests']
+            results[phase] = (service.tester(repository, 'baseline_' + phase, paths) if service.tester else
+                              repository.run_ui_tests() if phase == 'full_ui' else repository.run_pytest(paths))
+        return results
+    finally:
+        service._git(container, *git, 'worktree', 'remove', '--force', str(tree))
+
+
+def _environment_blocked(service, record, sealed, preparation):
+    """Record the block; the candidate's seal, state and job are left exactly as they were.
+
+    Apply still refuses: the failing full-phase evidence stays on this fingerprint.
+    """
+    preparation.update(status='environment_blocked', ended_at=timestamp())
+    for key in SEAL_FIELDS:
+        if key in sealed:
+            record[key] = sealed[key]
+        else:
+            record.pop(key, None)
+    record['apply_preparation'] = preparation
+    service.store.save(record, 'apply_preparation_environment_blocked')
+    service.store.release(record['id'])
+    return service.store.get(record['id'])
 
 
 def _finish_preparation(service, jobs, record, preparation):
