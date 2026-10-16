@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 
 from .candidate_claude import claude_executable, claude_failure_code
 from .candidate_codex_cli import chatgpt_login, codex_executable, codex_failure_code
@@ -217,6 +218,7 @@ class CLIAgent:
                 raise ProviderFailure(self.name, 'provider_authentication' if state == 'not_authenticated'
                                       else 'provider_unavailable')
             step = 'exec'
+            self.stage = stage
             if action == 'implement':
                 return self.implement(Path(payload['worktree']), payload['task'], timeout)
             return self.review(payload, timeout)
@@ -255,6 +257,26 @@ class CodexCLIAgent(CLIAgent):
         return 'available' if chatgpt_login(status) else 'not_authenticated'
 
     def _exec(self, cwd, sandbox, prompt, timeout, extra=()):
+        """One retry, only for an authentication failure, and only after login re-probes as ChatGPT.
+
+        Codex refreshes an expired access token after the first request is
+        rejected with 401, so the first run fails although the login is valid.
+        """
+        deadline = time.monotonic() + timeout
+        try:
+            return self._exec_once(cwd, sandbox, prompt, timeout, extra)
+        except AgentProcessError as exc:
+            if codex_failure_code(str(exc).encode()) != 'provider_authentication':
+                raise
+            if self.failures:
+                self.failures.record(self.run_id, f"{getattr(self, 'stage', 'routing')}.exec_auth_retry",
+                                     self.name, exc)
+            remaining = deadline - time.monotonic()
+            if remaining <= 15 or self.probe(min(10, remaining)) != 'available':
+                raise
+            return self._exec_once(cwd, sandbox, prompt, deadline - time.monotonic(), extra)
+
+    def _exec_once(self, cwd, sandbox, prompt, timeout, extra):
         with tempfile.TemporaryDirectory(prefix='jarvis-codex-out-') as scratch:
             last = Path(scratch) / 'last-message.txt'
             run_cli([self.executable(), 'exec', '--sandbox', sandbox, '--skip-git-repo-check',

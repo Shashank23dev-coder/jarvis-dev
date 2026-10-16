@@ -311,3 +311,69 @@ def test_review_verdict_parsing():
     assert dev_agents.parse_verdict('```json\n{"verdict":"passed","summary":"ok"}\n```')['verdict'] == 'passed'
     with pytest.raises(dev_agents.AgentResponseError):
         dev_agents.parse_verdict('looks fine to me')
+
+
+def scripted_codex(tmp_path, failing_execs, *, logout_on_failure=False, error='401 Unauthorized: token expired'):
+    """Fake Codex whose first `failing_execs` exec calls fail with `error`; counts every call."""
+    state = tmp_path / 'codex-state'
+    state.mkdir()
+    (state / 'logged-in').touch()
+    script = tmp_path / 'fake-codex'
+    script.write_text(f'''#!/bin/sh
+S={state}
+echo "$1" >> $S/calls
+if [ "$1" = login ]; then
+  if [ -e $S/logged-in ]; then echo "Logged in using ChatGPT" >&2; else echo "Not logged in" >&2; exit 1; fi
+  exit 0
+fi
+n=$(grep -c '^exec$' $S/calls)
+if [ "$n" -le {failing_execs} ]; then
+  {'rm -f $S/logged-in' if logout_on_failure else ':'}
+  echo "ERROR: {error}" >&2; exit 1
+fi
+while [ $# -gt 0 ]; do if [ "$1" = -o ]; then echo "done" > "$2"; fi; shift; done
+''')
+    script.chmod(0o755)
+    return script, lambda: (state / 'calls').read_text().split()
+
+
+@pytest.mark.parametrize('failing,logout,error,code,calls', [
+    (1, False, '401 Unauthorized: token expired', None, ['login', 'exec', 'login', 'exec']),
+    (1, True, '401 Unauthorized: token expired', 'provider_authentication', ['login', 'exec', 'login']),
+    (9, False, '401 Unauthorized: token expired', 'provider_authentication', ['login', 'exec', 'login', 'exec']),
+    (9, False, 'You hit your usage limit', 'provider_quota', ['login', 'exec']),
+])
+def test_codex_retries_once_only_for_authentication_after_reprobing_login(
+        tmp_path, monkeypatch, failing, logout, error, code, calls):
+    script, observed = scripted_codex(tmp_path, failing, logout_on_failure=logout, error=error)
+    monkeypatch.setenv('JARVIS_CODEX_EXECUTABLE', str(script))
+    failures = dev_agents.FailureLog(tmp_path / 'failures.jsonl')
+    agent = dev_agents.CodexCLIAgent(tmp_path / 'bin', failures, 'run-3')
+    payload = dict(action='implement', worktree=str(tmp_path), task='t')
+    if code is None:
+        assert agent.complete(payload, '', 60)['summary'].strip() == 'done'
+    else:
+        with pytest.raises(ProviderFailure) as raised:
+            agent.complete(payload, '', 60)
+        assert raised.value.code == code
+    assert observed() == calls
+    stages = [entry['stage'] for entry in failures.entries('run-3')]
+    if 'Unauthorized' in error:
+        # The first failure is always kept, with its real class, even when the retry succeeds.
+        assert stages[0] == 'implementing.exec_auth_retry'
+        assert failures.entries('run-3')[0]['exception'] == 'core.dev_agents.AgentProcessError'
+    else:
+        assert 'implementing.exec_auth_retry' not in stages
+
+
+def test_codex_authentication_failure_never_falls_back_to_an_api_agent(tmp_path, monkeypatch):
+    script, observed = scripted_codex(tmp_path, 9)
+    monkeypatch.setenv('JARVIS_CODEX_EXECUTABLE', str(script))
+    source, database = fixture_project(tmp_path)
+    codex = dev_agents.CodexCLIAgent(tmp_path / 'bin')
+    report = DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
+                               agents=[codex, Stub('claude_cli'), APIStub('codex_api')], tester=passed).run(
+        'dd-fixture', 'Fix add()', ['src/calc.py'], ['tests/test_calc.py'])
+    assert report['status'] == 'failed' and report['failure']['code'] == 'provider_authentication'
+    assert report['failure']['stage'] == 'implement'
+    assert observed().count('exec') == 2  # the one retry, then stop: no other agent, no API
