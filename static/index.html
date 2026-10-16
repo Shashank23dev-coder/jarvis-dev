@@ -460,9 +460,7 @@
         <option value="activity">Activity</option>
       </select>
 
-      <div class="status-value">
-        Local Development
-      </div>
+      <div id="runtimeMode" class="status-value">Unavailable</div>
 
     </div>
 
@@ -604,6 +602,19 @@ const requests = {};
 let activeView = "assistant";
 let conversationId = null;
 try { conversationId = localStorage.getItem("jarvis.conversationId"); } catch (_) {}
+
+async function loadRuntimeMode() {
+    const label = document.getElementById("runtimeMode");
+    try {
+        const response = await fetch("/runtime", { cache: "no-store" });
+        if (!response.ok) throw new Error("Runtime request failed");
+        const data = await response.json();
+        label.textContent = data.mode === "development" ? "Development" :
+            data.mode === "production" ? "Production" : "Unavailable";
+    } catch (_) {
+        label.textContent = "Unavailable";
+    }
+}
 
 function rememberConversation(id) {
     conversationId = id;
@@ -795,6 +806,7 @@ promptBox.addEventListener("keydown", event => {
     }
 });
 restoreConversation();
+loadRuntimeMode();
 </script>
 
 </body>

@@ -49,7 +49,7 @@ def test_production_secrets_not_in_settings_repr(production):
     assert Settings.from_env({}).mode == 'development'
 
 
-@pytest.mark.parametrize('path', ['/', '/tasks', '/activity', '/conversations', '/memories?scope=user&scope_id=x',
+@pytest.mark.parametrize('path', ['/', '/tasks', '/activity', '/conversations', '/runtime', '/memories?scope=user&scope_id=x',
                                   '/candidates/00000000-0000-0000-0000-000000000000/apply', '/docs', '/openapi.json'])
 def test_all_sensitive_routes_require_authentication(production, path):
     with TestClient(main.create_app(settings=Settings.from_env(production)), base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
@@ -71,6 +71,7 @@ def test_basic_browser_and_bearer_api_auth_and_csrf(production):
         assert client.get('/', auth=('jarvis', production['JARVIS_AUTH_TOKEN'])).status_code == 200
         headers = {'Authorization': 'Bearer ' + production['JARVIS_AUTH_TOKEN']}
         assert client.get('/tasks', headers=headers).status_code == 200
+        assert client.get('/runtime', headers=headers).json() == {'mode': 'production'}
         assert client.post('/conversations', headers=headers).status_code == 200
         assert client.post('/conversations', headers=dict(headers, Origin='https://evil.example')).status_code == 403
         assert client.get('/tasks', headers=dict(headers, **{'Sec-Fetch-Site': 'cross-site'})).status_code == 403
