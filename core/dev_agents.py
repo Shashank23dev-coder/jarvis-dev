@@ -26,6 +26,8 @@ TOOL_DIRS = ('/usr/local/bin', '/usr/bin', '/bin')
 # Codex prefers a bwrap found on PATH. Only its bundled copy is permitted user
 # namespaces by AppArmor (/etc/apparmor.d/codex-bwrap); /usr/bin/bwrap is not.
 EXCLUDED_TOOLS = {'bwrap'}
+# Home directories an implementing agent may never read or write.
+PRIVATE_DIRS = ('.claude', '.codex', '.ssh', 'jarvis-dev')
 OUTPUT_LIMIT = 256000
 SUMMARY_LIMIT = 4000
 
@@ -173,7 +175,8 @@ def parse_verdict(text):
 
 
 def review_prompt(payload):
-    return json.dumps(dict(task=payload['task'], diff=payload['diff'], tests=payload['tests']))
+    return json.dumps(dict(task=payload['task'], commit=payload.get('commit'), diff=payload['diff'],
+                           tests=payload['tests']))
 
 
 class CLIAgent:
@@ -274,7 +277,7 @@ class ClaudeCLIAgent(CLIAgent):
     name = 'claude_cli'
     failure_code = staticmethod(claude_failure_code)
     COMMON = ['-p', '--output-format', 'json', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-              '--disallowedTools', 'mcp__*', '--setting-sources', '', '--settings', '{"disableAllHooks":true}',
+              '--setting-sources', '', '--settings', '{"disableAllHooks":true}',
               '--disable-slash-commands', '--no-session-persistence']
 
     def executable(self):
@@ -307,19 +310,32 @@ class ClaudeCLIAgent(CLIAgent):
             raise AgentResponseError('Claude reported an error or no result')
         return envelope['result']
 
+    @staticmethod
+    def implement_argv(executable, worktree):
+        """File tools only, no shell, confined to the worktree.
+
+        --restricted confines file tools to the working directory; dontAsk denies
+        anything not allowed below instead of prompting; deny rules win over allow.
+        """
+        root = '/' + str(Path(worktree).resolve())  # '//abs/path' = absolute in permission rules
+        home = '/' + str(Path.home())
+        allow = [f'{tool}({root}/**)' for tool in ('Read', 'Edit', 'Write')] + ['Glob', 'Grep']
+        deny = [f'{tool}({path})' for path in (*(f'{home}/{d}/**' for d in PRIVATE_DIRS),
+                                               f'{home}/.claude.json', '**/.env', '**/.env.*')
+                for tool in ('Read', 'Edit', 'Write')]
+        return [executable, *ClaudeCLIAgent.COMMON, '--restricted', '--tools', 'Read,Edit,Write,Glob,Grep',
+                '--allowedTools', ','.join(allow), '--disallowedTools', ','.join(['mcp__*', *deny]),
+                '--permission-mode', 'dontAsk', '--max-turns', '40', '--append-system-prompt', IMPLEMENT]
+
     def implement(self, worktree, task, timeout):
-        # File tools only, no shell; acceptEdits approves edits inside the worktree only.
-        tools = 'Read,Edit,Write,Glob,Grep'
-        data, _ = run_cli([self.executable(), *self.COMMON, '--tools', tools, '--allowedTools', tools,
-                           '--permission-mode', 'acceptEdits', '--max-turns', '40',
-                           '--append-system-prompt', IMPLEMENT],
-                          cwd=worktree, env=self.environment(), timeout=timeout, prompt='Task:\n' + task,
-                          agent=self.name)
+        data, _ = run_cli(self.implement_argv(self.executable(), worktree), cwd=worktree,
+                          env=self.environment(), timeout=timeout, prompt='Task:\n' + task, agent=self.name)
         return dict(agent=self.name, summary=self._result(data)[:SUMMARY_LIMIT])
 
     def review(self, payload, timeout):
         with tempfile.TemporaryDirectory(prefix='jarvis-claude-review-') as directory:
-            data, _ = run_cli([self.executable(), *self.COMMON, '--tools', '', '--permission-mode', 'plan',
+            data, _ = run_cli([self.executable(), *self.COMMON, '--tools', '', '--disallowedTools', 'mcp__*',
+                               '--permission-mode', 'plan',
                                '--max-turns', '1', '--system-prompt', REVIEW],
                               cwd=directory, env=self.environment(), timeout=timeout,
                               prompt=review_prompt(payload), agent=self.name)

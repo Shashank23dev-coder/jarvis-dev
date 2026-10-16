@@ -22,6 +22,7 @@ from .engineering_repository import development_service
 from .self_edit import Limits, SelfEditService
 
 DEFAULT_ROLES = {'implementing': 'codex_cli', 'reviewing': 'claude_cli'}
+MAX_ATTEMPTS = 3  # the first attempt plus up to 2 revisions by the same author
 UNUSABLE = {'unavailable', 'not_authenticated', 'quota_blocked', 'invocation_failed'}
 
 
@@ -145,41 +146,66 @@ class DirectDevelopment:
             record.update(source_root=str(service.source), limits=asdict(self.limits), execution_origin='provider')
             service.record, service.deadline, service.originals = record, deadline, {}
             service._prepare(workspace_only=True)
-            _, _, worktree = service._paths(record)
-            report.update(candidate_id=record['id'], worktree=str(worktree), base_commit=record['base_commit'])
-
+            _, bare, worktree = service._paths(record)
+            report.update(candidate_id=record['id'], worktree=str(worktree), base_commit=record['base_commit'],
+                          branch=record['branch'], repository=str(bare), attempts=[])
             report['stage'] = 'implement'
             author, _ = router.choose('implementing')
-            implementation, used = registry.complete(
-                dict(action='implement', worktree=str(worktree), task=task), '', service._check(),
-                stage='implementing', preferred=author, allowed=(author,), validate=_implementation)
-            report.update(author=used, implementation=implementation, route_implement=registry.last_route)
-            record['improvement'] = dict(implementation_provider=used, scope='code')
+            report['author'], feedback = author, None
+            for number in range(1, MAX_ATTEMPTS + 1):
+                attempt = dict(attempt=number, author=author)
+                report['attempts'].append(attempt)
+                report['stage'] = 'implement'
+                implementation, used = registry.complete(
+                    dict(action='implement', worktree=str(worktree), task=_revision(task, feedback)), '',
+                    service._check(), stage='implementing', preferred=author, allowed=(author,),
+                    validate=_implementation)
+                attempt['implementation'] = implementation
+                report.update(implementation=implementation, route_implement=registry.last_route)
+                record['improvement'] = dict(implementation_provider=used, scope='code')
 
-            report['stage'] = 'test'
-            service._tests()
-            tests = [dict(phase=t['phase'], paths=t['paths'], returncode=t['returncode'],
-                          timed_out=t['timed_out'], backend=(t['sandbox'] or {}).get('backend'),
-                          stdout_tail=t['stdout'][-1500:]) for t in record['test_results']]
-            report.update(diff=record['diff'], diff_summary=record['diff_summary'],
-                          files_changed=record['files_changed'], tests=tests,
-                          tests_passed=record.get('tested_fingerprint') == record['fingerprint'])
-            if not report['tests_passed']:
-                # As in _review: only a change with passing sandboxed tests is reviewed.
-                report['status'] = 'tests_failed'
-                return self._finish(report)
+                report['stage'] = 'test'
+                service._tests()
+                tests = [dict(phase=t['phase'], paths=t['paths'], returncode=t['returncode'],
+                              timed_out=t['timed_out'], backend=(t['sandbox'] or {}).get('backend'),
+                              stdout_tail=t['stdout'][-1500:])
+                         for t in record['test_results'] if t['fingerprint'] == record['fingerprint']]
+                passed = record.get('tested_fingerprint') == record['fingerprint']
+                attempt.update(tests=tests, tests_passed=passed, files_changed=record['files_changed'])
+                report.update(diff=record['diff'], diff_summary=record['diff_summary'],
+                              files_changed=record['files_changed'], tests=tests, tests_passed=passed)
+                if not passed:
+                    # As in _review: only a change with passing sandboxed tests is reviewed.
+                    attempt['outcome'] = report['status'] = 'tests_failed'
+                    feedback = 'The sandboxed tests failed:\n' + '\n'.join(
+                        f"[{t['phase']} rc={t['returncode']}]\n{t['stdout_tail']}" for t in tests if t['returncode'])
+                    continue
 
-            report['stage'] = 'review'
-            reviewer, _ = router.choose('reviewing', exclude={used})
-            review, reviewed_by = registry.complete(
-                dict(action='review', task=task, diff=record['diff'], tests=tests), '', service._check(),
-                stage='reviewing', preferred=reviewer, allowed=(reviewer,), exclude={used}, validate=_review)
-            if reviewed_by == used:  # defence in depth; Router and registry both exclude the author
-                raise ToolDenied('Reviewer must differ from author')
-            record['reviewer_result'] = dict(review, provider=reviewed_by, fingerprint=record['fingerprint'])
-            service.store.save(record, 'direct_review_finished')
-            report.update(reviewer=reviewed_by, review=review, route_review=registry.last_route,
-                          status=review['verdict'])
+                report['stage'] = 'commit'
+                commit = _commit(service, used, number)
+                attempt['commit'] = report['commit'] = commit
+
+                report['stage'] = 'review'
+                reviewer, _ = router.choose('reviewing', exclude={used})
+                review, reviewed_by = registry.complete(
+                    dict(action='review', task=task, commit=commit, diff=record['diff'], tests=tests), '',
+                    service._check(), stage='reviewing', preferred=reviewer, allowed=(reviewer,),
+                    exclude={used}, validate=_review)
+                if reviewed_by == used:  # defence in depth; Router and registry both exclude the author
+                    raise ToolDenied('Reviewer must differ from author')
+                if service._workgit('rev-parse', 'HEAD').strip() != commit or \
+                        service._diff() != record['tested_fingerprint']:
+                    raise ToolDenied('Worktree changed during review')
+                record['reviewer_result'] = dict(review, provider=reviewed_by, commit=commit,
+                                                 fingerprint=record['fingerprint'])
+                service.store.save(record, 'direct_review_finished')
+                attempt.update(reviewer=reviewed_by, review=review, outcome=review['verdict'])
+                report.update(reviewer=reviewed_by, review=review, reviewed_commit=commit,
+                              route_review=registry.last_route, status=review['verdict'])
+                if review['verdict'] != 'needs_revision':
+                    break
+                feedback = 'An independent reviewer asked for revision:\n' + review['summary']
+            report['attempts_exhausted'] = report['status'] in {'tests_failed', 'needs_revision'}
         except Exception as exc:
             entry = self.failures.record(run_id, report['stage'], getattr(exc, 'provider', None), exc)
             report.update(status='failed', failure=dict(stage=report['stage'], exception=entry['exception'],
@@ -196,6 +222,30 @@ class DirectDevelopment:
         report.update(ended_at=timestamp(), agent_failures=self.failures.entries(report['run_id']))
         self._append('runs.jsonl', {k: v for k, v in report.items() if k != 'diff'})
         return report
+
+
+def _revision(task, feedback):
+    if feedback is None:
+        return task
+    return (f'{task}\n\nYour previous attempt is still in the worktree (committed if its tests passed). '
+            f'Revise it to address this feedback:\n{feedback[:6000]}')
+
+
+def _commit(service, agent, attempt):
+    """Commit the tested change to the candidate's private task branch; hooks never run."""
+    # Changed since base, plus anything a revision reverted since the previous commit.
+    since_head = service._workgit('diff', '--name-only', '-z', 'HEAD').split('\0')
+    files = sorted(set(service.record['files_changed']) | {name for name in since_head if name})
+    service._workgit('--literal-pathspecs', 'add', '-A', '--', *files)
+    if not service._workgit('diff', '--cached', '--name-only'):
+        raise ToolDenied('Revision made no changes to commit')
+    identity = ['-c', f'user.name={agent}', '-c', f'user.email={agent}@jarvis.invalid', '-c', 'commit.gpgsign=false']
+    service._workgit(*identity, 'commit', '--no-verify', '-q', '-m',
+                     f'{agent}: direct-dev attempt {attempt}\n\nCandidate {service.record["id"]}')
+    commit = service._workgit('rev-parse', 'HEAD').strip()
+    service.record['commit'] = commit
+    service.store.save(service.record, 'direct_commit')
+    return commit
 
 
 def _implementation(value):

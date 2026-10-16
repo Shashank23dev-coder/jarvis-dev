@@ -49,7 +49,8 @@ class Stub:
     failures = run_id = None
 
     def __init__(self, name, state='available', edit=None, verdict='passed'):
-        self.name, self.live, self.edit, self.verdict, self.calls = name, state, edit, verdict, []
+        self.name, self.live, self.edit, self.calls, self.payloads = name, state, edit, [], []
+        self.verdicts = list(verdict) if isinstance(verdict, list) else [verdict]
 
     def executable(self):
         return '/usr/bin/true'
@@ -59,12 +60,15 @@ class Stub:
 
     def complete(self, payload, instructions, timeout):
         self.calls.append(payload['action'])
+        self.payloads.append(payload)
         if payload['action'] == 'implement':
             path = Path(payload['worktree']) / 'src/calc.py'
-            path.write_text(path.read_text().replace('a - b', 'a + b'))
+            revision = self.calls.count('implement') - 1
+            path.write_text(path.read_text().replace('a - b', 'a + b') + (f'# revision {revision}\n' if revision else ''))
             return dict(agent=self.name, summary='fixed add')
-        assert 'a + b' in payload['diff'] and payload['tests']
-        return dict(agent=self.name, verdict=self.verdict, summary='reviewed the diff')
+        assert 'a + b' in payload['diff'] and payload['tests'] and payload['commit']
+        verdict = self.verdicts.pop(0) if len(self.verdicts) > 1 else self.verdicts[0]
+        return dict(agent=self.name, verdict=verdict, summary=f'{verdict}: reviewed the diff')
 
 
 class APIStub(Stub):
@@ -121,15 +125,86 @@ def test_unavailable_default_routes_to_other_agent_and_reviewer_still_differs(tm
     assert claude.calls == ['implement'] and codex.calls == []
 
 
-def test_failing_tests_stop_before_review(tmp_path):
+def test_failing_tests_stop_before_review_after_bounded_retries(tmp_path):
     _, database = fixture_project(tmp_path)
     codex, claude = Stub('codex_cli'), Stub('claude_cli')
     report = DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
                                agents=[codex, claude],
-                               tester=lambda *a: CommandResult(('pytest',), 1, '1 failed')).run(
+                               tester=lambda *a: CommandResult(('pytest',), 1, 'FAILED test_add - assert 1 == 5')).run(
         'dd-fixture', 'Fix add()', ['src/calc.py'], ['tests/test_calc.py'])
-    assert report['status'] == 'tests_failed' and report['tests'][0]['returncode'] == 1
-    assert claude.calls == [] and len(report['routing']) == 1
+    assert report['status'] == 'tests_failed' and report['attempts_exhausted']
+    assert report['tests'][0]['returncode'] == 1
+    assert [a['outcome'] for a in report['attempts']] == ['tests_failed'] * 3
+    assert codex.calls == ['implement'] * 3 and claude.calls == [] and len(report['routing']) == 1
+    # Revisions go back to the same author with the failing test output; nothing is committed.
+    assert 'assert 1 == 5' in codex.payloads[1]['task'] and 'assert 1 == 5' in codex.payloads[2]['task']
+    assert 'commit' not in report
+
+
+def test_failed_tests_then_pass_retries_same_author_and_commits(tmp_path):
+    _, database = fixture_project(tmp_path)
+    codex, claude = Stub('codex_cli'), Stub('claude_cli')
+    results = iter([CommandResult(('pytest',), 1, 'FAILED boom')])
+
+    def tester(repository, phase, paths):
+        return next(results, None) or passed(repository, phase, paths)
+    report = DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
+                               agents=[codex, claude], tester=tester).run(
+        'dd-fixture', 'Fix add()', ['src/calc.py'], ['tests/test_calc.py'])
+    assert report['status'] == 'passed', report.get('failure')
+    assert [a['outcome'] for a in report['attempts']] == ['tests_failed', 'passed']
+    assert [a['author'] for a in report['attempts']] == ['codex_cli', 'codex_cli']
+    assert 'FAILED boom' in codex.payloads[1]['task'] and claude.calls == ['review']
+    assert 'commit' not in report['attempts'][0] and report['attempts'][1]['commit'] == report['commit']
+
+
+def test_needs_revision_goes_back_to_author_and_review_binds_to_commit(tmp_path):
+    source, database = fixture_project(tmp_path)
+    codex, claude = Stub('codex_cli'), Stub('claude_cli', verdict=['needs_revision', 'passed'])
+    report = DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
+                               agents=[codex, claude], tester=passed).run(
+        'dd-fixture', 'Fix add()', ['src/calc.py'], ['tests/test_calc.py'])
+    assert report['status'] == 'passed' and not report['attempts_exhausted']
+    assert [a['outcome'] for a in report['attempts']] == ['needs_revision', 'passed']
+    assert codex.calls == ['implement', 'implement'] and claude.calls == ['review', 'review']
+    assert 'needs_revision: reviewed the diff' in codex.payloads[1]['task']
+    first, second = (a['commit'] for a in report['attempts'])
+    assert first != second and report['reviewed_commit'] == report['commit'] == second
+    assert [p['commit'] for p in claude.payloads] == [first, second]
+    # Each commit is on the private task branch, authored by the agent, on top of the base.
+    repository = report['repository']
+    assert git(repository, 'rev-parse', report['branch']).strip() == second
+    log = git(repository, 'log', '--format=%H %an <%ae>', f"{report['base_commit']}..{report['branch']}")
+    assert log.splitlines() == [f'{second} codex_cli <codex_cli@jarvis.invalid>',
+                                f'{first} codex_cli <codex_cli@jarvis.invalid>']
+    assert git(repository, 'diff', '--name-only', report['base_commit'], second).split() == report['files_changed']
+    assert 'jarvis/' not in git(source, 'branch', '--list')  # the registered source gains no branch
+
+
+def test_rejected_review_is_not_retried(tmp_path):
+    _, database = fixture_project(tmp_path)
+    codex, claude = Stub('codex_cli'), Stub('claude_cli', verdict='rejected')
+    report = DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
+                               agents=[codex, claude], tester=passed).run(
+        'dd-fixture', 'Fix add()', ['src/calc.py'], ['tests/test_calc.py'])
+    assert report['status'] == 'rejected' and len(report['attempts']) == 1 and codex.calls == ['implement']
+
+
+def test_claude_implementer_argv_is_confined_to_worktree(tmp_path):
+    worktree = (tmp_path / 'wt').resolve()
+    argv = dev_agents.ClaudeCLIAgent.implement_argv('claude', worktree)
+    option = lambda flag: argv[argv.index(flag) + 1]
+    assert '--restricted' in argv and option('--permission-mode') == 'dontAsk'
+    assert option('--tools') == 'Read,Edit,Write,Glob,Grep'  # no Bash or other shell tool
+    assert 'acceptEdits' not in argv and 'bypassPermissions' not in argv and '--add-dir' not in argv
+    allowed = option('--allowedTools').split(',')
+    assert {f'{tool}(/{worktree}/**)' for tool in ('Read', 'Edit', 'Write')} <= set(allowed)
+    assert not {'Read', 'Edit', 'Write'} & set(allowed)  # never unscoped
+    denied = set(option('--disallowedTools').split(','))
+    home = Path.home()
+    for path in [f'/{home}/.claude/**', f'/{home}/.codex/**', f'/{home}/.ssh/**', f'/{home}/jarvis-dev/**',
+                 '**/.env', '**/.env.*']:
+        assert {f'{tool}({path})' for tool in ('Read', 'Edit', 'Write')} <= denied, path
 
 
 def test_configured_reviewer_role_cannot_review_its_own_change(tmp_path):
