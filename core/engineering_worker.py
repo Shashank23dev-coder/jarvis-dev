@@ -39,6 +39,15 @@ class EngineeringWorker:
             owner = str(uuid4())
             job = self.jobs.claim(owner)
             if job is None:
+                if self.direct_dev:
+                    # Idle: make one approved-waiting direct candidate apply-ready, outside any job lease.
+                    from .direct_dev import pending_preparation, prepare_for_apply
+                    from .engineering_repository import development_service
+                    pending = pending_preparation(self.service)
+                    if pending:
+                        job, _ = pending
+                        prepare_for_apply(development_service(self.service, job.get('project_id')), self.jobs, job)
+                        return self.jobs.get(job['id'])
                 return None
             candidate = None
             try:

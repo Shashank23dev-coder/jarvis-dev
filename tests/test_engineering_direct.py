@@ -305,3 +305,99 @@ def test_advance_checks_the_lease_and_does_not_renew_it(setup):
         jobs.advance(job['id'], 'someone-else', 'testing')
     with pytest.raises(ValueError):
         jobs.advance(job['id'], 'owner-1', 'completed')
+
+
+# --- prepare for apply -----------------------------------------------------------------
+
+def full(phases, returncodes=None):
+    """Tester for the preparation step: records phases; optional per-phase return codes."""
+    def run(repository, phase, paths):
+        phases.append((phase, paths))
+        return CommandResult(('pytest',), (returncodes or {}).get(phase, 0), f'{phase} done')
+    return run
+
+
+def waiting_candidate(setup, agents):
+    source, db, factory = setup
+    # Mentioning permissions makes apply require approval (authority_expansion).
+    enqueue(db, goal='Fix the value shown on the Jarvis permissions page')
+    result = run_worker(factory, source)
+    assert result['status'] == 'waiting_for_approval', result.get('failure')
+    return result
+
+
+def prepare(factory, source, tester):
+    return EngineeringWorker(factory(tester=tester), source=source, direct_dev=True).once()
+
+
+def test_preparation_runs_full_suite_and_second_review_then_apply_accepts(setup, agents, tmp_path):
+    source, db, factory = setup
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    service = factory(tester=passed)
+    assert CandidateApply(service).preview(job['candidate_id'])['eligible'] is False  # targeted only
+    phases = []
+    result = prepare(factory, source, full(phases))
+    assert [p for p, _ in phases] == ['full_python'] and phases[0][1] == ['tests']  # targeted reused
+    assert result['status'] == 'waiting_for_approval'
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    preparation = candidate['apply_preparation']
+    assert preparation['status'] == 'prepared' and preparation['commit'] == candidate['commit']
+    assert [t['phase'] for t in preparation['tests']] == ['targeted', 'full_python']
+    assert candidate['reviewer_result']['purpose'] == 'apply_preparation'
+    assert candidate['reviewer_result']['provider'] == 'claude_cli' != candidate['improvement']['implementation_provider']
+    assert agents['claude_cli'].calls == ['review', 'review'] and agents['codex_cli'].calls == ['implement']
+    assert [t['phase'] for t in result['test_result']][-2:] == ['targeted', 'full_python']
+    # Apply's unchanged checks now accept the candidate.
+    preview = CandidateApply(factory(tester=passed)).preview(job['candidate_id'])
+    assert preview['eligible'] is True, preview
+    check_projections(factory, result)
+    assert prepare(factory, source, full([])) is None  # prepared once per commit
+
+
+def test_preparation_full_suite_failure_blocks_like_any_failing_candidate(setup, agents, tmp_path):
+    """Pre-existing failures are not special-cased: a failing full suite means not apply-eligible."""
+    source, db, factory = setup
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    result = prepare(factory, source, full([], {'full_python': 1}))
+    assert result['status'] == 'blocked'
+    assert (result['failure']['code'], result['failure']['stage']) == ('tests_failed', 'testing')
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    assert candidate['state'] == 'needs_revision' and candidate['apply_preparation']['status'] == 'tests_failed'
+    assert agents['claude_cli'].calls == ['review']  # no second review of a failing commit
+    assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is False
+    check_projections(factory, result)
+    assert prepare(factory, source, full([])) is None
+
+
+def test_preparation_never_lets_the_author_review(setup, agents):
+    source, db, factory = setup
+    job = waiting_candidate(setup, agents)
+    agents['claude_cli'].state = 'not_authenticated'
+    result = prepare(factory, source, full([]))
+    assert result['status'] == 'blocked' and result['failure']['stage'] == 'reviewing'
+    assert result['failure']['code'] == 'provider_authentication'
+    assert agents['codex_cli'].calls == ['implement']  # Codex authored; it is never the reviewer
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    assert candidate['apply_preparation']['failure']['exception'] == 'core.direct_dev.NoAgentAvailable'
+    check_projections(factory, result)
+
+
+def test_preparation_refuses_a_commit_changed_after_review(setup, agents):
+    source, db, factory = setup
+    job = waiting_candidate(setup, agents)
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    (Path(candidate['worktree']) / 'src/app.py').write_text('value = 3\n')
+    phases = []
+    result = prepare(factory, source, full(phases))
+    assert phases == [] and result['status'] == 'blocked'
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    assert candidate['state'] == 'needs_revision'
+    assert candidate['apply_preparation']['failure']['exception'] == 'tools.policy.ToolDenied'
+
+
+def test_preparation_is_opt_in_with_the_direct_path(setup, agents):
+    source, db, factory = setup
+    waiting_candidate(setup, agents)
+    assert EngineeringWorker(factory(tester=full([])), source=source).once() is None

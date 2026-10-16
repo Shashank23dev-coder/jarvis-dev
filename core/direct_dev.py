@@ -437,5 +437,141 @@ def _fallback(decision):
     return FALLBACK_REASONS.get(reason, 'provider_unavailable')
 
 
+def _blocked_code(decision):
+    """The cause of a blocked stage: the first agent that could have taken it, not the excluded author."""
+    for candidate in decision['candidates']:
+        if candidate['agent'] not in decision['excluded']:
+            reason = candidate['reason'].removeprefix('probe_').removeprefix('recent_')
+            return FALLBACK_REASONS.get(reason, 'provider_unavailable')
+    return 'provider_unavailable'
+
+
 def _other(agent):
     return 'claude_cli' if agent == 'codex_cli' else 'codex_cli'
+
+
+# --- Prepare for apply ---------------------------------------------------------------
+# Apply is not relaxed for direct candidates. A direct candidate that reaches
+# waiting_for_approval was tested with targeted tests only (D1), so apply refuses it.
+# This separate step, outside any job lease, runs the existing full test phases on
+# the exact reviewed commit, then a fresh review by an agent other than the author,
+# and records both in the fields apply already checks. Failures (pre-existing or
+# new) leave the candidate needs_revision exactly as the legacy test path does.
+
+PREPARE_BUDGET_SECONDS = 900  # the candidate Limits ceiling; independent of the job lease
+
+
+def pending_preparation(service):
+    """The oldest waiting_for_approval job whose direct candidate is unprepared for its commit."""
+    from .engineering_jobs import EngineeringJobs
+    jobs = EngineeringJobs(service.store.database)
+    with service.store.database.transaction() as db:
+        rows = [json.loads(row[0]) for row in
+                db.execute('SELECT record FROM engineering_jobs ORDER BY created_at').fetchall()]
+    for job in rows:
+        if job['status'] != 'waiting_for_approval' or job['lease_owner'] or job['control'] or not job['candidate_id']:
+            continue
+        record = service.store.get(job['candidate_id'], internal=True, recover=False)
+        if (is_direct_candidate(record) and record['state'] == 'passed' and not record['busy']
+                and not record.get('apply') and record.get('commit')
+                and (record.get('apply_preparation') or {}).get('fingerprint') != record['fingerprint']):
+            return jobs.get(job['id']), record
+    return None
+
+
+def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_SECONDS):
+    """Full tests + an independent second review of the exact commit; returns the candidate."""
+    from .candidate_provider import failure_evidence
+    from tools.candidate_edit import digest
+    candidate_id = job['candidate_id']
+    state_dir = _state_dir(service)
+    failures = FailureLog(state_dir / 'failures.jsonl')
+    run_id = str(uuid4())
+    service.store.claim(candidate_id)
+    stage = 'testing'
+    try:
+        record = service.store.get(candidate_id, internal=True)
+        record['lease_until'] = time.time() + budget + 1  # crash recovery, as in _operate_locked
+        author = record['improvement']['implementation_provider']
+        fingerprint, commit = record['fingerprint'], record['commit']
+        preparation = dict(run_id=run_id, started_at=timestamp(), fingerprint=fingerprint, commit=commit,
+                           budget_seconds=budget, status='running')
+        record['apply_preparation'] = preparation
+        service.store.save(record, 'apply_preparation_started')
+        service.record, service.originals = record, {}
+        service.limits = Limits(seconds=budget)
+        service.deadline = time.monotonic() + budget
+        if service._workgit('rev-parse', 'HEAD').strip() != commit or service._diff() != fingerprint:
+            raise ToolDenied('Candidate changed since its review')
+        # Existing phases and evidence format; targeted results on this fingerprint are reused.
+        service._tests(resume=True)
+        evidence = [dict(phase=t['phase'], paths=t['paths'], returncode=t['returncode'], timed_out=t['timed_out'],
+                         truncated=t['truncated'], backend=(t['sandbox'] or {}).get('backend'),
+                         stdout_tail=t['stdout'][-1500:])
+                    for t in record['test_results'] if t['fingerprint'] == fingerprint]
+        preparation['tests'] = [{k: t[k] for k in ('phase', 'returncode', 'timed_out', 'truncated', 'backend')}
+                                for t in evidence]
+        if record.get('tested_fingerprint') != fingerprint:
+            preparation['status'] = 'tests_failed'  # _tests already set needs_revision + tests_failed evidence
+            return _finish_preparation(service, jobs, record, preparation)
+
+        stage = 'reviewing'
+        direct = DirectDevelopment(service.store.database, candidate_root=service.root, state_dir=state_dir,
+                                   agents=agents, roles=dict(reviewing=_other(author)))
+        registry = direct._registry(run_id)
+        router = Router(registry, roles=direct.roles,
+                        log=lambda d: direct._append('routing.jsonl', dict(run_id=run_id, purpose='apply_preparation', **d)),
+                        remaining=service._check)
+        reviewer, decision = router.choose('reviewing', exclude={author})
+        review, reviewed_by = registry.complete(
+            dict(action='review', task=record['goal'], commit=commit, diff=record['diff'], tests=evidence), '',
+            service._check(), stage='reviewing', preferred=reviewer, allowed=(reviewer,), exclude={author},
+            validate=_review)
+        if reviewed_by == author:
+            raise ToolDenied('Reviewer must differ from author')
+        if service._workgit('rev-parse', 'HEAD').strip() != commit or service._diff() != fingerprint:
+            raise ToolDenied('Candidate changed during review')
+        verdict = review['verdict']
+        # The same seal the legacy _review writes; apply checks it unchanged.
+        record.update(state=verdict, reviewer_result=dict(review, provider=reviewed_by, commit=commit,
+                                                          fingerprint=fingerprint, purpose='apply_preparation'),
+                      reviewed_at=timestamp(), reviewed_fingerprint=fingerprint,
+                      reviewed_diff_hash=digest(record['diff'].encode()),
+                      failure=None if verdict == 'passed' else failure_evidence(
+                          reviewed_by, 'review_failed', 'reviewing', record['source_context'].get('attempt', 1)))
+        record['improvement']['review_provider'] = reviewed_by
+        iteration = min(4, max([r['iteration'] for r in record.get('provider_results', [])] or [0]) + 1)
+        record.setdefault('provider_results', []).append(dict(
+            provider=reviewed_by, stage='reviewing', attempt=record['source_context'].get('attempt', 1),
+            iteration=iteration, status='received', execution_origin='provider',
+            response_sha256=digest(review['summary'].encode()), provider_requested=decision['default'],
+            adapter_type='cli', billing_class='subscription_cli', fallback_reason=_fallback(decision)))
+        preparation.update(status='prepared' if verdict == 'passed' else verdict,
+                           review=dict(verdict=verdict, provider=reviewed_by))
+        return _finish_preparation(service, jobs, record, preparation)
+    except Exception as exc:
+        from .candidate_provider import execution_error_code
+        entry = failures.record(run_id, f'apply_preparation.{stage}', getattr(exc, 'provider', None), exc)
+        record = service.store.get(candidate_id, internal=True)
+        code = _blocked_code(exc.decision) if isinstance(exc, NoAgentAvailable) else getattr(exc, 'code', None)
+        code = _production_code(code if code in FAILURES else execution_error_code(exc))
+        author = (record.get('improvement') or {}).get('implementation_provider', 'codex_cli')
+        record.update(state='needs_revision', failure=failure_evidence(
+            author if stage == 'testing' else _other(author), code, stage,
+            record.get('source_context', {}).get('attempt', 1)))
+        preparation = dict(record.get('apply_preparation') or {}, status='failed',
+                           failure=dict(stage=stage, exception=entry['exception'], message=entry['message']))
+        return _finish_preparation(service, jobs, record, preparation)
+    finally:
+        service.store.release(candidate_id)
+
+
+def _finish_preparation(service, jobs, record, preparation):
+    preparation['ended_at'] = timestamp()
+    record['apply_preparation'] = preparation
+    service.store.save(record, 'apply_preparation_finished')
+    service.store.release(record['id'])
+    candidate = service.store.get(record['id'])
+    # The existing reconciliation recomputes job status and approval from the candidate.
+    jobs.reconcile_candidate(candidate)
+    return candidate
