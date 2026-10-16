@@ -40,7 +40,8 @@ PYTHON_SHARDS = (
      'tests/test_deployment.py', 'tests/test_brain.py', 'tests/test_agent.py',
      'tests/test_experience_evaluation.py', 'tests/test_deployment_status.py',
      'tests/test_self_state.py', 'tests/test_api.py',
-     'tests/test_engineering_portfolio.py', 'tests/test_registry.py'),
+     'tests/test_engineering_portfolio.py', 'tests/test_registry.py',
+     'tests/test_direct_dev.py'),
 )
 
 
