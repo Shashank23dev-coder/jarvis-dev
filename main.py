@@ -56,13 +56,13 @@ def home():
 
 
 @router.get("/health")
-def health(store: TaskStore = Depends(get_store)):
+def health(request: Request, store: TaskStore = Depends(get_store)):
     try:
         with store.database.transaction() as db:
             db.execute('SELECT 1').fetchone()
     except Exception:
         raise HTTPException(status_code=503, detail='Not ready') from None
-    return {"status": "ok"}
+    return {"status": "ok", "mode": request.app.state.settings.mode}
 
 
 @router.get("/tasks")

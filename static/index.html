@@ -460,9 +460,7 @@
         <option value="activity">Activity</option>
       </select>
 
-      <div class="status-value">
-        Local Development
-      </div>
+      <div id="runtimeMode" class="status-value"></div>
 
     </div>
 
@@ -601,6 +599,12 @@ const messages = document.getElementById("messages");
 const welcome = document.getElementById("welcome");
 const viewNames = ["assistant", "tasks", "memory", "agents", "tools", "activity"];
 const requests = {};
+fetch("/health", { cache: "no-store" }).then(response => response.ok ? response.json() : null)
+    .then(data => {
+        if (data && (data.mode === "development" || data.mode === "production")) {
+            document.getElementById("runtimeMode").textContent = data.mode;
+        }
+    }).catch(() => {});
 let activeView = "assistant";
 let conversationId = null;
 try { conversationId = localStorage.getItem("jarvis.conversationId"); } catch (_) {}
