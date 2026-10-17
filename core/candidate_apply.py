@@ -15,7 +15,7 @@ from .database import timestamp, valid_id
 from .self_edit import CandidateRepository, GIT_OPTIONS
 from tools.candidate_edit import CandidatePolicy, digest
 from tools.policy import ToolDenied
-from tools.repository import RepositoryTools
+from tools.repository import RepositoryTools, runner_results
 
 
 APPROVAL = re.compile(r'^(?:Please )?approve and apply candidate ([0-9a-f-]{36}) to main[.!]?$', re.I)
@@ -289,6 +289,7 @@ class CandidateApply:
             else:
                 result = repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths)
             evidence = dict(sandbox=result.sandbox, phase=phase, returncode=result.returncode, timed_out=result.timed_out,
+                            runners=runner_results(result, paths),
                             truncated=result.truncated or len(result.stdout) > 16000 or len(result.stderr) > 16000,
                             stdout=result.stdout[:16000], stderr=result.stderr[:16000])
             audit['verification'].append(evidence)

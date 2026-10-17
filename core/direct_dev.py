@@ -15,12 +15,14 @@ import time
 from uuid import uuid4
 
 from tools.policy import ToolDenied
+from tools.repository import runner_results
 from .candidate_provider import FAILURES, ProviderFailure, execution_error_code
 from .database import timestamp
 from .dev_agents import ADAPTERS, FailureLog
 from .engineering_providers import EngineeringRegistry, ProviderBlocker, Registration
 from .engineering_repository import development_service
 from .self_edit import Limits, SelfEditService
+from .test_feedback import failure_feedback
 
 DEFAULT_ROLES = {'implementing': 'codex_cli', 'reviewing': 'claude_cli'}
 MAX_ATTEMPTS = 3  # the first attempt plus up to 2 revisions by the same author
@@ -179,11 +181,11 @@ class DirectDevelopment:
 
                 report['stage'] = 'test'
                 stage_changed('testing')
+                # Only this attempt's results: an unchanged revision has the previous attempt's fingerprint.
+                start = len(record['test_results'])
                 service._tests(focused=True)
-                tests = [dict(phase=t['phase'], paths=t['paths'], returncode=t['returncode'],
-                              timed_out=t['timed_out'], backend=(t['sandbox'] or {}).get('backend'),
-                              stdout_tail=t['stdout'][-1500:])
-                         for t in record['test_results'] if t['fingerprint'] == record['fingerprint']]
+                current = record['test_results'][start:]
+                tests = [_test_summary(t) for t in current]
                 passed = record.get('tested_fingerprint') == record['fingerprint']
                 attempt.update(tests=tests, tests_passed=passed, files_changed=record['files_changed'])
                 report.update(diff=record['diff'], diff_summary=record['diff_summary'],
@@ -191,8 +193,7 @@ class DirectDevelopment:
                 if not passed:
                     # As in _review: only a change with passing sandboxed tests is reviewed.
                     attempt['outcome'] = report['status'] = 'tests_failed'
-                    feedback = 'The sandboxed tests failed:\n' + '\n'.join(
-                        f"[{t['phase']} rc={t['returncode']}]\n{t['stdout_tail']}" for t in tests if t['returncode'])
+                    feedback = 'The sandboxed tests failed.\n' + failure_feedback(current)
                     continue
 
                 report['stage'] = 'commit'
@@ -248,6 +249,14 @@ class DirectDevelopment:
         report.update(ended_at=timestamp(), agent_failures=self.failures.entries(report['run_id']))
         self._append('runs.jsonl', {k: v for k, v in report.items() if k != 'diff'})
         return report
+
+
+def _test_summary(evidence):
+    runners = runner_results(evidence, evidence['paths'])
+    return dict(phase=evidence['phase'], paths=evidence['paths'], returncode=evidence['returncode'],
+                timed_out=evidence['timed_out'], backend=(evidence['sandbox'] or {}).get('backend'),
+                runners=[{k: r[k] for k in ('runner', 'returncode', 'timed_out')} for r in runners],
+                stdout_tail=evidence['stdout'][-1500:])
 
 
 def _revision(task, feedback):
@@ -521,9 +530,7 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
             service._tests(resume=True)
         finally:
             service.tester = tester
-        evidence = [dict(phase=t['phase'], paths=t['paths'], returncode=t['returncode'], timed_out=t['timed_out'],
-                         truncated=t['truncated'], backend=(t['sandbox'] or {}).get('backend'),
-                         stdout_tail=t['stdout'][-1500:])
+        evidence = [dict(_test_summary(t), truncated=t['truncated'])
                     for t in record['test_results'] if t['fingerprint'] == fingerprint]
         preparation['tests'] = [{k: t[k] for k in ('phase', 'returncode', 'timed_out', 'truncated', 'backend')}
                                 for t in evidence]

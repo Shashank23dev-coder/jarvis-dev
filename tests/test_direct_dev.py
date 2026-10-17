@@ -457,3 +457,128 @@ def test_targeted_node_tests_go_to_node_never_pytest(tmp_path, monkeypatch):
     assert report['status'] == 'passed', report.get('failure')
     assert calls == [(['tests/ui.test.cjs'], True), (['tests/ui.test.cjs'], True)]
     assert not any(path.endswith('.cjs') for paths, ui in calls if not ui for path in paths)
+
+
+PYTEST_FAILURE = '''============================= test session starts ==============================
+collected 3 items
+
+tests/test_calc.py .F.                                                   [100%]
+
+=================================== FAILURES ===================================
+__________________ test_health_is_minimal_and_checks_database __________________
+
+production = {'JARVIS_AUTH_TOKEN': 'fixture-secret-do-not-echo', ...}
+
+    def test_health_is_minimal_and_checks_database(production, monkeypatch):
+        with TestClient(application) as client:
+            assert client.get('/health').json() == {'status': 'ok'}
+>           assert client.get('/runtime').json() == {'mode': 'production'}
+E           AssertionError: assert {'detail': 'Invalid host'} == {'mode': 'production'}
+
+tests/test_deployment.py:165: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_deployment.py::test_health_is_minimal_and_checks_database
+========================= 1 failed, 2 passed in 1.02s ==========================
+'''
+NODE_PASS = 'TAP version 13\n' + ''.join(f'ok {n} - ui check {n}\n  ---\n  duration_ms: 1.5\n  ...\n'
+                                         for n in range(1, 41)) + '1..40\n# tests 40\n# pass 40\n# fail 0\n'
+NODE_FAILURE = '''TAP version 13
+# Subtest: header shows runtime mode
+not ok 1 - header shows runtime mode
+  ---
+  duration_ms: 2.26
+  type: 'test'
+  location: '/workspace/tests/ui.test.cjs:3:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    'Unavailable' !== 'Production'
+  code: 'ERR_ASSERTION'
+  stack: |-
+    TestContext.<anonymous> (/workspace/tests/ui.test.cjs:3:50)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+  ...
+1..1
+# tests 1
+# pass 0
+# fail 1
+'''
+
+
+def runner_outputs(monkeypatch, pytest_result, node_result):
+    from tools import sandbox
+    monkeypatch.setattr(sandbox, 'run_tests', lambda repo, snapshot, paths, *, ui=False: CommandResult(
+        ('node' if ui else 'pytest',), *(node_result if ui else pytest_result), sandbox=dict(backend='stub')))
+
+
+def run_with_node_target(tmp_path, agents):
+    source, database = fixture_project(tmp_path)
+    ui_fixture(source)
+    return DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
+                             agents=agents).run('dd-fixture', 'Fix add()', ['src/calc.py'],
+                                                ['tests/test_calc.py', 'tests/ui.test.cjs'])
+
+
+def test_feedback_leads_with_the_pytest_failure_when_node_passes(tmp_path, monkeypatch):
+    # Pilot 3: pytest failed before a long passing node run, and a 1,500-character tail showed only node.
+    runner_outputs(monkeypatch, (1, PYTEST_FAILURE), (0, NODE_PASS))
+    codex, claude = Stub('codex_cli'), Stub('claude_cli')
+    report = run_with_node_target(tmp_path, [codex, claude])
+    assert report['status'] == 'tests_failed'
+    assert report['tests'][0]['runners'] == [dict(runner='pytest', returncode=1, timed_out=False),
+                                             dict(runner='node', returncode=0, timed_out=False)]
+    feedback = codex.payloads[1]['task'].split('Revise it to address this feedback:\n', 1)[1]
+    assert feedback.index('[targeted: pytest failed, rc=1]') < feedback.index('Invalid host')
+    assert 'FAILED tests/test_deployment.py::test_health_is_minimal_and_checks_database' in feedback
+    assert "E           AssertionError: assert {'detail': 'Invalid host'} == {'mode': 'production'}" in feedback
+    assert 'tests/test_deployment.py:165: AssertionError' in feedback
+    assert '[targeted: node passed]' in feedback and 'ui check' not in feedback
+    assert 'fixture-secret-do-not-echo' not in feedback
+    # The stored evidence keeps each runner's own result and span of the combined output.
+    from core.candidate_store import CandidateStore
+    stored = CandidateStore(Database(tmp_path / 'state.db')).get(report['candidate_id'], internal=True)
+    evidence = stored['test_results'][0]
+    pytest_run, node_run = evidence['runners']
+    assert (pytest_run['runner'], pytest_run['returncode'], node_run['runner'], node_run['returncode']) == \
+        ('pytest', 1, 'node', 0)
+    assert evidence['stdout'][slice(*pytest_run['stdout_span'])] == PYTEST_FAILURE
+    assert evidence['stdout'][slice(*node_run['stdout_span'])] == NODE_PASS
+
+
+def test_feedback_shows_the_node_failure_when_pytest_passes(tmp_path, monkeypatch):
+    runner_outputs(monkeypatch, (0, '========================= 3 passed in 1.00s ==========================\n'),
+                   (1, NODE_FAILURE))
+    codex, claude = Stub('codex_cli'), Stub('claude_cli')
+    report = run_with_node_target(tmp_path, [codex, claude])
+    assert report['tests'][0]['runners'] == [dict(runner='pytest', returncode=0, timed_out=False),
+                                             dict(runner='node', returncode=1, timed_out=False)]
+    feedback = codex.payloads[1]['task'].split('Revise it to address this feedback:\n', 1)[1]
+    assert '[targeted: node failed, rc=1]' in feedback and '[targeted: pytest passed]' in feedback
+    assert 'not ok 1 - header shows runtime mode' in feedback
+    assert "'Unavailable' !== 'Production'" in feedback
+    assert "location: '/workspace/tests/ui.test.cjs:3:1'" in feedback
+    assert 'TestContext.<anonymous> (/workspace/tests/ui.test.cjs:3:50)' in feedback
+    assert 'node:async_hooks' not in feedback and 'pytest failed' not in feedback
+
+
+def test_retry_feedback_has_only_the_current_attempts_results(tmp_path, monkeypatch):
+    # Pilot 3: unchanged revisions share a fingerprint, so earlier attempts' results were repeated.
+    class Unchanged(Stub):
+        def complete(self, payload, instructions, timeout):
+            if payload['action'] == 'implement' and self.calls.count('implement'):
+                self.calls.append('implement')
+                self.payloads.append(payload)
+                return dict(agent=self.name, summary='no further changes')
+            return super().complete(payload, instructions, timeout)
+    runner_outputs(monkeypatch, (1, PYTEST_FAILURE), (0, NODE_PASS))
+    codex, claude = Unchanged('codex_cli'), Stub('claude_cli')
+    report = run_with_node_target(tmp_path, [codex, claude])
+    assert report['status'] == 'tests_failed' and report['attempts_exhausted']
+    assert [len(a['tests']) for a in report['attempts']] == [1, 1, 1]
+    assert len(report['tests']) == 1
+    for payload in codex.payloads[1:]:
+        feedback = payload['task'].split('Revise it to address this feedback:\n', 1)[1]
+        assert feedback.count('Failing tests:') == 1
+        assert feedback.count('[targeted: pytest failed, rc=1]') == 2  # once in the names, once in the details
+        assert feedback.count('Invalid host') == 1

@@ -20,6 +20,18 @@ from .policy import ToolDenied, ToolError, ToolPolicy
 NODE_TEST_SUFFIXES = (".cjs", ".js")
 
 
+def runner_results(result, paths=()):
+    """Per-runner outcome of a test result or stored evidence: runner, returncode, timed_out,
+    and its [start, end) spans of the combined stdout/stderr. Results without runners
+    (test doubles, older evidence) count as one runner, judged by their paths."""
+    get = result.get if isinstance(result, dict) else lambda key: getattr(result, key, None)
+    if get("runners"):
+        return [dict(runner) for runner in get("runners")]
+    node = bool(paths) and all(path.endswith(NODE_TEST_SUFFIXES) for path in paths)
+    return [dict(runner="node" if node else "pytest", returncode=get("returncode"), timed_out=bool(get("timed_out")),
+                 stdout_span=[0, len(get("stdout") or "")], stderr_span=[0, len(get("stderr") or "")])]
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """Bounded process output; nonzero exit codes are returned, not hidden."""
@@ -31,6 +43,7 @@ class CommandResult:
     timed_out: bool = False
     truncated: bool = False
     sandbox: dict = field(default_factory=dict)
+    runners: tuple = ()  # test commands only: see runner_results
 
 
 class RepositoryTools:
@@ -315,16 +328,19 @@ class RepositoryTools:
         """
         if not isinstance(paths, (str, bytes)) and any(path.endswith(NODE_TEST_SUFFIXES) for path in paths):
             raise ToolDenied("Node test files run under node, not pytest")
-        return self._run_test_command(paths)
+        result = self._run_test_command(paths)
+        return replace(result, runners=tuple(runner_results(result)))
 
     def run_ui_tests(self, paths: Sequence[str] = ("tests/ui.test.cjs",)) -> CommandResult:
         """Node test files (the fixed UI suite by default), same read-only sandbox snapshot."""
-        return self._run_test_command(paths, ui=True)
+        result = self._run_test_command(paths, ui=True)
+        return replace(result, runners=tuple(runner_results(result, paths)))
 
     def run_tests(self, paths: Sequence[str]) -> CommandResult:
         """Route test paths by runner: .cjs/.js files to node, everything else to pytest.
 
-        Both runners must pass; their output is combined into one result.
+        Both runners must pass; their output is combined into one result, whose
+        runners keep each runner's own return code and span of the output.
         """
         node = [path for path in paths if path.endswith(NODE_TEST_SUFFIXES)]
         python = [path for path in paths if path not in node]
@@ -332,10 +348,13 @@ class RepositoryTools:
         if len(results) == 1:
             return results[0]
         first, second = results
+        shifted = [dict(runner, stdout_span=[start + len(first.stdout) for start in runner["stdout_span"]],
+                        stderr_span=[start + len(first.stderr) for start in runner["stderr_span"]])
+                   for runner in second.runners]
         return CommandResult(first.command + second.command, first.returncode or second.returncode,
                              first.stdout + second.stdout, first.stderr + second.stderr,
                              first.timed_out or second.timed_out, first.truncated or second.truncated,
-                             dict(first.sandbox, node=second.sandbox))
+                             dict(first.sandbox, node=second.sandbox), first.runners + tuple(shifted))
 
     def _runtime_policy_bytes(self):
         runtime_root = Path(__file__).resolve().parents[1]

@@ -20,7 +20,7 @@ from .candidate_store import CandidateStore
 from .database import Database, text_value, valid_id, timestamp
 from tools.candidate_edit import CandidateEditor, CandidatePolicy, digest, safe_text, scan, inspection_text
 from tools.policy import ToolDenied, ToolError
-from tools.repository import RepositoryTools
+from tools.repository import RepositoryTools, runner_results
 
 
 class Edit(BaseModel):
@@ -574,7 +574,7 @@ class SelfEditService:
                 result = repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths)
             self._check()
             evidence = dict(sandbox=result.sandbox, phase=phase, paths=paths, returncode=result.returncode,
-                            timed_out=result.timed_out,
+                            timed_out=result.timed_out, runners=runner_results(result, paths),
                             truncated=result.truncated or len(result.stdout) > 16000 or len(result.stderr) > 16000,
                             stdout=result.stdout[:16000], stderr=result.stderr[:16000], fingerprint=fingerprint)
             self.record['test_results'].append(evidence)
