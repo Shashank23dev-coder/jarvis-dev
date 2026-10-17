@@ -86,8 +86,10 @@ def test_identical_result_schema(repository, monkeypatch, backend):
     monkeypatch.setattr(repository, '_execute', lambda *a, **k: result)
     monkeypatch.setattr(sandbox, 'docker_execute', lambda *a, **k: result)
     actual = repository.run_pytest()
-    assert set(asdict(actual)) == {'command', 'returncode', 'stdout', 'stderr', 'timed_out', 'truncated', 'sandbox'}
+    assert set(asdict(actual)) == {'command', 'returncode', 'stdout', 'stderr', 'timed_out', 'truncated', 'sandbox',
+                                   'runners'}
     assert actual.command == ('pytest', 'tests') and actual.returncode == 7
+    assert [(r['runner'], r['returncode']) for r in actual.runners] == [('pytest', 7)]
     assert actual.sandbox['backend'] == backend
     assert actual.sandbox['started_at'] <= actual.sandbox['ended_at']
     assert actual.sandbox['truncated']
