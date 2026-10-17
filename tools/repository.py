@@ -32,6 +32,30 @@ def runner_results(result, paths=()):
                  stdout_span=[0, len(get("stdout") or "")], stderr_span=[0, len(get("stderr") or "")])]
 
 
+EXCERPT_HEAD, EXCERPT_TAIL = 2000, 6000
+
+
+def _excerpt(text):
+    if len(text) <= EXCERPT_HEAD + EXCERPT_TAIL:
+        return text
+    cut = len(text) - EXCERPT_HEAD - EXCERPT_TAIL
+    return f"{text[:EXCERPT_HEAD]}\n[… {cut} chars cut …]\n{text[-EXCERPT_TAIL:]}"
+
+
+def stored_output(result, paths=()):
+    """(stdout, stderr, runners) to store as test evidence: each runner's own output cut to
+    its first 2,000 and last 6,000 characters, concatenated, with spans recomputed against
+    the stored text, so one runner's long output never hides another runner's failure."""
+    runners = runner_results(result, paths)
+    texts = dict(stdout="", stderr="")
+    for runner in runners:
+        for stream in texts:
+            piece = _excerpt((getattr(result, stream) or "")[slice(*runner[stream + "_span"])])
+            runner[stream + "_span"] = [len(texts[stream]), len(texts[stream]) + len(piece)]
+            texts[stream] += piece
+    return texts["stdout"], texts["stderr"], runners
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """Bounded process output; nonzero exit codes are returned, not hidden."""

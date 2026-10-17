@@ -15,7 +15,7 @@ from .database import timestamp, valid_id
 from .self_edit import CandidateRepository, GIT_OPTIONS
 from tools.candidate_edit import CandidatePolicy, digest
 from tools.policy import ToolDenied
-from tools.repository import RepositoryTools, runner_results
+from tools.repository import RepositoryTools, stored_output
 
 
 APPROVAL = re.compile(r'^(?:Please )?approve and apply candidate ([0-9a-f-]{36}) to main[.!]?$', re.I)
@@ -288,10 +288,11 @@ class CandidateApply:
                 result = self.service.tester(repository, phase, paths)
             else:
                 result = repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths)
+            stdout, stderr, runners = stored_output(result, paths)
             evidence = dict(sandbox=result.sandbox, phase=phase, returncode=result.returncode, timed_out=result.timed_out,
-                            runners=runner_results(result, paths),
+                            runners=runners,
                             truncated=result.truncated or len(result.stdout) > 16000 or len(result.stderr) > 16000,
-                            stdout=result.stdout[:16000], stderr=result.stderr[:16000])
+                            stdout=stdout, stderr=stderr)
             audit['verification'].append(evidence)
             self._save('post_apply_test_finished')
             self.service._check()

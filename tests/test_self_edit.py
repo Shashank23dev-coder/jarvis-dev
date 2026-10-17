@@ -553,7 +553,8 @@ def test_bounded_evidence_does_not_claim_untruncated_success(setup):
     assert candidate['state'] == 'needs_revision'
     assert len(candidate['test_results']) == 1
     assert candidate['test_results'][0]['truncated']
-    assert len(candidate['test_results'][0]['stdout']) == 16000
+    # Stored as the runner's first 2,000 and last 6,000 characters around a cut marker.
+    assert candidate['test_results'][0]['stdout'] == 'x' * 2000 + '\n[… 8001 chars cut …]\n' + 'x' * 6000
 
 
 def test_docs_candidate_identity_and_reporting_are_separate_from_change_review(setup, monkeypatch):

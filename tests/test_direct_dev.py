@@ -613,3 +613,47 @@ def test_each_failing_runner_gets_its_own_capped_section():
     # The overall bound in _revision does not cut the second runner.
     from core.direct_dev import _revision
     assert _revision('task', feedback).endswith(feedback)
+
+
+def stored_evidence(tmp_path, report):
+    from core.candidate_store import CandidateStore
+    return CandidateStore(Database(tmp_path / 'state.db')).get(report['candidate_id'], internal=True)['test_results'][0]
+
+
+def test_long_passing_pytest_output_does_not_hide_the_node_failure(tmp_path, monkeypatch):
+    warnings = ''.join(f'tests/test_calc.py:{n}: DeprecationWarning: old API {"w" * 60}\n' for n in range(300))
+    pytest_out = ('=============================== warnings summary ===============================\n' + warnings
+                  + '======================== 3 passed, 300 warnings in 1.00s ========================\n')
+    assert len(pytest_out) > 16000
+    runner_outputs(monkeypatch, (0, pytest_out), (1, NODE_FAILURE))
+    codex, claude = Stub('codex_cli'), Stub('claude_cli')
+    report = run_with_node_target(tmp_path, [codex, claude])
+    feedback = codex.payloads[1]['task'].split('Revise it to address this feedback:\n', 1)[1]
+    assert '[targeted: node failed, rc=1]' in feedback and 'not ok 1 - header shows runtime mode' in feedback
+    assert "'Unavailable' !== 'Production'" in feedback and 'DeprecationWarning' not in feedback
+    evidence = stored_evidence(tmp_path, report)
+    pytest_run, node_run = evidence['runners']
+    # Each runner is stored as its own excerpt and the spans index the stored text.
+    assert evidence['stdout'][slice(*node_run['stdout_span'])] == NODE_FAILURE
+    stored_pytest = evidence['stdout'][slice(*pytest_run['stdout_span'])]
+    assert stored_pytest.startswith(pytest_out[:2000]) and stored_pytest.endswith(pytest_out[-6000:])
+    assert f'[… {len(pytest_out) - 8000} chars cut …]' in stored_pytest
+    assert len(evidence['stdout']) < 8100 + len(NODE_FAILURE)
+
+
+def test_long_pytest_output_before_a_failure_keeps_the_error_line(tmp_path, monkeypatch):
+    progress = ''.join(f'tests/test_bulk_{n}.py {"." * 70}  [{n % 100:3d}%]\n' for n in range(250))
+    pytest_out = PYTEST_FAILURE.replace('tests/test_calc.py .F.', progress + 'tests/test_calc.py .F.')
+    assert len(pytest_out) - len(PYTEST_FAILURE) > 16000
+    runner_outputs(monkeypatch, (1, pytest_out), (0, NODE_PASS))
+    codex, claude = Stub('codex_cli'), Stub('claude_cli')
+    report = run_with_node_target(tmp_path, [codex, claude])
+    feedback = codex.payloads[1]['task'].split('Revise it to address this feedback:\n', 1)[1]
+    assert "E           AssertionError: assert {'detail': 'Invalid host'} == {'mode': 'production'}" in feedback
+    assert 'FAILED tests/test_deployment.py::test_health_is_minimal_and_checks_database' in feedback
+    assert 'fixture-secret-do-not-echo' not in feedback
+    evidence = stored_evidence(tmp_path, report)
+    assert evidence['truncated']  # the existing >16 KB rule is unchanged
+    pytest_run, node_run = evidence['runners']
+    assert evidence['stdout'][slice(*node_run['stdout_span'])] == NODE_PASS
+    assert 'chars cut' in evidence['stdout'][slice(*pytest_run['stdout_span'])]
