@@ -460,9 +460,7 @@
         <option value="activity">Activity</option>
       </select>
 
-      <div class="status-value">
-        Local Development
-      </div>
+      <div id="runtimeMode" class="status-value">Unavailable</div>
 
     </div>
 
@@ -625,6 +623,19 @@ async function restoreConversation() {
     } catch (_) {
         // Keep the ID so a temporary outage cannot silently split the conversation.
     } finally { sendBtn.disabled = false; }
+}
+
+async function loadRuntimeMode() {
+    const label = document.getElementById("runtimeMode");
+    try {
+        const response = await fetch("/runtime", { cache: "no-store" });
+        if (!response.ok) throw new Error("Request failed");
+        const data = await response.json();
+        label.textContent = data.mode === "development" ? "Development" :
+            data.mode === "production" ? "Production" : "Unavailable";
+    } catch (_) {
+        label.textContent = "Unavailable";
+    }
 }
 
 function showView(name) {
@@ -795,6 +806,7 @@ promptBox.addEventListener("keydown", event => {
     }
 });
 restoreConversation();
+loadRuntimeMode();
 </script>
 
 </body>

@@ -25,8 +25,9 @@ class Node {
     addEventListener(key, callback) { this.listeners[key] = callback; }
     focus() { this.focused = true; }
 }
-function setup(fetch, savedConversation = null) {
+function setup(fetch, savedConversation = null, runtime = { ok: false }) {
     const nodes = {};
+    const runtimeRequests = [];
     for (const match of html.matchAll(/id="([^"]+)"/g)) nodes[match[1]] = new Node();
     const nav = [...html.matchAll(/data-view="([^"]+)"/g)].map(match => {
         const node = new Node('button'); node.dataset.view = match[1]; return node;
@@ -42,12 +43,33 @@ function setup(fetch, savedConversation = null) {
         setItem: (key, value) => saved.set(key, value),
         removeItem: key => saved.delete(key)
     };
-    const context = vm.createContext({ document, fetch, AbortController, localStorage });
+    const pageFetch = (url, options) => {
+        if (url === '/runtime') { runtimeRequests.push(url); return Promise.resolve(runtime); }
+        return fetch(url, options);
+    };
+    const context = vm.createContext({ document, fetch: pageFetch, AbortController, localStorage });
     vm.runInContext(script, context);
-    return { nodes, nav, saved, run: code => vm.runInContext(code, context) };
+    return { nodes, nav, saved, runtimeRequests, run: code => vm.runInContext(code, context) };
 }
 const text = node => [node.textContent, ...node.children.map(text)].join(' ');
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+for (const [mode, label] of [['development', 'Development'], ['production', 'Production']]) {
+    test('runtime mode displays ' + label, async () => {
+        const ui = setup(async () => { throw new Error('unexpected request'); }, null,
+            { ok: true, json: async () => ({ mode }) });
+        await tick();
+        assert.deepEqual(ui.runtimeRequests, ['/runtime']);
+        assert.equal(ui.nodes.runtimeMode.textContent, label);
+    });
+}
+
+test('runtime mode displays Unavailable when the request fails', async () => {
+    const ui = setup(async () => { throw new Error('unexpected request'); });
+    await tick();
+    assert.deepEqual(ui.runtimeRequests, ['/runtime']);
+    assert.equal(ui.nodes.runtimeMode.textContent, 'Unavailable');
+});
 
 test('all six views navigate and preserve chat and draft', () => {
     const ui = setup(async () => ({ ok: true, json: async () => ({ tasks: [], activity: [] }) }));

@@ -49,7 +49,7 @@ def test_production_secrets_not_in_settings_repr(production):
     assert Settings.from_env({}).mode == 'development'
 
 
-@pytest.mark.parametrize('path', ['/', '/tasks', '/activity', '/conversations', '/memories?scope=user&scope_id=x',
+@pytest.mark.parametrize('path', ['/', '/runtime', '/tasks', '/activity', '/conversations', '/memories?scope=user&scope_id=x',
                                   '/candidates/00000000-0000-0000-0000-000000000000/apply', '/docs', '/openapi.json'])
 def test_all_sensitive_routes_require_authentication(production, path):
     with TestClient(main.create_app(settings=Settings.from_env(production)), base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
@@ -99,7 +99,7 @@ def test_cross_site_top_level_ui_navigation_after_basic_auth(production, method)
             assert response.content == b''
 
 
-@pytest.mark.parametrize('method,path', [('GET', '/'), ('GET', '/tasks'), ('POST', '/conversations')])
+@pytest.mark.parametrize('method,path', [('GET', '/'), ('GET', '/runtime'), ('GET', '/tasks'), ('POST', '/conversations')])
 def test_authenticated_same_origin_browser_requests(production, method, path):
     headers = {'Origin': production['JARVIS_PUBLIC_ORIGIN'], 'Sec-Fetch-Site': 'same-origin',
                'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty'}

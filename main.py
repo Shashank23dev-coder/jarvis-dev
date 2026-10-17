@@ -65,6 +65,11 @@ def health(store: TaskStore = Depends(get_store)):
     return {"status": "ok"}
 
 
+@router.get("/runtime")
+def runtime(request: Request):
+    return {"mode": request.app.state.settings.mode}
+
+
 @router.get("/tasks")
 def list_tasks(store: TaskStore = Depends(get_store)):
     return {

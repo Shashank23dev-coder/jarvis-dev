@@ -22,9 +22,16 @@ def test_root_health_and_empty_lists(client):
     assert root.status_code == 200
     assert 'id="assistantView"' in root.text
     assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/runtime").json() == {"mode": main.app.state.settings.mode}
     assert client.get("/tasks").json() == {"tasks": []}
     assert client.get("/activity").json() == {"activity": []}
     assert client.get("/tasks/missing").status_code == 404
+
+
+@pytest.mark.parametrize("mode", ["development", "production"])
+def test_runtime_reports_configured_mode(client, monkeypatch, mode):
+    monkeypatch.setattr(main.app.state, "settings", SimpleNamespace(mode=mode))
+    assert client.get("/runtime").json() == {"mode": mode}
 
 
 def test_task_plan_and_activity_contract(client):
