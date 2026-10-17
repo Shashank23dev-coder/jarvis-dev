@@ -15,38 +15,36 @@ NODE_KEYS = ('location:', 'failureType:', 'error:', 'expected:', 'actual:', 'ope
 
 
 def failure_feedback(results, cap=CAP):
-    """Failing tests and key error lines for each failing runner in `results`, within `cap` characters."""
-    names, details = [], []
+    """One section per failing runner in `results`: its failing tests, then its key error lines.
+
+    Each section is capped at `cap` characters; passing runners are left out.
+    """
+    sections = []
     for evidence in results:
         if not (evidence['returncode'] or evidence['timed_out'] or evidence.get('truncated')):
             continue
         runners = evidence.get('runners') or runner_results(evidence, evidence.get('paths') or ())
         if not any(r['returncode'] or r['timed_out'] for r in runners):
-            names.append(f"[{evidence['phase']}: output exceeded the 16 KB evidence limit; "
-                         'make the tests print less]')
-        passed = [r['runner'] for r in runners if not (r['returncode'] or r['timed_out'])]
-        if passed and len(passed) < len(runners):
-            names.append(f"[{evidence['phase']}: {' and '.join(passed)} passed]")
+            sections.append(f"[{evidence['phase']}: output exceeded the 16 KB evidence limit; "
+                            'make the tests print less]')
         for runner in runners:
-            if runner['runner'] in passed:
+            if not (runner['returncode'] or runner['timed_out']):
                 continue
             stdout = _span(evidence['stdout'], runner['stdout_span'])
             stderr = _span(evidence.get('stderr', ''), runner['stderr_span'])
             failed, blocks = (_node if runner['runner'] == 'node' else _pytest)(stdout)
             state = 'timed out' if runner['timed_out'] else f"rc={runner['returncode']}"
-            header = f"[{evidence['phase']}: {runner['runner']} failed, {state}]"
-            names.append('\n'.join([header] + (failed or ['(no failing test names reported)'])))
             if not blocks:
                 lines = (stdout.strip() or stderr.strip()).splitlines()[-FALLBACK_LINES:]
                 blocks = [f"(no {runner['runner']} failure markers found; its last {len(lines)} lines)\n"
                           + '\n'.join(lines)] if lines else []
             elif stderr.strip():
                 blocks.append('stderr:\n' + '\n'.join(stderr.strip().splitlines()[-10:]))
-            details.append('\n\n'.join([header] + blocks))
-    if not names:
-        return ''
-    text = 'Failing tests:\n' + '\n\n'.join(names) + '\n\nDetails:\n' + '\n\n'.join(details)
-    return text if len(text) <= cap else text[:cap - 40].rstrip() + '\n[feedback cut at the size limit]'
+            text = '\n\n'.join([f"[{evidence['phase']}: {runner['runner']} failed, {state}]\nFailing tests:\n"
+                                 + '\n'.join(failed or ['(no failing test names reported)']), 'Errors:'] + blocks)
+            sections.append(text if len(text) <= cap else
+                            text[:cap - 40].rstrip() + '\n[cut at the size limit for this runner]')
+    return '\n\n'.join(sections)
 
 
 def _span(text, span):

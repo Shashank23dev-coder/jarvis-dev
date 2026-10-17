@@ -9,7 +9,7 @@ import pytest
 from core import dev_agents
 from core.candidate_provider import ProviderFailure
 from core.database import Database
-from core.direct_dev import DirectDevelopment, NoAgentAvailable, Router
+from core.direct_dev import SANDBOX_NOTE, DirectDevelopment, NoAgentAvailable, Router
 from core.engineering_portfolio import Portfolio
 from core.engineering_providers import EngineeringRegistry, Registration
 from tools import CommandResult
@@ -533,8 +533,10 @@ def test_feedback_leads_with_the_pytest_failure_when_node_passes(tmp_path, monke
     assert 'FAILED tests/test_deployment.py::test_health_is_minimal_and_checks_database' in feedback
     assert "E           AssertionError: assert {'detail': 'Invalid host'} == {'mode': 'production'}" in feedback
     assert 'tests/test_deployment.py:165: AssertionError' in feedback
-    assert '[targeted: node passed]' in feedback and 'ui check' not in feedback
+    assert 'node' not in feedback and 'ui check' not in feedback  # passing runners are left out
     assert 'fixture-secret-do-not-echo' not in feedback
+    assert feedback.startswith('The sandboxed tests failed for attempt 1.\n' + SANDBOX_NOTE)
+    assert 'made no changes' not in feedback
     # The stored evidence keeps each runner's own result and span of the combined output.
     from core.candidate_store import CandidateStore
     stored = CandidateStore(Database(tmp_path / 'state.db')).get(report['candidate_id'], internal=True)
@@ -554,12 +556,12 @@ def test_feedback_shows_the_node_failure_when_pytest_passes(tmp_path, monkeypatc
     assert report['tests'][0]['runners'] == [dict(runner='pytest', returncode=0, timed_out=False),
                                              dict(runner='node', returncode=1, timed_out=False)]
     feedback = codex.payloads[1]['task'].split('Revise it to address this feedback:\n', 1)[1]
-    assert '[targeted: node failed, rc=1]' in feedback and '[targeted: pytest passed]' in feedback
+    assert '[targeted: node failed, rc=1]' in feedback and 'pytest' not in feedback
     assert 'not ok 1 - header shows runtime mode' in feedback
     assert "'Unavailable' !== 'Production'" in feedback
     assert "location: '/workspace/tests/ui.test.cjs:3:1'" in feedback
     assert 'TestContext.<anonymous> (/workspace/tests/ui.test.cjs:3:50)' in feedback
-    assert 'node:async_hooks' not in feedback and 'pytest failed' not in feedback
+    assert 'node:async_hooks' not in feedback and '3 passed' not in feedback
 
 
 def test_retry_feedback_has_only_the_current_attempts_results(tmp_path, monkeypatch):
@@ -577,8 +579,37 @@ def test_retry_feedback_has_only_the_current_attempts_results(tmp_path, monkeypa
     assert report['status'] == 'tests_failed' and report['attempts_exhausted']
     assert [len(a['tests']) for a in report['attempts']] == [1, 1, 1]
     assert len(report['tests']) == 1
-    for payload in codex.payloads[1:]:
+    assert [a['unchanged'] for a in report['attempts']] == [False, True, True]
+    for number, payload in enumerate(codex.payloads[1:], 1):
         feedback = payload['task'].split('Revise it to address this feedback:\n', 1)[1]
         assert feedback.count('Failing tests:') == 1
-        assert feedback.count('[targeted: pytest failed, rc=1]') == 2  # once in the names, once in the details
+        assert feedback.count('[targeted: pytest failed, rc=1]') == 1
         assert feedback.count('Invalid host') == 1
+        assert feedback.count(SANDBOX_NOTE) == 1
+        # Attempt 1 made the change; attempts 2 and 3 left the worktree as it was.
+        notice = f'Attempt {number} made no changes'
+        assert (notice in feedback) == (number > 1)
+
+
+def test_each_failing_runner_gets_its_own_capped_section():
+    from core.test_feedback import failure_feedback
+    huge_pytest = PYTEST_FAILURE.replace('E           AssertionError', 'E   ' + 'x' * 9000 + '\nE           AssertionError')
+    huge_node = NODE_FAILURE.replace("error: |-", "error: |-\n    " + 'y' * 9000)
+    pytest_out, node_out = huge_pytest, huge_node
+    evidence = dict(phase='targeted', paths=['tests/test_calc.py', 'tests/ui.test.cjs'], returncode=1,
+                    timed_out=False, truncated=False, stderr='', stdout=pytest_out + node_out,
+                    runners=[dict(runner='pytest', returncode=1, timed_out=False, stdout_span=[0, len(pytest_out)],
+                                  stderr_span=[0, 0]),
+                             dict(runner='node', returncode=1, timed_out=False,
+                                  stdout_span=[len(pytest_out), len(pytest_out) + len(node_out)], stderr_span=[0, 0])])
+    feedback = failure_feedback([evidence])
+    pytest_part, node_part = feedback.split('\n\n[targeted: node failed, rc=1]')
+    # Both sections survive, each within its own cap, and each starts with what failed.
+    assert pytest_part.startswith('[targeted: pytest failed, rc=1]\nFailing tests:\nFAILED tests/test_deployment.py::')
+    assert node_part.startswith('\nFailing tests:\nnot ok 1 - header shows runtime mode')
+    assert len(pytest_part) <= 6000 and len(node_part) <= 6000
+    assert pytest_part.endswith('[cut at the size limit for this runner]')
+    assert node_part.endswith('[cut at the size limit for this runner]')
+    # The overall bound in _revision does not cut the second runner.
+    from core.direct_dev import _revision
+    assert _revision('task', feedback).endswith(feedback)

@@ -166,6 +166,7 @@ class DirectDevelopment:
             stage_changed('implementing')
             author, _ = router.choose('implementing')
             report['author'], feedback = author, None
+            previous = None  # the last attempt's diff fingerprint
             for number in range(1, MAX_ATTEMPTS + 1):
                 attempt = dict(attempt=number, author=author)
                 report['attempts'].append(attempt)
@@ -187,13 +188,15 @@ class DirectDevelopment:
                 current = record['test_results'][start:]
                 tests = [_test_summary(t) for t in current]
                 passed = record.get('tested_fingerprint') == record['fingerprint']
-                attempt.update(tests=tests, tests_passed=passed, files_changed=record['files_changed'])
+                unchanged, previous = previous == record['fingerprint'], record['fingerprint']
+                attempt.update(tests=tests, tests_passed=passed, files_changed=record['files_changed'],
+                               unchanged=unchanged)
                 report.update(diff=record['diff'], diff_summary=record['diff_summary'],
                               files_changed=record['files_changed'], tests=tests, tests_passed=passed)
                 if not passed:
                     # As in _review: only a change with passing sandboxed tests is reviewed.
                     attempt['outcome'] = report['status'] = 'tests_failed'
-                    feedback = 'The sandboxed tests failed.\n' + failure_feedback(current)
+                    feedback = _failure_feedback(number, unchanged, current)
                     continue
 
                 report['stage'] = 'commit'
@@ -259,11 +262,25 @@ def _test_summary(evidence):
                 stdout_tail=evidence['stdout'][-1500:])
 
 
+SANDBOX_NOTE = ("These tests ran in Jarvis's sandbox, not in your worktree, so you may not be able to run "
+                "them yourself. The failures below are real test results: fix the code or the tests to "
+                "address the errors shown. Do not assume an environment problem.")
+
+
+def _failure_feedback(number, unchanged, results):
+    lines = [f'The sandboxed tests failed for attempt {number}.', SANDBOX_NOTE]
+    if unchanged:
+        lines.append(f'Attempt {number} made no changes: the worktree is identical to the previous attempt, '
+                     'which failed the same tests. You must change the code or the tests.')
+    return '\n'.join(lines) + '\n\n' + failure_feedback(results)
+
+
 def _revision(task, feedback):
     if feedback is None:
         return task
+    # failure_feedback caps each failing runner itself; this only bounds the total.
     return (f'{task}\n\nYour previous attempt is still in the worktree (committed if its tests passed). '
-            f'Revise it to address this feedback:\n{feedback[:6000]}')
+            f'Revise it to address this feedback:\n{feedback[:20000]}')
 
 
 def _commit(service, agent, attempt):
