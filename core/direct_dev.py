@@ -134,8 +134,8 @@ class DirectDevelopment:
             on_stage=None):
         """Run one direct-development candidate within `timeout` seconds in total.
 
-        Only the targeted tests run (decision D1, 2026-10-16): the whole run must
-        fit one 930 s job lease. source_context links the candidate to a job.
+        Only the targeted tests and the UI suite run (decision D1, 2026-10-16): the
+        whole run must fit one 930 s job lease. source_context links the candidate to a job.
         """
         run_id = str(uuid4())
         registry = self._registry(run_id)
@@ -453,7 +453,7 @@ def _other(agent):
 
 # --- Prepare for apply ---------------------------------------------------------------
 # Apply is not relaxed for direct candidates. A direct candidate that reaches
-# waiting_for_approval was tested with targeted tests only (D1), so apply refuses it.
+# waiting_for_approval was tested with targeted and UI tests only (D1), so apply refuses it.
 # This separate step, outside any job lease, runs the existing full test phases on
 # the exact reviewed commit, then a fresh review by an agent other than the author,
 # and records both in the fields apply already checks. Failures (pre-existing or
@@ -513,7 +513,7 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
 
         def capture(repository, phase, paths):
             result = (tester(repository, phase, paths) if tester else
-                      repository.run_ui_tests() if phase == 'full_ui' else repository.run_pytest(paths))
+                      repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths))
             raw[phase] = result
             return result
         service.tester = capture
@@ -644,7 +644,7 @@ def _baseline_results(service, record, failed):
         for phase in failed:
             paths = ['tests/ui.test.cjs'] if phase == 'full_ui' else ['tests']
             results[phase] = (service.tester(repository, 'baseline_' + phase, paths) if service.tester else
-                              repository.run_ui_tests() if phase == 'full_ui' else repository.run_pytest(paths))
+                              repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths))
         return results
     finally:
         service._git(container, *git, 'worktree', 'remove', '--force', str(tree))

@@ -174,7 +174,7 @@ def coordinate(s):
         def baseline():
             s._tick('baseline_tests')
             repo = CandidateRepository(worktree, source_root=s.source, check=s._check)
-            result = s.tester(repo, 'baseline', r['targeted_tests']) if s.tester else repo.run_pytest(r['targeted_tests'])
+            result = s.tester(repo, 'baseline', r['targeted_tests']) if s.tester else repo.run_tests(r['targeted_tests'])
             if scan(worktree, s._check) != r['manifest']:
                 raise ToolDenied('Baseline changed during tests')
             if result.returncode not in (0, 1) or result.timed_out or result.truncated:

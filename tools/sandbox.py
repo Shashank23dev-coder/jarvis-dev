@@ -131,7 +131,7 @@ def run_tests(repo, snapshot, paths, *, ui=False):
         seconds = min(seconds, repo.check())
     if seconds <= 0:
         raise ToolDenied('Sandbox setup exhausted test deadline')
-    command = (['/usr/bin/node', '--test', 'tests/ui.test.cjs'] if ui else
+    command = (['/usr/bin/node', '--test', *paths] if ui else
                ['/runtime/bin/python', '-I', '-B', '-m', 'pytest', '-p', 'no:cacheprovider',
                 '-c', '/dev/null', '--rootdir=/workspace', '-o', 'pythonpath=/workspace', '--', *paths])
     if backend == 'docker':

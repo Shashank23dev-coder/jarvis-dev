@@ -17,6 +17,9 @@ from typing import Sequence
 from .policy import ToolDenied, ToolError, ToolPolicy
 
 
+NODE_TEST_SUFFIXES = (".cjs", ".js")
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """Bounded process output; nonzero exit codes are returned, not hidden."""
@@ -308,12 +311,31 @@ class RepositoryTools:
         A functional Bubblewrap or development Docker backend is mandatory. Never falls back
         to running repository Python on the host. Only test paths are accepted;
         agent-provided pytest options/plugins/configuration are not supported.
+        Node test files (.cjs/.js) are refused here; run_tests routes them to node.
         """
+        if not isinstance(paths, (str, bytes)) and any(path.endswith(NODE_TEST_SUFFIXES) for path in paths):
+            raise ToolDenied("Node test files run under node, not pytest")
         return self._run_test_command(paths)
 
-    def run_ui_tests(self) -> CommandResult:
-        """Host-only fixed UI suite, using the same read-only sandbox snapshot."""
-        return self._run_test_command(("tests/ui.test.cjs",), ui=True)
+    def run_ui_tests(self, paths: Sequence[str] = ("tests/ui.test.cjs",)) -> CommandResult:
+        """Node test files (the fixed UI suite by default), same read-only sandbox snapshot."""
+        return self._run_test_command(paths, ui=True)
+
+    def run_tests(self, paths: Sequence[str]) -> CommandResult:
+        """Route test paths by runner: .cjs/.js files to node, everything else to pytest.
+
+        Both runners must pass; their output is combined into one result.
+        """
+        node = [path for path in paths if path.endswith(NODE_TEST_SUFFIXES)]
+        python = [path for path in paths if path not in node]
+        results = ([self.run_pytest(python)] if python else []) + ([self.run_ui_tests(node)] if node else [])
+        if len(results) == 1:
+            return results[0]
+        first, second = results
+        return CommandResult(first.command + second.command, first.returncode or second.returncode,
+                             first.stdout + second.stdout, first.stderr + second.stderr,
+                             first.timed_out or second.timed_out, first.truncated or second.truncated,
+                             dict(first.sandbox, node=second.sandbox))
 
     def _runtime_policy_bytes(self):
         runtime_root = Path(__file__).resolve().parents[1]

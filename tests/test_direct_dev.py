@@ -377,3 +377,83 @@ def test_codex_authentication_failure_never_falls_back_to_an_api_agent(tmp_path,
     assert report['status'] == 'failed' and report['failure']['code'] == 'provider_authentication'
     assert report['failure']['stage'] == 'implement'
     assert observed().count('exec') == 2  # the one retry, then stop: no other agent, no API
+
+
+def ui_fixture(source):
+    (source / 'tests/ui.test.cjs').write_text("require('node:test')('ui', () => {});\n")
+    git(source, 'add', '.')
+    git(source, 'commit', '-q', '-m', 'UI suite')
+
+
+def test_focused_tests_always_include_the_ui_suite_before_review(tmp_path):
+    source, database = fixture_project(tmp_path)
+    ui_fixture(source)
+    codex, claude, seen = Stub('codex_cli'), Stub('claude_cli'), []
+
+    def tester(repository, phase, paths):
+        seen.append((phase, paths))
+        return passed(repository, phase, paths)
+    report = DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
+                               agents=[codex, claude], tester=tester).run(
+        'dd-fixture', 'Fix add()', ['src/calc.py'], ['tests/test_calc.py'])
+    assert report['status'] == 'passed', report.get('failure')
+    assert seen == [('targeted', ['tests/test_calc.py']), ('full_ui', ['tests/ui.test.cjs'])]
+    assert [t['phase'] for t in report['tests']] == ['targeted', 'full_ui']
+    assert [t['phase'] for t in claude.payloads[0]['tests']] == ['targeted', 'full_ui']
+
+
+def test_failing_ui_suite_stops_before_review(tmp_path):
+    source, database = fixture_project(tmp_path)
+    ui_fixture(source)
+    codex, claude = Stub('codex_cli'), Stub('claude_cli')
+
+    def tester(repository, phase, paths):
+        if phase == 'full_ui':
+            return CommandResult(('node', '--test'), 1, 'not ok 1 - header shows runtime mode')
+        return passed(repository, phase, paths)
+    report = DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
+                               agents=[codex, claude], tester=tester).run(
+        'dd-fixture', 'Fix add()', ['src/calc.py'], ['tests/test_calc.py'])
+    assert report['status'] == 'tests_failed' and report['attempts_exhausted']
+    assert [(t['phase'], t['returncode']) for t in report['tests']] == [('targeted', 0), ('full_ui', 1)]
+    assert claude.calls == [] and 'commit' not in report
+    assert 'header shows runtime mode' in codex.payloads[1]['task']
+
+
+def test_targeted_node_tests_go_to_node_never_pytest(tmp_path, monkeypatch):
+    from tools import sandbox
+    from tools.policy import ToolDenied
+    from core.self_edit import CandidateRepository
+    source, database = fixture_project(tmp_path)
+    ui_fixture(source)
+    calls = []
+
+    def run_tests(repo, snapshot, paths, *, ui=False):
+        calls.append((list(paths), ui))
+        return CommandResult(('x',), 0, 'ok', sandbox=dict(backend='stub'))
+    monkeypatch.setattr(sandbox, 'run_tests', run_tests)
+    repository = CandidateRepository(source, source_root=source, check=lambda: 60)
+    result = repository.run_tests(['tests/test_calc.py', 'tests/ui.test.cjs'])
+    assert calls == [(['tests/test_calc.py'], False), (['tests/ui.test.cjs'], True)]
+    assert result.returncode == 0 and result.sandbox['backend'] == 'stub'
+    calls.clear()
+    assert repository.run_tests(['tests/ui.test.cjs']).command == ('node', '--test', 'tests/ui.test.cjs')
+    assert calls == [(['tests/ui.test.cjs'], True)]
+    with pytest.raises(ToolDenied):
+        repository.run_pytest(['tests/ui.test.cjs'])
+    # A failure from either runner fails the combined result.
+    monkeypatch.setattr(sandbox, 'run_tests', lambda repo, snapshot, paths, *, ui=False:
+                        CommandResult(('x',), 1 if ui else 0, 'node failed' if ui else 'ok'))
+    failed = repository.run_tests(['tests/test_calc.py', 'tests/ui.test.cjs'])
+    assert failed.returncode == 1 and 'node failed' in failed.stdout
+
+    # End to end on the direct path: a .cjs targeted test never reaches pytest.
+    calls.clear()
+    monkeypatch.setattr(sandbox, 'run_tests', run_tests)
+    codex, claude = Stub('codex_cli'), Stub('claude_cli')
+    report = DirectDevelopment(database, candidate_root=tmp_path / 'candidates', state_dir=tmp_path / 'state',
+                               agents=[codex, claude]).run(
+        'dd-fixture', 'Fix add()', ['src/calc.py'], ['tests/ui.test.cjs'])
+    assert report['status'] == 'passed', report.get('failure')
+    assert calls == [(['tests/ui.test.cjs'], True), (['tests/ui.test.cjs'], True)]
+    assert not any(path.endswith('.cjs') for paths, ui in calls if not ui for path in paths)

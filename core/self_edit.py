@@ -434,7 +434,7 @@ class SelfEditService:
         self.store.save(self.record)
         try:
             result = (self.tester(repository, 'baseline', self.record['targeted_tests']) if self.tester
-                      else repository.run_pytest(self.record['targeted_tests']))
+                      else repository.run_tests(self.record['targeted_tests']))
         except Exception:
             improvement['baseline_outcome'].update(result='fail',
                 elapsed_seconds=min(900.0, round(time.monotonic() - baseline_started, 3)),
@@ -559,7 +559,8 @@ class SelfEditService:
         phases = [('targeted', self.record['targeted_tests'])]
         if not focused:
             phases.append(('full_python', ['tests']))
-        if not focused and (worktree / 'tests/ui.test.cjs').is_file():
+        # The UI suite is fast (~3 s), so even a focused run requires it before review.
+        if (worktree / 'tests/ui.test.cjs').is_file():
             phases.append(('full_ui', ['tests/ui.test.cjs']))
         for phase, paths in phases:
             prior = [t for t in self.record['test_results'] if t['phase'] == phase
@@ -570,7 +571,7 @@ class SelfEditService:
             if self.tester:
                 result = self.tester(repository, phase, paths)
             else:
-                result = repository.run_ui_tests() if phase == 'full_ui' else repository.run_pytest(paths)
+                result = repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths)
             self._check()
             evidence = dict(sandbox=result.sandbox, phase=phase, paths=paths, returncode=result.returncode,
                             timed_out=result.timed_out,
