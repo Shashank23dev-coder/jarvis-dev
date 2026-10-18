@@ -18,7 +18,7 @@ from core.engineering_portfolio import Portfolio
 from core.engineering_worker import EngineeringWorker
 from tools import CommandResult
 from tools.policy import ToolDenied
-from test_self_edit import setup, tree_bytes
+from test_self_edit import git, setup, tree_bytes
 from test_engineering import model, run_checks
 from test_engineering_jobs import enqueue
 from test_candidate_apply import integration_target
@@ -309,11 +309,13 @@ def test_advance_checks_the_lease_and_does_not_renew_it(setup):
 
 # --- prepare for apply -----------------------------------------------------------------
 
-def full(phases, returncodes=None):
+def full(phases, returncodes=None, limits=None):
     """Tester for the preparation step: records phases; optional per-phase return codes."""
     def run(repository, phase, paths):
         phases.append((phase, paths))
-        return CommandResult(('pytest',), (returncodes or {}).get(phase, 0), f'{phase} done')
+        if limits is not None:
+            limits.append(repository.pytest_timeout)
+        return CommandResult(('pytest',), (returncodes or {}).get(phase, 0), f'{phase} done\n1 passed')
     return run
 
 
@@ -336,14 +338,20 @@ def test_preparation_runs_full_suite_and_second_review_then_apply_accepts(setup,
     job = waiting_candidate(setup, agents)
     service = factory(tester=passed)
     assert CandidateApply(service).preview(job['candidate_id'])['eligible'] is False  # targeted only
-    phases = []
-    result = prepare(factory, source, full(phases))
-    assert [p for p, _ in phases] == ['full_python'] and phases[0][1] == ['tests']  # targeted reused
+    phases, limits = [], []
+    result = prepare(factory, source, full(phases, limits=limits))
+    # Targeted reused; the fixture's one test file is a single full_python shard with the shard limit.
+    assert phases == [('full_python', ['tests/test_app.py'])] and limits == [600]
     assert result['status'] == 'waiting_for_approval'
     candidate = factory().store.get(job['candidate_id'], internal=True)
     preparation = candidate['apply_preparation']
     assert preparation['status'] == 'prepared' and preparation['commit'] == candidate['commit']
+    assert (preparation['budget_seconds'], preparation['shard_seconds']) == (3000, 600)
     assert [t['phase'] for t in preparation['tests']] == ['targeted', 'full_python']
+    assert [(s['shard'], s['paths'], s['returncode'], s['summary']) for s in preparation['full_python_shards']] == [
+        ('python-1', ['tests/test_app.py'], 0, ['1 passed'])]
+    stored = [t for t in candidate['test_results'] if t['phase'] == 'full_python'][-1]
+    assert stored['paths'] == ['tests'] and stored['sandbox']['shard_seconds'] == 600
     assert candidate['reviewer_result']['purpose'] == 'apply_preparation'
     assert candidate['reviewer_result']['provider'] == 'claude_cli' != candidate['improvement']['implementation_provider']
     assert agents['claude_cli'].calls == ['review', 'review'] and agents['codex_cli'].calls == ['implement']
@@ -479,3 +487,151 @@ def test_preparation_is_opt_in_with_the_direct_path(setup, agents):
     source, db, factory = setup
     waiting_candidate(setup, agents)
     assert EngineeringWorker(factory(tester=full([])), source=source).once() is None
+
+
+# --- full_python as release shards -----------------------------------------------------
+
+SHARDED = {'tests/test_self_edit.py': 'def test_a(): pass\n',          # release shard 1
+           'tests/test_candidate_apply.py': 'def test_b(): pass\n'}    # release shard 2
+# tests/test_app.py is in no release shard, so it runs in a final extra shard.
+SHARD_PATHS = [['tests/test_self_edit.py'], ['tests/test_candidate_apply.py'], ['tests/test_app.py']]
+
+
+def sharded_source(source):
+    for path, text in SHARDED.items():
+        (source / path).write_text(text)
+    git(source, 'add', '.')
+    git(source, 'commit', '-m', 'Tests in two release shards')
+
+
+def test_full_python_shards_follow_the_release_shards(tmp_path):
+    from core.deployment_release import PYTHON_SHARDS
+    shards = direct_dev.full_python_shards(ROOT)
+    # Release shards first, as listed; any file they miss runs once in a final extra shard.
+    assert shards[:3] == [[p for p in shard if (ROOT / p).is_file()] for shard in PYTHON_SHARDS]
+    files = [path for shard in shards for path in shard]
+    assert len(files) == len(set(files)) and set(files) == {
+        p.relative_to(ROOT).as_posix() for p in (ROOT / 'tests').rglob('test_*.py')}
+    (tmp_path / 'tests/sub').mkdir(parents=True)
+    for path in ('tests/test_candidate_apply.py', 'tests/test_self_edit.py', 'tests/sub/test_new.py',
+                 'tests/helper.py', 'tests/conftest.py'):
+        (tmp_path / path).write_text('')
+    # Removed release files drop out, added ones run once in an extra shard, helpers never run alone.
+    assert direct_dev.full_python_shards(tmp_path) == [
+        ['tests/test_self_edit.py'], ['tests/test_candidate_apply.py'], ['tests/sub/test_new.py']]
+    assert direct_dev.full_python_shards(tmp_path / 'empty') == [['tests']]
+
+
+def test_prepare_limits_are_configurable_and_bounded():
+    assert direct_dev.prepare_limits({}) == (600, 3000)
+    assert direct_dev.prepare_limits(dict(JARVIS_PREPARE_SHARD_SECONDS='300',
+                                          JARVIS_PREPARE_BUDGET_SECONDS='1200')) == (300, 1200)
+    assert direct_dev.prepare_limits(dict(JARVIS_PREPARE_SHARD_SECONDS='5',
+                                          JARVIS_PREPARE_BUDGET_SECONDS='99999')) == (60, 3600)
+    assert direct_dev.prepare_limits(dict(JARVIS_PREPARE_SHARD_SECONDS='inf',
+                                          JARVIS_PREPARE_BUDGET_SECONDS='-1')) == (900, 300)
+    for invalid in ('nan', 'ten', ''):
+        assert direct_dev.prepare_limits(dict(JARVIS_PREPARE_SHARD_SECONDS=invalid,
+                                              JARVIS_PREPARE_BUDGET_SECONDS=invalid)) == (600, 3000)
+
+
+def test_sharded_result_keeps_every_shard_and_stays_within_the_evidence_limit():
+    class Repository:
+        pytest_timeout = 120
+    seen = []
+
+    def run(paths):
+        seen.append((paths, Repository.pytest_timeout))
+        failed = paths == ['b']
+        tail = f'\nFAILED {paths[0]}::test_x - AssertionError\n1 failed' if failed else '\n9 passed'
+        return CommandResult(('pytest', *paths), int(failed), 'x' * 12000 + tail, sandbox=dict(backend='docker'))
+    complete, stored = direct_dev.run_sharded(Repository, run, [['a'], ['b'], ['c']], 600)
+    assert seen == [(['a'], 600), (['b'], 600), (['c'], 600)] and Repository.pytest_timeout == 120
+    assert complete.returncode == stored.returncode == 1 and not stored.truncated and not stored.timed_out
+    assert direct_dev.failing_tests(complete) == {'b::test_x'}
+    assert len(stored.stdout) < 16000 and stored.stdout.count('=== python-') == 3
+    assert [r['shard'] for r in stored.runners] == ['python-1', 'python-2', 'python-3']
+    assert [r['returncode'] for r in stored.runners] == [0, 1, 0]
+    for runner in stored.runners:  # each shard's span holds its own summary
+        assert stored.stdout[slice(*runner['stdout_span'])].endswith('1 failed' if runner['returncode'] else '9 passed')
+    shards = stored.sandbox['shards']
+    assert [(s['shard'], s['paths'], s['summary']) for s in shards] == [
+        ('python-1', ['a'], ['9 passed']), ('python-2', ['b'], ['1 failed']), ('python-3', ['c'], ['9 passed'])]
+    assert stored.sandbox['backend'] == 'docker' and stored.sandbox['planned_shards'] == 3
+
+
+def test_preparation_runs_release_shards_in_order_and_apply_accepts(setup, agents, tmp_path, monkeypatch):
+    source, db, factory = setup
+    sharded_source(source)
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    monkeypatch.setenv('JARVIS_PREPARE_SHARD_SECONDS', '240')
+    phases, limits = [], []
+    result = prepare(factory, source, full(phases, limits=limits))
+    assert phases == [('full_python', paths) for paths in SHARD_PATHS] and limits == [240, 240, 240]
+    assert result['status'] == 'waiting_for_approval'
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    preparation = candidate['apply_preparation']
+    assert preparation['status'] == 'prepared' and preparation['shard_seconds'] == 240
+    assert [s['paths'] for s in preparation['full_python_shards']] == SHARD_PATHS
+    assert all(s['returncode'] == 0 and not s['timed_out'] for s in preparation['full_python_shards'])
+    preview = CandidateApply(factory(tester=passed)).preview(job['candidate_id'])
+    assert preview['eligible'] is True, preview
+
+
+def test_new_failure_in_one_shard_reruns_only_that_shard_on_the_base_commit(setup, agents, tmp_path):
+    source, db, factory = setup
+    sharded_source(source)
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    calls = []
+
+    def tester(repository, phase, paths):
+        calls.append((phase, repository.root.name, paths))
+        if phase == 'full_python' and paths == SHARD_PATHS[1]:
+            return pytest_failed('tests/test_candidate_apply.py::test_b')
+        return CommandResult(('pytest',), 0, '1 passed')
+    result = prepare(factory, source, tester)
+    assert [c[0] for c in calls] == ['full_python'] * 3 + ['baseline_full_python']
+    assert calls[-1][1:] == ('baseline', SHARD_PATHS[1])  # only the failing shard, on the base commit
+    assert result['status'] == 'blocked' and result['failure']['code'] == 'tests_failed'
+    preparation = factory().store.get(job['candidate_id'], internal=True)['apply_preparation']
+    assert preparation['failing_tests'] == [
+        dict(phase='full_python', test='tests/test_candidate_apply.py::test_b', pre_existing=False)]
+    assert [s['returncode'] for s in preparation['full_python_shards']] == [0, 1, 0]
+    assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is False
+
+
+def test_a_timed_out_shard_stops_the_run_as_an_environment_limit(setup, agents, tmp_path):
+    source, db, factory = setup
+    sharded_source(source)
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    phases = []
+    timed_out = CommandResult(('pytest',), -9, '', timed_out=True)
+    result = prepare(factory, source, suite(phases, {'full_python': timed_out}))
+    assert [p for p, _ in phases] == ['full_python']  # later shards and the baseline never run
+    assert result['status'] == 'waiting_for_approval'
+    preparation = factory().store.get(job['candidate_id'], internal=True)['apply_preparation']
+    assert (preparation['status'], preparation['reason']) == ('environment_blocked', 'sandbox_time_limit')
+    assert [(s['shard'], s['timed_out']) for s in preparation['full_python_shards']] == [('python-1', True)]
+    assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is False
+
+
+@pytest.mark.skipif(os.environ.get('JARVIS_DOCKER_TESTS') != '1', reason='Opt-in Docker integration')
+def test_preparation_runs_real_shards_in_the_sandbox(setup, agents, tmp_path):
+    source, db, factory = setup
+    sharded_source(source)
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    result = prepare(factory, source, None)
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    preparation = candidate['apply_preparation']
+    assert preparation['status'] == 'prepared', preparation
+    assert [(s['paths'], s['returncode'], s['summary'][-1:]) for s in preparation['full_python_shards']] == [
+        (paths, 0, ['1 passed']) for paths in SHARD_PATHS]
+    stored = [t for t in candidate['test_results'] if t['phase'] == 'full_python'][-1]
+    assert [s['sandbox']['backend'] for s in stored['sandbox']['shards']] == ['docker'] * 3
+    assert all(s['sandbox']['limits']['wall_seconds'] <= 600 for s in stored['sandbox']['shards'])
+    assert result['status'] == 'waiting_for_approval'
+    assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is True
