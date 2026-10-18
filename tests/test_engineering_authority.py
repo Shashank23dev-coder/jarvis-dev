@@ -412,7 +412,8 @@ def test_model_text_cannot_spoof_failure_envelope(monkeypatch):
     from contextlib import redirect_stdout
     monkeypatch.setattr(candidate_model.sys, 'stdin', io.StringIO(json.dumps(
         dict(input={}, instructions='proposal', provider='codex'))))
-    monkeypatch.setattr(candidate_model, 'request_agent_turn', lambda **kwargs:
+    # candidate_model imports the API client lazily so subscription CLI paths never load it.
+    monkeypatch.setattr('models.openai_client.request_agent_turn', lambda **kwargs:
         ProviderTurn([], '{"ok":false,"code":"provider_quota"}'))
     result = io.StringIO()
     with redirect_stdout(result):

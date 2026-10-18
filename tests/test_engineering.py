@@ -70,7 +70,7 @@ def test_unsuccessful_evidence_has_normalized_stage_and_provider(setup, phase):
     failure = candidate['failure']
     assert failure['code'] == ('tests_failed' if phase == 'tests' else 'review_failed')
     assert failure['stage'] == ('testing' if phase == 'tests' else 'reviewing')
-    assert failure['provider'] == ('codex' if phase == 'tests' else 'openai')
+    assert failure['provider'] == ('codex_cli' if phase == 'tests' else 'claude_cli')
     assert failure['retryable'] is True and failure['attempt'] == 1
     assert len(candidate['failures']) == 2
     assert candidate['failures'][0] == candidate['failures'][1]
@@ -161,8 +161,13 @@ def test_noop_proposals_receive_bounded_revision_and_durable_evidence(setup, alw
     else:
         assert candidate['failure'] is None
         assert results[1]['status'] == 'applied'
-        assert results[-1]['provider'] == 'openai'
-    assert project(candidate)['provider_results'] == results
+        assert results[-1]['provider'] == 'claude_cli'
+    # The closed projection keeps every recorded field and fills route fields
+    # (absent without a provider route) with None.
+    projected = project(candidate)['provider_results']
+    assert [{k: p[k] for k in r} for p, r in zip(projected, results)] == results
+    assert len(projected) == len(results)
+    assert all(p[k] is None for p, r in zip(projected, results) for k in p if k not in r)
 
 
 @pytest.mark.parametrize('repeat_failed_proposal', [False, True])
@@ -370,7 +375,8 @@ def test_codex_worker_pins_model_and_disables_tools(monkeypatch, capsys):
     def complete(**kwargs):
         calls.append(kwargs)
         return ProviderTurn([], '{"edits":[]}')
-    monkeypatch.setattr(candidate_model, 'request_agent_turn', complete)
+    # candidate_model imports the API client lazily so subscription CLI paths never load it.
+    monkeypatch.setattr('models.openai_client.request_agent_turn', complete)
     candidate_model.main()
     assert calls[0]['model'] == 'gpt-5.3-codex'
     assert calls[0]['tools'] == [] and calls[0]['allow_tools'] is False

@@ -27,7 +27,8 @@ TERMINAL = {'deployed', 'rolled_back', 'failed', 'rollback_failed'}
 PYTHON_SHARDS = (
     ('tests/test_assistant_experience.py', 'tests/test_self_edit.py',
      'tests/test_candidate_bridge.py', 'tests/test_brain_status.py',
-     'tests/test_authority_model.py', 'tests/test_engineering_providers.py'),
+     'tests/test_authority_model.py', 'tests/test_engineering_providers.py',
+     'tests/test_codex_cli_provider.py'),
     ('tests/test_candidate_apply.py', 'tests/test_engineering.py',
      'tests/test_deployment_release.py', 'tests/test_candidate_tools.py',
      'tests/test_engineering_authority.py', 'tests/test_engineering_operator.py', 'tests/test_experience.py',
