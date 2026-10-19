@@ -63,13 +63,30 @@ test('all six views navigate and preserve chat and draft', () => {
     assert.equal(ui.nodes.prompt.value, 'Unsent draft');
 });
 
+test('runtime status displays development, production, and unavailable states', async () => {
+    for (const [response, label] of [
+        [{ ok: true, json: async () => ({ mode: 'development' }) }, 'Development'],
+        [{ ok: true, json: async () => ({ mode: 'production' }) }, 'Production'],
+        [{ ok: false }, 'Unavailable'],
+        [null, 'Unavailable']
+    ]) {
+        const ui = setup(async url => {
+            assert.equal(url, '/runtime');
+            if (response === null) throw new Error('offline');
+            return response;
+        });
+        await tick();
+        assert.equal(ui.nodes.runtimeStatus.textContent, label);
+    }
+});
+
 test('tasks load safely, include plan details, and support empty/error/retry', async () => {
     let payload = { tasks: [{ goal: '<img src=x onerror=alert(1)>', status: 'planned', created_at: '2026-09-24T12:00:00', steps: [{ description: 'Inspect', agent: 'reviewer' }] }] };
     let ok = true;
     const calls = [];
     const ui = setup(async url => { calls.push(url); return { ok, json: async () => payload }; });
     await ui.run('loadView("tasks")');
-    assert.deepEqual(calls, ['/tasks']);
+    assert.deepEqual(calls.filter(url => url !== '/runtime'), ['/tasks']);
     assert.match(text(ui.nodes.tasksContent), /<img src=x onerror=alert\(1\)>/);
     assert.match(text(ui.nodes.tasksContent), /Inspect \[reviewer\]/);
     assert.equal(ui.nodes.tasksContent.children[0].children[0].children[0].children[0].children.length, 0);
@@ -86,6 +103,7 @@ test('tasks load safely, include plan details, and support empty/error/retry', a
 
 test('activity loads its endpoint and renders event context', async () => {
     const ui = setup(async url => {
+        if (url === '/runtime') return { ok: true, json: async () => ({ mode: 'development' }) };
         assert.equal(url, '/activity');
         return { ok: true, json: async () => ({ activity: [{ message: 'Planning completed', type: 'completed', goal: 'Build Jarvis', timestamp: '2026-09-24T12:00:00' }] }) };
     });
@@ -95,7 +113,9 @@ test('activity loads its endpoint and renders event context', async () => {
 
 test('refresh aborts obsolete requests without replacing the latest results', async () => {
     const pending = [];
-    const ui = setup((url, options) => new Promise(resolve => pending.push({ resolve, options })));
+    const ui = setup((url, options) => url === '/runtime'
+        ? Promise.resolve({ ok: false })
+        : new Promise(resolve => pending.push({ resolve, options })));
     const first = ui.run('loadView("tasks")');
     const second = ui.run('loadView("tasks")');
     assert.equal(pending[0].options.signal.aborted, true);
@@ -121,7 +141,7 @@ test('chat submits once while pending, renders backend steps and refreshes the v
     const sending = ui.run('sendTask()');
     ui.nodes.prompt.value = 'Next draft';
     await ui.run('sendTask()');
-    assert.deepEqual(calls, ['/task']);
+    assert.deepEqual(calls.filter(url => url !== '/runtime'), ['/task']);
     ui.run('showView("tasks")');
     resolveTask({ ok: true, json: async () => ({ goal: 'Build Jarvis', steps: [{ id: 1, description: 'Inspect code', agent: 'reviewer' }] }) });
     await sending;
@@ -130,7 +150,7 @@ test('chat submits once while pending, renders backend steps and refreshes the v
     assert.equal(ui.nodes.prompt.value, 'Next draft');
     assert.equal(ui.nodes.sendBtn.disabled, false);
     assert.equal(ui.nodes.prompt.focused, undefined);
-    assert.deepEqual(calls, ['/task', '/tasks', '/tasks']);
+    assert.deepEqual(calls.filter(url => url !== '/runtime'), ['/task', '/tasks', '/tasks']);
 });
 
 test('network errors recover chat controls and display list retry', async () => {
@@ -145,6 +165,7 @@ test('network errors recover chat controls and display list retry', async () => 
 
 test('Assistant requests agent mode and renders the final answer as plain text', async () => {
     const ui = setup(async (url, options) => {
+        if (url === '/runtime') return { ok: true, json: async () => ({ mode: 'development' }) };
         assert.equal(url, '/task');
         assert.deepEqual(JSON.parse(options.body), { goal: 'Inspect files', mode: 'agent' });
         return { ok: true, json: async () => ({ goal: 'Inspect files', steps: [], status: 'completed',
@@ -186,6 +207,7 @@ for (const [goal, answer] of [
 ]) {
     test('Assistant submits and displays the answer for: ' + goal, async () => {
         const ui = setup(async (url, options) => {
+            if (url === '/runtime') return { ok: true, json: async () => ({ mode: 'development' }) };
             assert.equal(url, '/task');
             assert.equal(options.method, 'POST');
             assert.deepEqual(JSON.parse(options.body), { goal, mode: 'agent' });
@@ -200,6 +222,7 @@ for (const [goal, answer] of [
 test('conversation ID persists and subsequent requests continue it', async () => {
     const payloads = [];
     const ui = setup(async (url, options) => {
+        if (url === '/runtime') return { ok: true, json: async () => ({ mode: 'development' }) };
         payloads.push(JSON.parse(options.body));
         return { ok: true, json: async () => ({ conversation_id: 'conversation-1', response: 'Hello' }) };
     });
@@ -213,6 +236,7 @@ test('conversation ID persists and subsequent requests continue it', async () =>
 
 test('reload restores ordered history as plain text without changing the draft', async () => {
     const ui = setup(async url => {
+        if (url === '/runtime') return { ok: true, json: async () => ({ mode: 'development' }) };
         assert.equal(url, '/conversations/conversation-1/messages');
         return { ok: true, json: async () => ({ messages: [
             { role: 'user', content: '<script>history</script>' },

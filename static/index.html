@@ -460,8 +460,8 @@
         <option value="activity">Activity</option>
       </select>
 
-      <div class="status-value">
-        Local Development
+      <div id="runtimeStatus" class="status-value">
+        Unavailable
       </div>
 
     </div>
@@ -601,9 +601,18 @@ const messages = document.getElementById("messages");
 const welcome = document.getElementById("welcome");
 const viewNames = ["assistant", "tasks", "memory", "agents", "tools", "activity"];
 const requests = {};
+const runtimeStatus = document.getElementById("runtimeStatus");
 let activeView = "assistant";
 let conversationId = null;
 try { conversationId = localStorage.getItem("jarvis.conversationId"); } catch (_) {}
+
+async function loadRuntime() {
+    try {
+        const response = await fetch("/runtime", { cache: "no-store" });
+        const data = response.ok ? await response.json() : null;
+        runtimeStatus.textContent = data?.mode === "development" ? "Development" : data?.mode === "production" ? "Production" : "Unavailable";
+    } catch (_) { runtimeStatus.textContent = "Unavailable"; }
+}
 
 function rememberConversation(id) {
     conversationId = id;
@@ -795,6 +804,7 @@ promptBox.addEventListener("keydown", event => {
     }
 });
 restoreConversation();
+loadRuntime();
 </script>
 
 </body>

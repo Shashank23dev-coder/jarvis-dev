@@ -49,7 +49,7 @@ def test_production_secrets_not_in_settings_repr(production):
     assert Settings.from_env({}).mode == 'development'
 
 
-@pytest.mark.parametrize('path', ['/', '/tasks', '/activity', '/conversations', '/memories?scope=user&scope_id=x',
+@pytest.mark.parametrize('path', ['/', '/tasks', '/activity', '/runtime', '/conversations', '/memories?scope=user&scope_id=x',
                                   '/candidates/00000000-0000-0000-0000-000000000000/apply', '/docs', '/openapi.json'])
 def test_all_sensitive_routes_require_authentication(production, path):
     with TestClient(main.create_app(settings=Settings.from_env(production)), base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
@@ -168,6 +168,13 @@ def test_health_is_minimal_and_checks_database(production, monkeypatch):
         response = client.get('/health')
         assert response.status_code == 503
         assert 'sensitive' not in response.text
+
+
+def test_runtime_reports_production_mode(production):
+    application = main.create_app(settings=Settings.from_env(production))
+    with TestClient(application, base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
+        response = client.get('/runtime', headers={'Authorization': 'Bearer ' + production['JARVIS_AUTH_TOKEN']})
+        assert response.json() == {'mode': 'production'}
 
 
 def test_restart_keeps_all_persistent_records_and_closes_db(production):
