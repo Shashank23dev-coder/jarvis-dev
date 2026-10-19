@@ -84,6 +84,11 @@ class EngineeringWorker:
                             candidate = service._operate_locked(prior['id'], 'review')
                             continued_review = True
                 if not continued_review and (candidate is None or candidate['state'] != 'passed'):
+                    if not (job['arguments'].get('inspect_paths') and job['arguments'].get('targeted_tests')):
+                        # Admission keeps unscoped jobs off this path; a worker without the
+                        # direct path or a later portfolio change must still fail clearly here.
+                        from .engineering_jobs import SCOPE_REQUIRED
+                        raise ToolDenied(SCOPE_REQUIRED)
                     context = dict(job['source'], source='engineering_job', engineering_job_id=job['id'],
                                    lease_owner=owner, attempt=job['attempts'], project_id=job.get('project_id'),
                                    decision_id=(job.get('decision') or {}).get('id'))
