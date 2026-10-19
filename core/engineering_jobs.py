@@ -467,9 +467,12 @@ class EngineeringJobs:
             job = self._get(db, identifier)
             if job['lease_owner'] != owner:
                 raise ToolDenied('Stale engineering lease')
+            from .engineering_operator import external_review, EXTERNAL_VERDICT
+            external = bool(job.get('operator')) and external_review(job['operator']['mode'])
+            expected_verdict = EXTERNAL_VERDICT if external else 'passed'
             passed = bool(candidate and candidate['state'] == 'passed' and not candidate.get('busy')
                           and candidate.get('tested_fingerprint') == candidate.get('reviewed_fingerprint')
-                          and (candidate.get('reviewer_result') or {}).get('verdict') == 'passed'
+                          and (candidate.get('reviewer_result') or {}).get('verdict') == expected_verdict
                           and (not job.get('operator') or candidate.get('operator', {}).get('ready')))
             from .engineering_authority import assess_action
             consequence = assess_action('candidate_apply', goal=candidate['goal'],
@@ -477,8 +480,8 @@ class EngineeringJobs:
                 read_only_target=job.get('project_id') in read_only) if passed else None
             status = ('waiting_for_approval' if consequence.approval_required else 'completed') if passed else (
                 'failed' if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS) else 'blocked')
-            if passed and job.get('operator') and job['project_id'] == 'jarvis-core':
-                status = 'waiting_for_approval'
+            if passed and job.get('operator') and (job['project_id'] == 'jarvis-core' or external):
+                status = 'waiting_for_approval'  # external review always needs the owner
             job['authority'] = consequence.model_dump() if consequence else None
             job.update(status=status, current_stage=status, lease_owner=None, lease_until=0,
                        error=None if passed else 'Candidate execution did not pass tests and review',
@@ -560,7 +563,7 @@ def project_job(job):
         tests.append(dict(phase=item['phase'], returncode=item['returncode'],
                           timed_out=bool(item.get('timed_out')), truncated=bool(item.get('truncated'))))
     verdict = (job.get('review_result') or {}).get('verdict')
-    if verdict not in {None, 'passed', 'needs_revision', 'rejected'}:
+    if verdict not in {None, 'passed', 'needs_revision', 'rejected', 'external_review_required'}:
         raise ToolDenied('Invalid engineering review evidence')
     history = []
     for event in job.get('history', [])[-16:]:
@@ -619,7 +622,8 @@ def project_job(job):
         'provider_results': project_provider_results(job.get('provider_results', [])),
         'provider_route': project_provider_route(job.get('provider_route'), job.get('provider')),
         'provider_blocker': ProviderBlocker.model_validate(job['provider_blocker']).model_dump() if job.get('provider_blocker') else None,
-        'test_result': tests, 'review_result': {'verdict': verdict},
+        'test_result': tests, 'review_result': {'verdict': verdict} | (
+            {'reviewer': 'grok'} if verdict == 'external_review_required' else {}),
         'baseline_outcome': baseline_outcome, 'execution_state': execution_state,
         'manual_operations': manual_operations, 'files_changed_count': changed_count,
         'implementation_attempts': 0 if execution_state == 'blocked_before_implementation' else

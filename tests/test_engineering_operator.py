@@ -647,3 +647,101 @@ def test_actual_release_subprocess_reuses_private_exact_commit_evidence(harness,
     assert prepared['prepared'] and prepared['commit'] == result['commit_sha']
     assert prepared['controller_validated'] is False and prepared['required_confirmation'] is None
     assert private.load()['records'] == []
+
+
+FAKE_CLAUDE = '''#!/bin/sh
+echo "$*" >> {log}
+if [ "$1" = auth ]; then echo '{{"loggedIn":true,"authMethod":"claude.ai"}}'; exit 0; fi
+cat > /dev/null
+printf '%s' '{{"type":"result","result":"{{\\\"edits\\\":[{{\\\"path\\\":\\\"src/app.py\\\",\\\"content\\\":\\\"value = 2\\\\n\\\"}}]}}"}}'
+'''
+
+
+@pytest.fixture
+def fake_claude(harness, monkeypatch, tmp_path, executable_script):
+    """claude_cli runs the real headless adapter against a fake `claude`."""
+    from core.candidate_claude import ClaudeCLIProvider, claude_request
+    calls = tmp_path / 'claude-argv.log'
+    script = executable_script('claude', FAKE_CLAUDE.format(log=calls))
+    monkeypatch.setenv('JARVIS_CLAUDE_EXECUTABLE', str(script))
+    original = harness['registry']
+
+    def transport(payload, instructions, timeout, *, provider):
+        harness['emit'](dict(role='review' if 'candidate' in payload else 'implement', provider=provider))
+        return json.loads(claude_request(payload, instructions, timeout, subscription_only=True))
+
+    def registry(database, ignored):
+        base = original(database, ignored)
+        return EngineeringRegistry(database, [Registration(ClaudeCLIProvider(transport), 'cli', True)
+            if name == 'claude_cli' else item for name, item in base.registrations.items()])
+    monkeypatch.setattr(EngineeringRegistry, 'defaults', staticmethod(registry))
+    return calls
+
+
+def test_external_review_mode_builds_with_claude_and_never_calls_a_reviewer(harness, fake_claude):
+    h = harness
+    queued = h['enqueue']('CLAUDE_EXTERNAL_REVIEW')
+    assert queued['provider'] == 'claude_cli'
+    result = h['worker']().once()
+    assert result['status'] == 'waiting_for_approval', result.get('failure')
+    assert [(e['role'], e['provider']) for e in read_events(h['log']) if 'role' in e] == [('implement', 'claude_cli')]
+    prompts = [line for line in fake_claude.read_text().splitlines() if line.startswith('-p ')]
+    assert len(prompts) == 1 and '--dangerously-skip-permissions' not in fake_claude.read_text()
+    assert result['operator']['review_verdict'] == 'external_review_required'
+    assert result['operator']['release']['prepared'] and any('release' in e for e in read_events(h['log']))
+    assert [e['provider'] for e in result['operator']['steps'] if e['provider']] == ['claude_cli']
+    projected = project_job(result)
+    assert projected['review_result'] == dict(verdict='external_review_required', reviewer='grok')
+    assert 'external review by grok required' in operator.owner_status(projected)
+    candidate = h['worker']().service.store.get(result['candidate_id'], internal=True)
+    assert candidate['improvement']['review_provider'] == 'grok'
+    assert candidate['reviewer_result']['reviewer'] == 'grok'
+    from core.candidate_bridge import project
+    assert project(candidate)['reviewer_result']['verdict'] == 'external_review_required'
+
+
+def test_external_review_routine_project_still_waits_for_owner(harness):
+    from core.engineering_portfolio import Portfolio
+    h = harness
+    portfolio = Portfolio(h['db'])
+    jarvis = next(p for p in portfolio.projects() if p['project_id'] == 'jarvis-core')
+    portfolio.register_project(jarvis | dict(project_id='fixture', name='Fixture', read_only=False))
+    for mode, status in [('CLAUDE_ONLY', 'completed'), ('CLAUDE_EXTERNAL_REVIEW', 'waiting_for_approval')]:
+        EngineeringJobs(h['db']).create('Fix the value in Fixture', None,
+            ARGS | dict(project_id='fixture', execution_mode=mode),
+            dict(task_id=str(uuid4()), conversation_id=str(uuid4())))
+        result = h['worker']().once()
+        assert result['status'] == status and result['operator']['ready'], result
+    reviews = [e['provider'] for e in read_events(h['log']) if e.get('role') == 'review']
+    assert reviews == ['codex_cli']  # only CLAUDE_ONLY ran a provider review
+
+
+def test_external_verdict_is_refused_outside_its_mode(harness):
+    from core.candidate_apply import CandidateApply
+    from core.candidate_bridge import project
+    h = harness
+    result = h['worker']().once() if h['enqueue']('CLAUDE_EXTERNAL_REVIEW') else None
+    service = h['worker']().service
+    record = service.store.get(result['candidate_id'], internal=True)
+    record['operator']['mode'] = 'CLAUDE_ONLY'
+    with pytest.raises(ToolDenied, match='Invalid review result'):
+        project(record)
+    service.store.save(record)
+    apply = CandidateApply(service)
+    apply._setup(result['candidate_id'])
+    with pytest.raises(ToolDenied, match='Review evidence is incomplete or changed'):
+        apply._eligible()
+
+
+def test_other_modes_keep_provider_review_and_reviewer_independence(harness):
+    from core.engineering_providers import RoutingBlocked
+    assert operator.routes('CLAUDE_ONLY') == ('claude_cli', 'codex_cli')
+    assert not operator.external_review('CLAUDE_ONLY') and operator.external_review('CLAUDE_EXTERNAL_REVIEW')
+    registry = harness['registry'](harness['db'], None)
+    with pytest.raises(RoutingBlocked) as blocked:
+        registry.complete({'candidate': {}}, '', 5, stage='reviewing', preferred='claude_cli',
+                          allowed=('claude_cli',), exclude={'claude_cli'})
+    assert blocked.value.blocker['excluded_providers'] == ['claude_cli']
+    with pytest.raises(Exception):
+        EngineeringJobs(harness['db']).create('x', None, ARGS | dict(project_id='jarvis-core',
+            execution_mode='CLAUDE_SELF_REVIEW'), dict(task_id=str(uuid4()), conversation_id=str(uuid4())))

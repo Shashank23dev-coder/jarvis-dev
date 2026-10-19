@@ -198,7 +198,9 @@ def project(record):
         tests.append(dict(phase=item['phase'], returncode=item['returncode'],
                           timed_out=bool(item.get('timed_out')), truncated=bool(item.get('truncated'))))
     verdict = (record.get('reviewer_result') or {}).get('verdict')
-    if verdict not in {None, 'passed', 'needs_revision', 'rejected'}:
+    external = verdict == 'external_review_required'
+    if verdict not in {None, 'passed', 'needs_revision', 'rejected'} and not (
+            external and (record.get('operator') or {}).get('mode') == 'CLAUDE_EXTERNAL_REVIEW'):
         raise ToolDenied('Invalid review result')
     summary = record.get('diff_summary') or {}
     summary = {k: v for k, v in summary.items() if k in {'files', 'added', 'deleted'} and type(v) is int and 0 <= v <= 400}
@@ -216,7 +218,8 @@ def project(record):
                 attribution=WorkAttribution.model_validate(record.get('attribution') or work_attribution(record)).model_dump(),
                 provider_blocker=ProviderBlocker.model_validate(record['provider_blocker']).model_dump() if record.get('provider_blocker') else None,
                 diff_summary=summary, files_changed=[], test_results=tests,
-                reviewer_result=dict(verdict=verdict, summary='Host review completed; detailed evidence remains in dev.') if verdict else None,
+                reviewer_result=(dict(verdict=verdict, reviewer='grok', summary='External review by grok required.') if external else
+                    dict(verdict=verdict, summary='Host review completed; detailed evidence remains in dev.') if verdict else None),
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)
     projected['baseline_outcome'] = baseline_outcome_for(record)
     projected['manual_operations'] = project_manual_operations(record.get('manual_operations', []))

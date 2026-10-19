@@ -32,6 +32,17 @@ the model cannot supply a repository root or register a project.
 | `CODEX_ONLY` | Codex | Existing OpenAI reviewer |
 | `CLAUDE_ONLY` | Claude Code | Existing OpenAI reviewer |
 | `CODEX_BUILD_CLAUDE_REVIEW` | Codex | Claude Code |
+| `CLAUDE_EXTERNAL_REVIEW` | Claude Code | None automated: external review by grok |
+
+`CLAUDE_EXTERNAL_REVIEW` is selected only on an explicit owner request ("built by
+Claude Code, reviewed by Grok"). Claude Code builds exactly as in `CLAUDE_ONLY`.
+No provider (Codex, OpenAI or Claude) reviews the candidate; after passing tests
+the tested bytes are sealed with `review_result.verdict =
+external_review_required` and `reviewer = grok`. The job always ends in
+`waiting_for_approval` after the full release preparation, and candidate apply
+accepts that verdict only for this mode, still behind the owner's explicit
+approval. All other modes keep their provider review gate and
+`reviewer_must_differ_from_author`.
 
 The single-agent modes name the engineering implementation agent; they retain
 the existing independent OpenAI review gate. Routine implementation/debugging

@@ -17,7 +17,7 @@ from tools.policy import ToolDenied
 from tools.candidate_edit import digest, inspection_text, safe_text, scan
 from .database import timestamp
 
-ExecutionMode = Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW']
+ExecutionMode = Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW', 'CLAUDE_EXTERNAL_REVIEW']
 Phase = Literal['inspect', 'baseline', 'implement', 'apply', 'validate', 'review',
                 'commit', 'readiness', 'done']
 
@@ -25,7 +25,37 @@ Phase = Literal['inspect', 'baseline', 'implement', 'apply', 'validate', 'review
 def routes(mode):
     return {'CODEX_ONLY': ('codex_cli', 'claude_cli'),
             'CLAUDE_ONLY': ('claude_cli', 'codex_cli'),
-            'CODEX_BUILD_CLAUDE_REVIEW': ('codex_cli', 'claude_cli')}[mode]
+            'CODEX_BUILD_CLAUDE_REVIEW': ('codex_cli', 'claude_cli'),
+            # Explicit owner request only: Claude Code builds; no provider reviews.
+            'CLAUDE_EXTERNAL_REVIEW': ('claude_cli', EXTERNAL_REVIEWER)}[mode]
+
+
+EXTERNAL_REVIEWER = 'grok'
+EXTERNAL_VERDICT = 'external_review_required'
+
+
+def external_review(mode):
+    """The only mode without an automated provider review gate."""
+    return mode == 'CLAUDE_EXTERNAL_REVIEW'
+
+
+def record_external_review(s):
+    """Seal tested bytes for an outside reviewer; never a provider call or a PASS."""
+    r = s.record
+    fingerprint = s._diff()
+    if not r['files_changed'] or r['tested_fingerprint'] != fingerprint:
+        r.update(state='needs_revision', reviewer_result=None)
+        return s.store.save(r, 'review_requires_passing_tests')
+    if r.get('improvement'):
+        s._compare_baseline()
+        if r['improvement']['baseline_comparison']['result'] in {'not_run', 'not_compared', 'inconclusive', 'regressed'}:
+            r.update(state='needs_revision', reviewer_result=None)
+            return s.store.save(r, 'review_requires_baseline_comparison')
+    r.update(state='passed', failure=None, reviewed_at=timestamp(), reviewed_fingerprint=fingerprint,
+             reviewed_diff_hash=digest(r['diff'].encode()), reviewer_result=dict(
+                 verdict=EXTERNAL_VERDICT, reviewer=EXTERNAL_REVIEWER,
+                 summary='No automated review: external review by grok and owner approval are required.'))
+    s.store.save(r, 'external_review_recorded')
 
 
 class OperatorEvidence(StrictModel):
@@ -35,7 +65,7 @@ class OperatorEvidence(StrictModel):
     commit_sha: str | None = Field(default=None, pattern=r'^[0-9a-f]{40}$')
     ready: bool = False
     controller_validated: Literal[False] = False
-    review_verdict: Literal['passed', 'needs_revision', 'rejected'] | None = None
+    review_verdict: Literal['passed', 'needs_revision', 'rejected', 'external_review_required'] | None = None
     checkpoint_at: str | None = None
 
     @field_validator('checkpoint_at')
@@ -78,6 +108,9 @@ def owner_status(job):
                      if job.get('project_id') == 'jarvis-core' else 'Ready for the existing candidate apply path.')
         return (f"{label}: review PASS; candidate {op['commit_sha']} is prepared. "
                 + next_step + provider_status)
+    if op['ready'] and op['review_verdict'] == EXTERNAL_VERDICT and job['status'] == 'waiting_for_approval':
+        return (f"{label}: built by Claude Code; candidate {op['commit_sha']} is prepared. "
+                f"Review: external review by grok required, then owner approval.{provider_status}")
     return f"{label}: {op['mode']}, {op['phase']}. Review: {op['review_verdict'] or 'pending'}.{provider_status}"
 
 
@@ -235,7 +268,10 @@ def coordinate(s):
         if op['phase'] == 'review':
             # A crash after _review committed its result does not buy a re-review.
             if r.get('reviewed_fingerprint') != r['fingerprint'] or not r.get('reviewer_result'):
-                step(s, 'review', s._review, provider=reviewer)
+                if external_review(op['mode']):
+                    step(s, 'review', lambda: record_external_review(s))
+                else:
+                    step(s, 'review', s._review, provider=reviewer)
             review = r.get('reviewer_result')
             if not review:
                 return
@@ -243,7 +279,7 @@ def coordinate(s):
             if review['verdict'] == 'needs_revision':
                 checkpoint(s, 'implement', findings=review['findings'])
                 continue
-            if review['verdict'] != 'passed':
+            if review['verdict'] != ('passed', EXTERNAL_VERDICT)[external_review(op['mode'])]:
                 return
             checkpoint(s, 'commit')
     if op['phase'] == 'commit':

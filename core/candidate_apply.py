@@ -172,7 +172,8 @@ class CandidateApply:
         expected = r.get('reviewed_fingerprint')
         if (not expected or r.get('tested_fingerprint') != expected
                 or r.get('fingerprint') != expected or not r.get('reviewer_result')
-                or r['reviewer_result']['verdict'] != 'passed'
+                or r['reviewer_result']['verdict'] != ('external_review_required' if (r.get('operator') or {}).get(
+                    'mode') == 'CLAUDE_EXTERNAL_REVIEW' else 'passed')
                 or r.get('reviewed_diff_hash') != digest(expected_diff.encode())):
             raise ToolDenied('Review evidence is incomplete or changed')
         phases = [('targeted', r['targeted_tests']), ('full_python', ['tests'])]
