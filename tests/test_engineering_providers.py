@@ -227,7 +227,7 @@ def test_injected_adapter_is_operator_assisted_not_provider_autonomous(setup, mo
 
 
 @pytest.mark.parametrize('operation', ['inspect', 'tests', 'review'])
-def test_external_worktree_change_marks_operator_assisted(setup, monkeypatch, operation):
+def test_external_worktree_change_marks_operator_assisted(setup, monkeypatch, executable_script, operation):
     from core import self_edit
     from test_engineering import ARGS, model, run_checks
     from pathlib import Path
@@ -236,6 +236,11 @@ def test_external_worktree_change_marks_operator_assisted(setup, monkeypatch, op
         return model(payload, instructions, timeout)
     monkeypatch.setattr(self_edit, 'model_request', transport)
     monkeypatch.setenv('OPENAI_API_KEY', 'configured-test-key')
+    # Codex implements and Claude reviews only when both CLIs are installed;
+    # never depend on the host's real installs. The mocked transport runs neither.
+    for name in ('codex', 'claude'):
+        monkeypatch.setenv(f'JARVIS_{name.upper()}_EXECUTABLE',
+                           str(executable_script(f'fake-{name}', '#!/bin/sh\nexit 1\n')))
     service = factory(model=transport, tester=run_checks)
     candidate = service.engineer('Fix value', **ARGS)
     assert candidate['attribution']['outcome'] == 'multi_provider'

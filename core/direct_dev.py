@@ -751,10 +751,7 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=None, shard_sec
         preparation['tests'] = [{k: t[k] for k in ('phase', 'returncode', 'timed_out', 'truncated', 'backend')}
                                 for t in evidence]
         if 'full_python' in raw:
-            preparation['full_python_shards'] = [
-                {k: shard[k] for k in ('shard', 'paths', 'returncode', 'timed_out', 'truncated',
-                                       'elapsed_seconds', 'summary')}
-                for shard in raw['full_python'].sandbox['shards']]
+            preparation['full_python_shards'] = shard_summaries(raw['full_python'])
         if record.get('tested_fingerprint') != fingerprint:
             outcome = _attribute_failures(service, record, raw, shard_seconds)
             preparation.update(outcome)
@@ -845,6 +842,13 @@ def failing_tests(result):
     return found if found and not result.timed_out else None
 
 
+def shard_summaries(result):
+    """Per-shard time, outcome and pytest summary lines of a run_sharded result."""
+    return [{k: shard[k] for k in ('shard', 'paths', 'returncode', 'timed_out', 'truncated',
+                                   'elapsed_seconds', 'summary')}
+            for shard in (result.sandbox or {}).get('shards', [])]
+
+
 def _run(tester, repository, phase, paths):
     return (tester(repository, phase, paths) if tester else
             repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths))
@@ -857,12 +861,14 @@ def _attribute_failures(service, record, raw, shard_seconds):
     if any(result.timed_out for result in failed.values()):
         return dict(status='environment_blocked', reason='sandbox_time_limit', failing_tests=[])
     baseline = _baseline_results(service, record, failed, shard_seconds)
+    # The base commit's own shard outcomes, not just per-test flags: its output is not stored.
+    shards = dict(baseline_shards=shard_summaries(baseline['full_python'])) if 'full_python' in baseline else {}
     failing, unknown = [], False
     for phase, result in failed.items():
         mine, base = failing_tests(result), baseline[phase]
         if base.timed_out:
             return dict(status='environment_blocked', reason='sandbox_time_limit', failing_tests=[],
-                        baseline=dict(phase=phase, timed_out=True))
+                        baseline=dict(phase=phase, timed_out=True), **shards)
         theirs = failing_tests(base)
         if mine is None or theirs is None:
             unknown = True  # cannot show a failure is new, so it is not blamed on the candidate
@@ -870,8 +876,8 @@ def _attribute_failures(service, record, raw, shard_seconds):
         failing += [dict(phase=phase, test=test, pre_existing=test in theirs) for test in sorted(mine)]
     failing = failing[:50]
     if any(not item['pre_existing'] for item in failing):
-        return dict(status='tests_failed', reason='new_failures', failing_tests=failing)
-    return dict(status='environment_blocked', failing_tests=failing,
+        return dict(status='tests_failed', reason='new_failures', failing_tests=failing, **shards)
+    return dict(status='environment_blocked', failing_tests=failing, **shards,
                 reason='failures_unidentified' if unknown else 'pre_existing_failures_only')
 
 
