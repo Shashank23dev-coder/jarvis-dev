@@ -17,6 +17,17 @@ class Node {
         this.value = '';
         this.textContent = '';
         this.classList = { toggle() {}, add() {} };
+        this.scrollTop = 0;
+        this.scrollHeight = 0;
+        this.clientHeight = 0;
+        this.scrolls = [];
+    }
+    // Like the DOM: textContent includes descendants, and setting it replaces them.
+    get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
+    set textContent(value) { this.ownText = String(value); this.children = []; }
+    scrollTo(options) {
+        this.scrolls.push(options);
+        this.scrollTop = Math.max(0, Math.min(options.top, this.scrollHeight - this.clientHeight));
     }
     append(...nodes) { this.children.push(...nodes); }
     replaceChildren(...nodes) { this.children = nodes; }
@@ -25,7 +36,7 @@ class Node {
     addEventListener(key, callback) { this.listeners[key] = callback; }
     focus() { this.focused = true; }
 }
-function setup(fetch, savedConversation = null) {
+function setup(fetch, savedConversation = null, globals = {}) {
     const nodes = {};
     for (const match of html.matchAll(/id="([^"]+)"/g)) nodes[match[1]] = new Node();
     const nav = [...html.matchAll(/data-view="([^"]+)"/g)].map(match => {
@@ -34,6 +45,7 @@ function setup(fetch, savedConversation = null) {
     const document = {
         getElementById: id => nodes[id],
         createElement: tag => new Node(tag),
+        createTextNode: value => { const node = new Node('#text'); node.textContent = value; return node; },
         querySelectorAll: selector => selector === '[data-view]' ? nav : []
     };
     const saved = new Map(savedConversation ? [['jarvis.conversationId', savedConversation]] : []);
@@ -42,11 +54,20 @@ function setup(fetch, savedConversation = null) {
         setItem: (key, value) => saved.set(key, value),
         removeItem: key => saved.delete(key)
     };
-    const context = vm.createContext({ document, fetch, AbortController, localStorage, setInterval: () => 0 });
+    const context = vm.createContext({ document, fetch, AbortController, localStorage, setInterval: () => 0, ...globals });
     vm.runInContext(script, context);
     return { nodes, nav, saved, run: code => vm.runInContext(code, context) };
 }
 const text = node => [node.textContent, ...node.children.map(text)].join(' ');
+const descendants = node => node.children.flatMap(child => [child, ...descendants(child)]);
+const find = (node, tag) => descendants(node).filter(child => child.tagName === tag);
+// Gives the conversation log a height that grows with its text and a 200px viewport.
+function layout(ui) {
+    const log = ui.nodes.messages;
+    Object.defineProperty(log, 'scrollHeight', { get: () => log.textContent.length * 10 });
+    log.clientHeight = 200;
+    return log;
+}
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('UI contract keeps every view, navigation button, and runtime status label', () => {
@@ -155,7 +176,7 @@ test('chat submits once while pending, renders backend steps and refreshes the v
     resolveTask({ ok: true, json: async () => ({ goal: 'Build Jarvis', steps: [{ id: 1, description: 'Inspect code', agent: 'reviewer' }] }) });
     await sending;
     await tick();
-    assert.match(text(ui.nodes.messages), /1\. Inspect code \[reviewer\]/);
+    assert.deepEqual(find(ui.nodes.messages, 'li').map(item => item.textContent), ['Inspect code [reviewer]']);
     assert.equal(ui.nodes.prompt.value, 'Next draft');
     assert.equal(ui.nodes.sendBtn.disabled, false);
     assert.equal(ui.nodes.prompt.focused, undefined);
@@ -184,7 +205,7 @@ test('Assistant requests agent mode and renders the final answer as plain text',
     ui.nodes.prompt.value = 'Inspect files';
     await ui.run('sendTask()');
     assert.match(text(ui.nodes.messages), /Inspected two files\. <img src=x onerror=alert\(1\)>/);
-    assert.equal(ui.nodes.messages.children[1].children[0].children.length, 0);
+    assert.deepEqual(descendants(ui.nodes.messages.children[1].children[0]).map(node => node.tagName), ['p', '#text']);
     assert.equal(ui.nodes.sendBtn.disabled, false);
 });
 
@@ -335,4 +356,105 @@ test('failed task retains conversation ID from response headers', async () => {
     ui.nodes.prompt.value = 'Try';
     await ui.run('sendTask()');
     assert.equal(ui.saved.get('jarvis.conversationId'), 'failed-conversation');
+});
+
+test('Jarvis messages render headings, bold, italic, lists and code as Markdown', () => {
+    const ui = setup(async () => ({ ok: false }));
+    const message = ui.run(`addMessage("jarvis", ${JSON.stringify(
+        '# Summary\n\nThis is **bold**, *italic* and `npm test`.\n\n- first\n- second\n\n3. third\n4. fourth\n\n```js\nconst tag = "<b>";\n```')})`);
+    assert.equal(find(message, 'h3')[0].textContent, 'Summary');
+    assert.equal(find(message, 'strong')[0].textContent, 'bold');
+    assert.equal(find(message, 'em')[0].textContent, 'italic');
+    assert.deepEqual(find(message, 'ul')[0].children.map(item => item.textContent), ['first', 'second']);
+    const ordered = find(message, 'ol')[0];
+    assert.equal(ordered.start, 3);
+    assert.deepEqual(ordered.children.map(item => item.textContent), ['third', 'fourth']);
+    assert.equal(find(message, 'pre')[0].children[0].tagName, 'code');
+    assert.equal(find(message, 'pre')[0].textContent, 'const tag = "<b>";');
+    assert.deepEqual(find(message, 'code').map(code => code.textContent), ['npm test', 'const tag = "<b>";']);
+    assert.equal(ui.nodes.messages.children[0].children[1].className, 'jarvis-avatar');
+});
+
+test('HTML in Jarvis messages stays inert text and links stay plain', () => {
+    assert.doesNotMatch(script, /innerHTML/);
+    const ui = setup(async () => ({ ok: false }));
+    const message = ui.run(`addMessage("jarvis", ${JSON.stringify(
+        '<script>alert(1)</script> and <img src=x onerror=alert(1)> [docs](javascript:alert(1))')})`);
+    assert.deepEqual(descendants(message).map(node => node.tagName), ['p', '#text']);
+    assert.equal(message.textContent, '<script>alert(1)</script> and <img src=x onerror=alert(1)> [docs](javascript:alert(1))');
+});
+
+test('owner messages stay plain text', () => {
+    const ui = setup(async () => ({ ok: false }));
+    const message = ui.run('addMessage("user", "# Not a heading **not bold** <b>x</b>")');
+    assert.equal(message.children.length, 0);
+    assert.equal(message.textContent, '# Not a heading **not bold** <b>x</b>');
+    assert.equal(ui.nodes.messages.children[0].children.length, 1);
+});
+
+test('sending and answering scroll smoothly to the newest message', async () => {
+    let resolveTask;
+    const ui = setup(url => url === '/task'
+        ? new Promise(resolve => { resolveTask = resolve; })
+        : Promise.resolve({ ok: false }));
+    const log = layout(ui);
+    ui.nodes.prompt.value = 'Plan the next release for me';
+    const sending = ui.run('sendTask()');
+    assert.equal(log.scrolls.length, 2);
+    assert.deepEqual({ ...log.scrolls[1] }, { top: log.scrollHeight, behavior: 'smooth' });
+    assert.equal(log.scrollTop, log.scrollHeight - log.clientHeight);
+    resolveTask({ ok: true, json: async () => ({ response: '## Release plan\n\n1. Freeze the branch\n2. Run every test\n3. Ship it' }) });
+    await sending;
+    assert.equal(log.scrolls.length, 3);
+    assert.equal(log.scrolls[2].top, log.scrollHeight);
+    assert.equal(log.scrollTop, log.scrollHeight - log.clientHeight);
+    assert.equal(ui.nodes.jumpLatest.hidden, true);
+});
+
+test('restored history scrolls instantly to the newest message', async () => {
+    const ui = setup(async url => url === '/runtime' ? { ok: false } : { ok: true, json: async () => ({ messages: [
+        { role: 'user', content: 'What changed in the last release?' },
+        { role: 'assistant', content: 'The **orb** and the greeting header were added to the Assistant view.' }
+    ] }) }, 'conversation-1');
+    const log = layout(ui);
+    await tick();
+    assert.equal(log.children.length, 2);
+    assert.equal(log.scrolls.length, 1);
+    assert.deepEqual({ ...log.scrolls[0] }, { top: log.scrollHeight, behavior: 'auto' });
+    assert.equal(log.scrollTop, log.scrollHeight - log.clientHeight);
+});
+
+test('scrolled-up owner is not pulled down and can jump to latest', () => {
+    const ui = setup(async () => ({ ok: false }));
+    const log = layout(ui);
+    for (let i = 0; i < 6; i++) ui.run(`addMessage("jarvis", "Answer number ${i}")`);
+    log.listeners.scroll(); // the browser reports the programmatic scroll to the bottom
+    log.scrollTop = log.scrollHeight - log.clientHeight - 300;
+    log.listeners.scroll();
+    assert.equal(ui.nodes.jumpLatest.hidden, false);
+    const scrolls = log.scrolls.length;
+    const top = log.scrollTop;
+    ui.run('addMessage("jarvis", "A new answer arrives")');
+    assert.equal(log.scrolls.length, scrolls);
+    assert.equal(log.scrollTop, top);
+    assert.equal(ui.nodes.jumpLatest.hidden, false);
+    ui.nodes.jumpLatest.listeners.click();
+    assert.equal(log.scrolls.at(-1).top, log.scrollHeight);
+    assert.equal(log.scrollTop, log.scrollHeight - log.clientHeight);
+    log.listeners.scroll();
+    assert.equal(ui.nodes.jumpLatest.hidden, true);
+    log.scrollTop -= 60;
+    log.listeners.scroll();
+    assert.equal(ui.nodes.jumpLatest.hidden, true);
+    ui.run('addMessage("user", "Still following")');
+    assert.equal(log.scrolls.length, scrolls + 2);
+    assert.match(html, /\.jump-latest\s*\{[^}]*min-height:\s*44px/);
+});
+
+test('reduced motion scrolls instantly', () => {
+    const ui = setup(async () => ({ ok: false }), null,
+        { matchMedia: query => ({ matches: query === '(prefers-reduced-motion: reduce)' }) });
+    const log = layout(ui);
+    ui.run('addMessage("user", "Hello")');
+    assert.equal(log.scrolls.at(-1).behavior, 'auto');
 });

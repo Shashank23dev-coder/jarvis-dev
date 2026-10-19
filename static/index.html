@@ -443,7 +443,23 @@
     }
     .view-state, .data-card, .composer { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; backdrop-filter: blur(14px); }
     .jarvis-message { background: rgba(12,24,35,.82); border-color: rgba(79,209,232,.2); }
-    .user-message { background: #12677A; }
+    .user-message { color: #EAFBFF; background: rgba(79,209,232,.14); border: 1px solid rgba(79,209,232,.38); }
+    /* Conversation: a bounded log so the newest message can be scrolled into view. */
+    #assistantView { height: calc(100vh - 72px); height: calc(100dvh - 72px); min-height: 440px; }
+    #messages { min-height: 0; overscroll-behavior: contain; }
+    .jarvis-row { align-items: flex-start; gap: 10px; }
+    .jarvis-avatar { order: -1; flex: none; width: 28px; height: 28px; margin-top: 6px; border: 1px solid var(--cyan); border-radius: 50%; box-shadow: 0 0 10px rgba(79,209,232,.25), inset 0 0 0 5px rgba(79,209,232,.12); }
+    .jarvis-message { white-space: normal; }
+    .jarvis-message > :first-child { margin-top: 0; }
+    .jarvis-message > :last-child { margin-bottom: 0; }
+    .jarvis-message p { margin: 0 0 10px; white-space: pre-wrap; }
+    .jarvis-message h3, .jarvis-message h4, .jarvis-message h5, .jarvis-message h6 { margin: 14px 0 8px; font-family: 'Chakra Petch', system-ui, sans-serif; line-height: 1.3; color: #F4FAFC; }
+    .jarvis-message ul, .jarvis-message ol { margin: 0 0 10px; padding-left: 22px; }
+    .jarvis-message li + li { margin-top: 4px; }
+    .jarvis-message code { padding: 1px 5px; border-radius: 5px; font-size: 12.5px; background: rgba(79,209,232,.1); }
+    .jarvis-message pre { margin: 0 0 10px; padding: 12px 14px; overflow-x: auto; white-space: pre; border: 1px solid var(--line); border-radius: 10px; background: rgba(2,6,11,.75); }
+    .jarvis-message pre code { padding: 0; background: none; }
+    .jump-latest { align-self: center; position: relative; z-index: 1; min-height: 44px; margin: -60px 0 16px; padding: 0 18px; font: inherit; font-size: 13px; font-weight: 600; color: var(--ground); background: var(--cyan); border: 0; border-radius: 22px; box-shadow: 0 6px 18px rgba(0,0,0,.35); cursor: pointer; }
     .composer:focus-within { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(79,209,232,.12); }
     textarea::placeholder { color: #A5B4C0; }
     .small-button, .mobile-nav { min-height: 44px; color: #D2E0E7; background: rgba(10,19,29,.9); border: 1px solid rgba(79,209,232,.3); border-radius: 10px; }
@@ -581,6 +597,7 @@
 
 
       <div id="messages" role="log" aria-label="Conversation" aria-live="polite"></div>
+      <button id="jumpLatest" class="jump-latest" type="button" hidden>Jump to latest</button>
 
 
       <div class="composer-wrapper">
@@ -703,6 +720,11 @@ const runtimeStatus = document.getElementById("runtimeStatus");
 const coreOrb = document.getElementById("coreOrb");
 const coreLabel = document.getElementById("coreLabel");
 const coreStates = { idle: "STANDING BY", listening: "LISTENING", thinking: "THINKING", working: "WORKING", needs_you: "NEEDS YOU", done: "DONE" };
+const jumpLatest = document.getElementById("jumpLatest");
+// The owner keeps following new messages unless they have scrolled up further than this.
+const FOLLOW_THRESHOLD = 120;
+let autoScrolling = true;
+let lastScrollTop = 0;
 let activeView = "assistant";
 let conversationId = null;
 try { conversationId = localStorage.getItem("jarvis.conversationId"); } catch (_) {}
@@ -749,7 +771,7 @@ async function restoreConversation() {
         if (response.status === 404) { rememberConversation(null); return; }
         if (!response.ok) return;
         const data = await response.json();
-        if (Array.isArray(data.messages)) data.messages.forEach(message => addMessage(message.role, message.content));
+        if (Array.isArray(data.messages)) keepLatestVisible(() => data.messages.forEach(message => addMessage(message.role, message.content, false)), true);
     } catch (_) {
         // Keep the ID so a temporary outage cannot silently split the conversation.
     } finally { sendBtn.disabled = false; }
@@ -768,6 +790,7 @@ function showView(name) {
         else button.removeAttribute("aria-current");
     });
     document.getElementById("mobileNav").value = name;
+    if (name === "assistant" && followingLatest()) scrollToLatest(true);
     if (name === "tasks" || name === "activity") loadView(name);
 }
 
@@ -863,13 +886,115 @@ async function loadView(name) {
     }
 }
 
-function addMessage(role, text) {
+// Safe Markdown subset for Jarvis messages: DOM nodes and textContent only, never raw HTML.
+const INLINE_MARKDOWN = /`([^`\n]+)`|\*\*(.+?)\*\*|__(.+?)__|\*(?![\s*])(.+?)\*|(?<![\w_])_(?![\s_])(.+?)_(?![\w_])/g;
+
+function renderInline(parent, text) {
+    let last = 0;
+    for (const match of text.matchAll(INLINE_MARKDOWN)) {
+        if (match.index > last) parent.append(document.createTextNode(text.slice(last, match.index)));
+        if (match[1] !== undefined) parent.append(element("code", "", match[1]));
+        else {
+            const node = element(match[2] !== undefined || match[3] !== undefined ? "strong" : "em");
+            renderInline(node, match[2] ?? match[3] ?? match[4] ?? match[5]);
+            parent.append(node);
+        }
+        last = match.index + match[0].length;
+    }
+    if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+}
+
+function renderMarkdown(container, source) {
+    container.replaceChildren();
+    const lines = String(source ?? "").replace(/\r\n?/g, "\n").split("\n");
+    let paragraph = [];
+    let list = null;
+    let listTag = "";
+    const flush = () => {
+        if (paragraph.length) {
+            const p = element("p");
+            renderInline(p, paragraph.join("\n"));
+            container.append(p);
+        }
+        paragraph = [];
+        list = null;
+    };
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const fence = line.match(/^\s*(```|~~~)/);
+        const heading = line.match(/^(#{1,6})\s+(.*)$/);
+        const item = line.match(/^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$/);
+        if (fence) {
+            flush();
+            const code = [];
+            while (++i < lines.length && !lines[i].trim().startsWith(fence[1])) code.push(lines[i]);
+            const pre = element("pre");
+            pre.append(element("code", "", code.join("\n")));
+            container.append(pre);
+        } else if (heading) {
+            flush();
+            const node = element("h" + Math.min(heading[1].length + 2, 6));
+            renderInline(node, heading[2]);
+            container.append(node);
+        } else if (item) {
+            const tag = item[1] ? "ul" : "ol";
+            if (!list || listTag !== tag) {
+                flush();
+                list = element(tag);
+                listTag = tag;
+                if (item[2] && item[2] !== "1") list.start = Number(item[2]);
+                container.append(list);
+            }
+            const entry = element("li");
+            renderInline(entry, item[3]);
+            list.append(entry);
+        } else if (!line.trim()) {
+            flush();
+        } else {
+            list = null;
+            paragraph.push(line);
+        }
+    }
+    flush();
+}
+
+function distanceFromLatest() {
+    return messages.scrollHeight - messages.scrollTop - messages.clientHeight;
+}
+
+function followingLatest() {
+    return autoScrolling || distanceFromLatest() <= FOLLOW_THRESHOLD;
+}
+
+function scrollToLatest(instant = false) {
+    autoScrolling = true;
+    jumpLatest.hidden = true;
+    const reduceMotion = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    messages.scrollTo({ top: messages.scrollHeight, behavior: instant || reduceMotion ? "auto" : "smooth" });
+}
+
+// Applies a change to the log, then follows the newest message unless the owner scrolled away.
+function keepLatestVisible(update, instant = false) {
+    const follow = followingLatest();
+    update();
+    if (follow) scrollToLatest(instant);
+    else jumpLatest.hidden = false;
+}
+
+function addMessage(role, text, follow = true) {
     welcome.style.display = "none";
-    const row = element("div", role === "user" ? "message-row user-row" : "message-row");
-    const message = element("div", role === "user" ? "message user-message" : "message jarvis-message", text);
+    const user = role === "user";
+    const row = element("div", user ? "message-row user-row" : "message-row jarvis-row");
+    const message = element("div", user ? "message user-message" : "message jarvis-message", user ? text : undefined);
     row.append(message);
-    messages.append(row);
-    messages.scrollTop = messages.scrollHeight;
+    if (!user) {
+        renderMarkdown(message, text);
+        const avatar = element("span", "jarvis-avatar");
+        avatar.setAttribute("aria-hidden", "true");
+        row.append(avatar);
+    }
+    if (follow) keepLatestVisible(() => messages.append(row));
+    else messages.append(row);
     return message;
 }
 
@@ -890,17 +1015,15 @@ async function sendTask() {
         const data = await response.json();
         const id = data.conversation_id || response.headers?.get("X-Conversation-ID");
         if (id) rememberConversation(id);
-        waiting.textContent = response.ok ? formatPlan(data.plan || data) : (typeof data.detail === "string" ? data.detail : "Something went wrong.");
+        const answer = response.ok ? formatPlan(data.plan || data) : (typeof data.detail === "string" ? data.detail : "Something went wrong.");
+        keepLatestVisible(() => renderMarkdown(waiting, answer));
         setCoreState(response.ok ? "done" : "idle");
     } catch (error) {
-        waiting.textContent = "Unable to reach Jarvis backend.";
+        keepLatestVisible(() => renderMarkdown(waiting, "Unable to reach Jarvis backend."));
         setCoreState("idle");
     } finally {
         sendBtn.disabled = false;
-        if (activeView === "assistant") {
-            messages.scrollTop = messages.scrollHeight;
-            promptBox.focus();
-        }
+        if (activeView === "assistant") promptBox.focus();
         if (activeView === "tasks" || activeView === "activity") loadView(activeView);
     }
 }
@@ -919,6 +1042,14 @@ document.querySelectorAll("[data-view]").forEach(button => button.addEventListen
 document.querySelectorAll("[data-refresh]").forEach(button => button.addEventListener("click", () => loadView(button.dataset.refresh)));
 document.querySelectorAll("[data-open-assistant]").forEach(button => button.addEventListener("click", () => showView("assistant")));
 document.getElementById("mobileNav").addEventListener("change", event => showView(event.target.value));
+messages.addEventListener("scroll", () => {
+    // Programmatic scrolls only move down, so any upward movement is the owner taking over.
+    if (messages.scrollTop < lastScrollTop) autoScrolling = false;
+    lastScrollTop = messages.scrollTop;
+    if (distanceFromLatest() <= 1) autoScrolling = false;
+    jumpLatest.hidden = followingLatest();
+});
+jumpLatest.addEventListener("click", () => scrollToLatest());
 promptBox.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
