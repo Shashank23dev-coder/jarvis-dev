@@ -153,6 +153,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
       padding: 0 32px;
     }
 
@@ -322,6 +323,8 @@
       gap: 8px;
     }
 
+    .logout-form { margin: 0; flex: none; }
+
     .small-button {
       background: transparent;
       border: 1px solid rgba(255,255,255,0.08);
@@ -448,6 +451,8 @@
     textarea::placeholder { color: #A5B4C0; }
     .small-button, .mobile-nav { min-height: 44px; color: #D2E0E7; background: rgba(10,19,29,.9); border: 1px solid rgba(79,209,232,.3); border-radius: 10px; }
     .small-button:hover { color: white; border-color: var(--cyan); }
+    .logout-button { min-height: 44px; padding: 0 16px; color: var(--ink); background: var(--panel); border-color: var(--line); }
+    .logout-button:hover { color: var(--ground); background: var(--cyan); border-color: var(--cyan); }
     .send-button { min-height: 44px; height: 44px; background: #08758A; }
     .send-button:hover { background: #0B899F; }
     button:focus-visible, select:focus-visible { outline-color: var(--cyan); }
@@ -542,6 +547,10 @@
       <div id="runtimeStatus" class="status-value">
         Unavailable
       </div>
+
+      <form method="post" action="/logout" class="logout-form">
+        <button type="submit" class="small-button logout-button">Log out</button>
+      </form>
 
     </div>
 

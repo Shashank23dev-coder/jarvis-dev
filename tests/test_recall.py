@@ -236,9 +236,9 @@ def test_search_apis_are_bounded_and_production_authenticated(production):
         store.memory.create_memory(scope='user', scope_id='local', content='SQLite nightly backup')
         for url in ('/conversations/search?q=SQLite', '/conversations/recent', '/memories/search?q=SQLite'):
             assert client.get(url).status_code == 401
-            result = client.get(url, auth=('jarvis', production['JARVIS_AUTH_TOKEN']))
+            result = client.get(url, headers={'Authorization': 'Bearer ' + production['JARVIS_AUTH_TOKEN']})
             assert result.status_code == 200 and result.json()['results']
-        client.auth = ('jarvis', production['JARVIS_AUTH_TOKEN'])
+        client.headers['Authorization'] = 'Bearer ' + production['JARVIS_AUTH_TOKEN']
         assert client.get('/conversations/search', params={'q': 'SQLite', 'conversation_id': task['conversation_id']}).json()['results']
         assert client.get('/memories/search?q=SQLite&scope=user&scope_id=missing').json()['results'] == []
         for url in ('/conversations/search?q=SQLite&limit=1000', '/conversations/search?q=SQLite&max_bytes=999999',

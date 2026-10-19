@@ -64,20 +64,32 @@ and candidate/apply APIs, require authentication. `/health` alone is unauthentic
 and returns only `{"status":"ok"}` or a generic 503. It checks database access;
 it does not call OpenAI or certify Bubblewrap availability.
 
-Browsers use their native HTTP Basic challenge: username `jarvis`, password the
-random token. This fixed username grants nothing without the secret token. API
-clients may instead send `Authorization: Bearer <token>`. Tokens are compared using
-constant-time digest comparison, never URLs, cookies or local storage. There are
-no built-in/default credentials or persistent sessions. Browser credentials may
-be cached until the browser closes; rotate the token and recreate the container
-to revoke access. Do not use a memorable human password in place of a random token.
+Browsers sign in on `/login`: a small server-rendered form (username and password,
+password-manager friendly, no scripts) with a CSRF cookie (`__Host-jarvis_csrf`) and an
+exact `Origin` check. Only `JARVIS_OWNER_LOGIN_HASH` is stored, in the private env
+file: `scrypt$<n>$<r>$<p>$<salt>$<hash>` over NFKC(lowercased username) + NUL +
+NFKC(password); production requires n>=2**15, r=8, p=1, a 16-byte salt and 32-byte
+hash. Set it with `python3 -m core.owner_login set --env-file PATH` (prompts without
+echo, atomic write, refuses symlinks and files that are not mode 600, prints only
+"Login hash saved."). A successful login creates a server-side session in the Jarvis
+SQLite file (only its sha256, a 14-day absolute expiry and a fingerprint of the
+current hash, so changing the password logs every session out) and sets
+`__Host-jarvis_session` (Secure, HttpOnly, SameSite=Strict, Path=/). `POST /logout`
+deletes it. After 5 consecutive failures login locks for 60 s, doubling per further
+5 failures up to 15 minutes (429, password not checked); the counter is persistent
+and a success resets it. Unauthenticated `GET`/`HEAD /` navigations redirect to
+`/login`; every other unauthenticated request gets 401 JSON. There is no HTTP
+Basic and no `WWW-Authenticate` challenge. API clients and the release tool send
+`Authorization: Bearer <JARVIS_AUTH_TOKEN>` (constant-time digest comparison).
+Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` require `Origin` to equal
+`JARVIS_PUBLIC_ORIGIN`; a missing Origin is refused.
 
 Host validation uses the configured origin. After authentication, any explicit
 `Origin` must exactly equal `JARVIS_PUBLIC_ORIGIN`, even for safe navigation;
 `null`, other origins, and trailing-slash variants are rejected. Requests marked
 `Sec-Fetch-Site: cross-site` are rejected except for `GET`/`HEAD` to the UI root `/`
 with both `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`. This permits
-opening Jarvis from an external link after the Basic challenge, while cross-site
+opening Jarvis from an external link, while cross-site
 API reads, fetches, frames, and all state-changing methods remain blocked. Missing
 or inconsistent navigation metadata does not qualify for the exception. The UI
 root serves only the static document and does not mutate state.
@@ -87,7 +99,7 @@ CLI/API compatibility; headers are browser CSRF signals, not credentials or a
 defense against non-browser clients that already possess the token. A forged
 navigation tuple cannot exempt an API route, unsafe method, or mismatched Origin.
 Responses use `no-store` and anti-framing headers. Forwarded headers are not trusted; Caddy preserves Host
-and Authorization. Always use HTTPS remotely: Basic/Bearer credentials must not
+and Authorization. Always use HTTPS remotely: session cookies and Bearer tokens must not
 cross an unencrypted network. Keep the backend port loopback-only and preserve
 these checks when introducing another proxy. Put any additional rate limiting
 or identity-aware access proxy in front; do not replace app authentication with

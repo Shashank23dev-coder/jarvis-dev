@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import functools
 import secrets
 
 from fastapi.testclient import TestClient
@@ -12,18 +13,35 @@ import pytest
 import main
 from core.candidate_store import CandidateStore
 from core.deployment import Settings, JsonFormatter
+from core import owner_login
 from tools.candidate_edit import CandidatePolicy
 from tools import ToolDenied
 from test_self_edit import setup
+
+
+OWNER_USERNAME, OWNER_PASSWORD = 'Owner', 'correct horse battery'
+
+
+@functools.cache
+def owner_hash():
+    # Real production-grade parameters (n=2**15, r=8, p=1), computed once.
+    return owner_login.make_hash(OWNER_USERNAME, OWNER_PASSWORD)
 
 
 @pytest.fixture
 def production(tmp_path):
     return {'JARVIS_MODE': 'production', 'OPENAI_API_KEY': 'test-provider-key',
             'JARVIS_AUTH_TOKEN': secrets.token_urlsafe(32),
+            'JARVIS_OWNER_LOGIN_HASH': owner_hash(),
             'JARVIS_PUBLIC_ORIGIN': 'https://jarvis.example.com',
             'JARVIS_STATE_DIR': str(tmp_path / 'state'),
             'JARVIS_DB_PATH': str(tmp_path / 'state/jarvis.sqlite3')}
+
+
+def browser_session(client, settings):
+    """Give a TestClient a real server-side owner session (as after /login)."""
+    client.cookies.set(owner_login.SESSION_COOKIE,
+                       owner_login.LoginStore(settings.database_path).succeed(settings.owner_login_hash))
 
 
 @pytest.mark.parametrize('field,value', [
@@ -55,20 +73,40 @@ def test_all_sensitive_routes_require_authentication(production, path):
     with TestClient(main.create_app(settings=Settings.from_env(production)), base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
         response = client.get(path)
         assert response.status_code == 401
-        assert response.headers['www-authenticate'].startswith('Basic')
+        assert response.json() == {'detail': 'Authentication required'}
+        assert 'www-authenticate' not in response.headers
         assert response.headers['cache-control'] == 'no-store'
         assert client.get(path, headers={'Authorization': 'Bearer wrong'}).status_code == 401
 
 
-@pytest.mark.parametrize('header', ['Basic invalid', 'Basic /w==', 'Basic ' + base64.b64encode(b'wrong:wrong').decode()])
+@pytest.mark.parametrize('header', ['Basic invalid', 'Basic /w==', 'Basic ' + base64.b64encode(b'wrong:wrong').decode(),
+                                    'Bearer', 'Bearer ', 'Token abc', 'basic'])
 def test_malformed_auth_fails_closed(production, header):
     with TestClient(main.create_app(settings=Settings.from_env(production)), base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
-        assert client.get('/', headers={'Authorization': header}).status_code == 401
+        response = client.get('/', headers={'Authorization': header})
+        assert response.status_code == 401 and 'www-authenticate' not in response.headers
 
 
-def test_basic_browser_and_bearer_api_auth_and_csrf(production):
-    with TestClient(main.create_app(settings=Settings.from_env(production)), base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
-        assert client.get('/', auth=('jarvis', production['JARVIS_AUTH_TOKEN'])).status_code == 200
+def test_http_basic_is_removed_even_with_the_right_token(production):
+    # The old popup login (username jarvis, password = token) no longer authenticates.
+    settings = Settings.from_env(production)
+    basic = 'Basic ' + base64.b64encode(('jarvis:' + production['JARVIS_AUTH_TOKEN']).encode()).decode()
+    with TestClient(main.create_app(settings=settings), base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
+        for path in ('/', '/tasks', '/conversations'):
+            response = client.get(path, headers={'Authorization': basic})
+            assert response.status_code == 401 and 'www-authenticate' not in response.headers
+        # A valid session cannot rescue a request that also carries a bad Authorization header.
+        browser_session(client, settings)
+        assert client.get('/tasks', headers={'Authorization': basic}).status_code == 401
+        assert client.get('/tasks').status_code == 200
+
+
+def test_session_browser_and_bearer_api_auth_and_csrf(production):
+    settings = Settings.from_env(production)
+    with TestClient(main.create_app(settings=settings), base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
+        browser_session(client, settings)
+        assert client.get('/').status_code == 200
+        client.cookies.clear()
         headers = {'Authorization': 'Bearer ' + production['JARVIS_AUTH_TOKEN']}
         assert client.get('/tasks', headers=headers).status_code == 200
         assert client.post('/conversations', headers=headers).status_code == 200
@@ -81,16 +119,19 @@ def test_basic_browser_and_bearer_api_auth_and_csrf(production):
 
 
 @pytest.mark.parametrize('method', ['GET', 'HEAD'])
-def test_cross_site_top_level_ui_navigation_after_basic_auth(production, method):
+def test_cross_site_top_level_ui_navigation_after_login(production, method):
     headers = {'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate',
                'Sec-Fetch-Dest': 'document'}
-    with TestClient(main.create_app(settings=Settings.from_env(production)),
+    settings = Settings.from_env(production)
+    with TestClient(main.create_app(settings=settings), follow_redirects=False,
                     base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
-        assert client.request(method, '/', headers=headers).status_code == 401
-        assert client.request(method, '/', headers=headers, auth=('jarvis', 'wrong')).status_code == 401
-        assert client.request(method, '/', headers={**headers, 'Host': 'evil.example'},
-                              auth=('jarvis', production['JARVIS_AUTH_TOKEN'])).status_code == 400
-        response = client.request(method, '/', headers=headers, auth=('jarvis', production['JARVIS_AUTH_TOKEN']))
+        unauthenticated = client.request(method, '/', headers=headers)
+        assert unauthenticated.status_code == 303 and unauthenticated.headers['location'] == '/login'
+        client.cookies.set(owner_login.SESSION_COOKIE, secrets.token_urlsafe(32))
+        assert client.request(method, '/', headers=headers).status_code == 303
+        browser_session(client, settings)
+        assert client.request(method, '/', headers={**headers, 'Host': 'evil.example'}).status_code == 400
+        response = client.request(method, '/', headers=headers)
         assert response.status_code == 200
         assert response.headers['content-type'].startswith('text/html')
         assert response.headers['cache-control'] == 'no-store'
@@ -103,10 +144,11 @@ def test_cross_site_top_level_ui_navigation_after_basic_auth(production, method)
 def test_authenticated_same_origin_browser_requests(production, method, path):
     headers = {'Origin': production['JARVIS_PUBLIC_ORIGIN'], 'Sec-Fetch-Site': 'same-origin',
                'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty'}
-    with TestClient(main.create_app(settings=Settings.from_env(production)),
+    settings = Settings.from_env(production)
+    with TestClient(main.create_app(settings=settings),
                     base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
-        assert client.request(method, path, headers=headers,
-                              auth=('jarvis', production['JARVIS_AUTH_TOKEN'])).status_code == 200
+        browser_session(client, settings)
+        assert client.request(method, path, headers=headers).status_code == 200
 
 
 @pytest.mark.parametrize('method,path,metadata', [
@@ -134,10 +176,11 @@ def test_authenticated_same_origin_browser_requests(production, method, path):
 ])
 def test_cross_site_unsafe_or_non_navigation_requests_are_blocked(production, method, path, metadata):
     headers = {'Sec-Fetch-Site': 'cross-site', **metadata}
-    with TestClient(main.create_app(settings=Settings.from_env(production)),
+    settings = Settings.from_env(production)
+    with TestClient(main.create_app(settings=settings),
                     base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
-        response = client.request(method, path, headers=headers,
-                                  auth=('jarvis', production['JARVIS_AUTH_TOKEN']))
+        browser_session(client, settings)
+        response = client.request(method, path, headers=headers)
         assert response.status_code == 403
         if method == 'HEAD':
             assert response.content == b''
@@ -152,10 +195,11 @@ def test_cross_site_unsafe_or_non_navigation_requests_are_blocked(production, me
 def test_explicit_mismatched_origin_cannot_be_overridden_by_fetch_metadata(production, origin, method, path, site):
     headers = {'Origin': origin, 'Sec-Fetch-Site': site,
                'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}
-    with TestClient(main.create_app(settings=Settings.from_env(production)),
+    settings = Settings.from_env(production)
+    with TestClient(main.create_app(settings=settings),
                     base_url=production['JARVIS_PUBLIC_ORIGIN']) as client:
-        assert client.request(method, path, headers=headers,
-                              auth=('jarvis', production['JARVIS_AUTH_TOKEN'])).status_code == 403
+        browser_session(client, settings)
+        assert client.request(method, path, headers=headers).status_code == 403
 
 
 def test_health_is_minimal_and_checks_database(production, monkeypatch):

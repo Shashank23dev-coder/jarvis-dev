@@ -17,6 +17,9 @@ from .deployment import Settings
 DOCKER = ['/usr/bin/docker', '--host=unix:///var/run/docker.sock']
 FIXED_ENV = dict(JARVIS_MODE='production', JARVIS_HOST='0.0.0.0', JARVIS_PORT='8000',
                  JARVIS_STATE_DIR='/var/lib/jarvis', JARVIS_DB_PATH='/var/lib/jarvis/jarvis.sqlite3')
+REQUIRED_SECRETS = ('OPENAI_API_KEY', 'JARVIS_AUTH_TOKEN', 'JARVIS_PUBLIC_ORIGIN')
+# Optional: older images simply ignore it, so restore/rollback keeps working.
+OWNER_LOGIN = 'JARVIS_OWNER_LOGIN_HASH'
 
 
 class DockerRuntime:
@@ -70,7 +73,9 @@ finally:
         if path.resolve() != path or not path.is_file() or path.stat().st_mode & 0o077:
             raise ToolDenied('Production env file must be private and non-symlinked')
         raw = dotenv_values(path, interpolate=False)
-        env = {key: raw.get(key) for key in ('OPENAI_API_KEY', 'JARVIS_AUTH_TOKEN', 'JARVIS_PUBLIC_ORIGIN')}
+        env = {key: raw.get(key) for key in REQUIRED_SECRETS}
+        if OWNER_LOGIN in raw:
+            env[OWNER_LOGIN] = raw[OWNER_LOGIN]
         if any(not value or '\n' in value or '\r' in value or '\x00' in value for value in env.values()):
             raise ToolDenied('Invalid production environment')
         Settings.from_env({**env, **FIXED_ENV})
@@ -83,7 +88,7 @@ finally:
                 encoded = encoded.replace(json.dumps(value)[1:-1], '[redacted]')
         return json.loads(encoded)
 
-    def security(self, info, volume, port):
+    def security(self, info, volume, port, *, new=False):
         host, config = info['HostConfig'], info['Config']
         bindings = host.get('PortBindings')
         mounts = info['Mounts']
@@ -107,7 +112,14 @@ finally:
         environment = dict(item.split('=', 1) for item in config['Env'])
         if any(environment.get(k) != v for k, v in FIXED_ENV.items()):
             raise ToolDenied('Production state configuration mismatch')
-        if any(environment.get(k) != v for k, v in self.secrets().items()):
+        secrets = self.secrets()
+        # Handover: a running (or retained rollback) container is compared on the
+        # three original keys only, so one started before the owner login existed
+        # still passes. A container this tool just started must also carry the
+        # file's owner login hash exactly (or lack it when the file lacks it).
+        if any(environment.get(k) != secrets[k] for k in REQUIRED_SECRETS):
+            raise ToolDenied('Production env differs from configured secret file; reconcile separately')
+        if new and environment.get(OWNER_LOGIN) != secrets.get(OWNER_LOGIN):
             raise ToolDenied('Production env differs from configured secret file; reconcile separately')
 
     def current(self):
@@ -142,7 +154,7 @@ finally:
         return image
 
     def run(self, name, image, volume, port, release_id):
-        # Only three existing production values enter a private transient env file.
+        # Only the existing production values (plus the optional owner login hash) enter a private transient env file.
         # They never enter argv, build context, journal, API results or logs.
         with tempfile.NamedTemporaryFile(mode='w', prefix='jarvis-runtime-env-') as stream:
             for key, value in self.secrets().items():
@@ -160,7 +172,7 @@ finally:
                 args += ['--env', key + '=' + value]
             self.docker(*args, image, timeout=60)
         info = self.inspect_container(name)
-        self.security(info, volume, port)
+        self.security(info, volume, port, new=True)
         if info['Image'] != image:
             raise ToolDenied('Image identity mismatch')
 

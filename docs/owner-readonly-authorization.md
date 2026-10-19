@@ -36,7 +36,7 @@ Evidence: `/tmp/jarvis-owner-readonly-before.json`.
 | Stage / gate | Before behavior | Live result |
 | --- | --- | --- |
 | Browser Assistant | Sends goal, agent mode and optional conversation ID to `/task` | Exact goal submitted through this endpoint |
-| `DeploymentMiddleware` | Checks host, owner Bearer/Basic token and same origin | Passed; missing/invalid auth returns 401 |
+| `DeploymentMiddleware` | Checks host, owner Bearer token or login session, and same origin | Passed; missing/invalid auth returns 401 |
 | Owner context | Issues in-process `OwnerDevAuthority`; sync endpoint inherits ContextVar | Passed; JSON/model text cannot authenticate |
 | `main.create_task` | Validates goal/conversation existence and persists task | Passed; conversation existence is continuity, not project permission |
 | Orchestrator / Brain | Pins provider; runner retains execution authority | Passed with enabled OpenAI route |
