@@ -342,6 +342,13 @@ class EngineeringJobs:
                 return job
         return None
 
+    def queued(self):
+        """Whether claim() has a queued job to run; apply preparation yields to it between shards."""
+        with self.database.transaction() as db:
+            rows = db.execute("SELECT record FROM engineering_jobs WHERE json_extract(record, '$.status') = 'queued'")
+            return any(job['attempts'] < job.get('attempt_limit', MAX_ATTEMPTS)
+                       for job in (json.loads(row[0]) for row in rows.fetchall()))
+
     def advance(self, identifier, owner, status):
         """Record the live stage of a claimed job. The lease is deliberately not renewed."""
         if status not in {'implementing', 'testing', 'reviewing'}:
