@@ -376,7 +376,7 @@ def test_real_post_apply_shards_in_the_sandbox(setup, monkeypatch):
     candidate = sharded_candidate(setup)
     monkeypatch.setenv('JARVIS_PREPARE_SHARD_SECONDS', '300')
     result = CandidateApply(factory(tester=None)).apply(candidate['id'], confirmation(candidate['id']))['apply']
-    assert result['status'] == 'applied', (result.get('error'), [
+    assert result['status'] == 'applied', (result.get('error'), result.get('failure_code'), [
         (t['phase'], t['returncode'], t['timed_out'], t['truncated'], t['stdout'][-800:], t['stderr'][-800:],
          t['sandbox']) for t in result['verification']])
     evidence = next(t for t in result['verification'] if t['phase'] == 'full_python')
@@ -384,6 +384,20 @@ def test_real_post_apply_shards_in_the_sandbox(setup, monkeypatch):
     assert [(s['paths'], s['returncode'], s['summary'][-1:]) for s in shards] == [
         (paths, 0, ['1 passed']) for paths in SHARD_PATHS]
     assert all(0 < s['sandbox']['limits']['wall_seconds'] <= 300 for s in shards)
+
+
+def test_unavailable_sandbox_rolls_back_with_its_failure_code(setup, monkeypatch):
+    # Real select_backend: the image is missing on a Docker host, Docker itself inside the sandbox.
+    from tools import sandbox
+    source, _, factory = setup
+    candidate = start(factory())
+    monkeypatch.setattr(sandbox, 'IMAGE', 'jarvis-sandbox:missing-' + uuid4().hex)
+    result = CandidateApply(factory(tester=None)).apply(candidate['id'], confirmation(candidate['id']))['apply']
+    assert result['status'] == 'rolled_back' and result['rollback'] and result['verification'] == []
+    assert (result['error'], result['failure_code']) == ('Apply or post-apply verification failed',
+                                                         'sandbox_unavailable')
+    assert (source / 'src/app.py').read_text() == 'value = 1\n'
+    assert git(source, 'status', '--porcelain') == ''
 
 
 def test_previous_turn_approval_does_not_authorize_current_chat(setup):
