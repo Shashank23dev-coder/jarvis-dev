@@ -1,7 +1,9 @@
 """Fixed dev-only engineering executor; no shell, apply or deployment interface."""
+from contextlib import contextmanager
 import fcntl
 import os
 from pathlib import Path
+import threading
 import time
 from uuid import uuid4
 
@@ -10,6 +12,31 @@ from .database import Database
 from .engineering_jobs import EngineeringJobs
 from .self_edit import SelfEditService
 from tools.policy import ToolDenied
+
+# Runtime reports the worker inactive 20 s after its last heartbeat unless a job lease is live;
+# apply preparation runs under no job lease.
+HEARTBEAT_SECONDS = 5
+
+
+@contextmanager
+def heartbeat(jobs):
+    """Refresh the worker heartbeat from a thread while a long step runs outside any job lease."""
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(HEARTBEAT_SECONDS):
+            try:
+                jobs.heartbeat()
+            except Exception:
+                pass  # a missed beat only makes runtime report stale status; never stop the step
+    thread = threading.Thread(target=beat, name='engineering-heartbeat', daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+        jobs.heartbeat()
 
 
 class EngineeringWorker:
@@ -46,7 +73,11 @@ class EngineeringWorker:
                     pending = pending_preparation(self.service)
                     if pending:
                         job, _ = pending
-                        prepare_for_apply(development_service(self.service, job.get('project_id')), self.jobs, job)
+                        # Preparation holds this lock for up to its whole budget: it pauses
+                        # between shards for any queued job and resumes on a later idle pass.
+                        with heartbeat(self.jobs):
+                            prepare_for_apply(development_service(self.service, job.get('project_id')), self.jobs,
+                                              job, pause=self.jobs.queued)
                         return self.jobs.get(job['id'])
                 return None
             candidate = None

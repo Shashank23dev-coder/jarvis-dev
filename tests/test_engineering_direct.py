@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -616,6 +617,176 @@ def test_a_timed_out_shard_stops_the_run_as_an_environment_limit(setup, agents, 
     assert (preparation['status'], preparation['reason']) == ('environment_blocked', 'sandbox_time_limit')
     assert [(s['shard'], s['timed_out']) for s in preparation['full_python_shards']] == [('python-1', True)]
     assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is False
+
+
+# --- preparation yields to queued jobs -------------------------------------------------
+
+def yielding_tester(calls, db, *, fail=None):
+    """Targeted passes; full_python shards are recorded; one chat job is queued during the first shard."""
+    queued = []
+
+    def run(repository, phase, paths):
+        calls.append((phase, paths))
+        if phase == 'full_python' and not queued:
+            queued.append(enqueue(db, goal='Chat: fix the value in Jarvis'))
+        if phase == 'full_python' and paths == fail:
+            return pytest_failed(f'{paths[0]}::test_new')
+        return CommandResult(('pytest',), 0, f'{phase} {paths}\n1 passed')
+    return run
+
+
+def paused_candidate(setup, agents, tmp_path, calls, **kwargs):
+    source, db, factory = setup
+    sharded_source(source)
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    before = factory().store.get(job['candidate_id'], internal=True)
+    worker = EngineeringWorker(factory(tester=yielding_tester(calls, db, **kwargs)), source=source, direct_dev=True)
+    result = worker.once()
+    return job, before, worker, result
+
+
+def test_preparation_yields_to_a_queued_chat_job_and_resumes_from_the_next_shard(setup, agents, tmp_path):
+    source, db, factory = setup
+    calls = []
+    job, before, worker, result = paused_candidate(setup, agents, tmp_path, calls)
+    jobs = EngineeringJobs(db)
+    # Shard 1 ran, a chat job was queued during it, so shard 2 never started.
+    assert calls == [('full_python', SHARD_PATHS[0])]
+    assert result['id'] == job['id'] and result['status'] == 'waiting_for_approval'
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    preparation = candidate['apply_preparation']
+    assert preparation['status'] == 'paused' and not candidate['busy']
+    assert preparation['checkpoint']['shards_completed'] == 1 and preparation['checkpoint']['shards_planned'] == 3
+    assert [p['after_shard'] for p in preparation['pauses']] == [1]
+    started_at = preparation['started_at']
+    # Seal and state are exactly as before; apply still refuses (no full_python evidence yet).
+    assert {k: candidate.get(k) for k in SEAL} == {k: before.get(k) for k in SEAL}
+    assert not [t for t in candidate['test_results'] if t['phase'] == 'full_python']
+    assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is False
+    # The next worker pass runs the chat job (not preparation): it claims and finishes it.
+    chat = [j for j in jobs.recent() if j['id'] != job['id']][0]
+    assert chat['status'] == 'queued'
+    calls.clear()
+    ran = worker.once()
+    assert ran['id'] == chat['id'] and ran['status'] != 'queued' and 'claimed' in [h['event'] for h in ran['history']]
+    assert ('full_python', SHARD_PATHS[1]) not in calls  # the chat job ran no preparation shard
+    assert not jobs.queued()
+    # Idle again: preparation resumes from shard 2; shard 1 is not rerun, and its evidence is kept.
+    calls.clear()
+    resumed = worker.once()
+    assert resumed['id'] == job['id'] and resumed['status'] == 'waiting_for_approval'
+    assert calls == [('full_python', paths) for paths in SHARD_PATHS[1:]]
+    candidate = factory().store.get(job['candidate_id'], internal=True)
+    preparation = candidate['apply_preparation']
+    assert preparation['status'] == 'prepared' and preparation['started_at'] == started_at
+    assert [(s['shard'], s['paths']) for s in preparation['full_python_shards']] == [
+        (f'python-{n}', paths) for n, paths in enumerate(SHARD_PATHS, 1)]
+    assert preparation['full_python_shards'][0]['summary'] == ['1 passed']
+    assert preparation['pauses'][0]['checkpoint'] == 'reused' and preparation['pauses'][0]['resumed_run_id'] == preparation['run_id']
+    stored = [t for t in candidate['test_results'] if t['phase'] == 'full_python'][-1]
+    assert stored['paths'] == ['tests'] and stored['sandbox']['planned_shards'] == 3
+    assert f"full_python {SHARD_PATHS[0]}" in stored['stdout']  # shard 1's real output, from the first run
+    assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is True
+    assert not direct_dev._checkpoint_path(direct_dev._state_dir(factory()), job['candidate_id']).exists()
+    check_projections(factory, resumed)
+
+
+def test_a_failure_before_the_pause_is_still_attributed_after_resuming(setup, agents, tmp_path):
+    source, db, factory = setup
+    calls = []
+    job, _, worker, result = paused_candidate(setup, agents, tmp_path, calls, fail=SHARD_PATHS[0])
+    assert factory().store.get(job['candidate_id'], internal=True)['apply_preparation']['status'] == 'paused'
+    jobs = EngineeringJobs(db)
+    chat = [j for j in jobs.recent() if j['id'] != job['id']][0]
+    jobs.control(chat['id'], 'pause')  # the owner parks the chat job: preparation may resume
+    calls.clear()
+    result = worker.once()
+    # Shards 2-3 run, then only the failing shard 1 on the base commit; the failure is new.
+    assert [c[0] for c in calls] == ['full_python', 'full_python', 'baseline_full_python']
+    assert calls[-1][1] == SHARD_PATHS[0]
+    assert result['status'] == 'blocked' and result['failure']['code'] == 'tests_failed'
+    preparation = factory().store.get(job['candidate_id'], internal=True)['apply_preparation']
+    assert preparation['failing_tests'] == [
+        dict(phase='full_python', test=f'{SHARD_PATHS[0][0]}::test_new', pre_existing=False)]
+    assert [s['returncode'] for s in preparation['full_python_shards']] == [1, 0, 0]
+
+
+@pytest.mark.parametrize('tamper', ['edit', 'delete'])
+def test_a_changed_or_missing_checkpoint_reruns_every_shard(setup, agents, tmp_path, tamper):
+    source, db, factory = setup
+    calls = []
+    job, _, worker, _ = paused_candidate(setup, agents, tmp_path, calls, fail=SHARD_PATHS[0])
+    path = direct_dev._checkpoint_path(direct_dev._state_dir(factory()), job['candidate_id'])
+    if tamper == 'edit':  # forge a passing shard 1
+        path.write_text(path.read_text().replace('"returncode": 1', '"returncode": 0'))
+    else:
+        path.unlink()
+    jobs = EngineeringJobs(db)
+    jobs.control([j for j in jobs.recent() if j['id'] != job['id']][0]['id'], 'pause')
+    calls.clear()
+    result = worker.once()
+    assert [c for c in calls if c[0] == 'full_python'] == [('full_python', paths) for paths in SHARD_PATHS]
+    preparation = factory().store.get(job['candidate_id'], internal=True)['apply_preparation']
+    assert preparation['pauses'][0]['checkpoint'] == 'discarded'
+    # The rerun shard 1 really fails again; the forged pass was never used.
+    assert result['status'] == 'blocked' and [s['returncode'] for s in preparation['full_python_shards']] == [1, 0, 0]
+
+
+def test_every_preparation_run_finishes_at_least_one_shard(setup, agents, tmp_path):
+    """Even with a job always waiting, preparation progresses one shard per run."""
+    source, db, factory = setup
+    sharded_source(source)
+    integration_target(setup, tmp_path)
+    job = waiting_candidate(setup, agents)
+    calls, jobs = [], EngineeringJobs(db)
+    service = factory(tester=full(calls))
+    states = []
+    for _ in range(3):
+        pending, _ = direct_dev.pending_preparation(service)
+        candidate = direct_dev.prepare_for_apply(direct_dev.development_service(service, job.get('project_id')),
+                                                 jobs, pending, pause=lambda: True)
+        states.append(candidate['apply_preparation']['status'])
+    assert calls == [('full_python', paths) for paths in SHARD_PATHS]
+    assert states == ['paused', 'paused', 'prepared']
+    preparation = candidate['apply_preparation']
+    assert [p['after_shard'] for p in preparation['pauses']] == [1, 2]
+    assert all(p['checkpoint'] == 'reused' for p in preparation['pauses'])
+    assert preparation['active_seconds'] >= 0 and direct_dev.pending_preparation(service) is None
+
+
+def test_preparation_keeps_the_worker_heartbeat_fresh(setup, agents, monkeypatch):
+    from core import engineering_worker
+    source, db, factory = setup
+    job = waiting_candidate(setup, agents)
+    monkeypatch.setattr(engineering_worker, 'HEARTBEAT_SECONDS', 0.05)
+
+    def observed():
+        with db.transaction() as connection:
+            return connection.execute('SELECT observed FROM engineering_worker_status WHERE id=1').fetchone()[0]
+    seen = []
+
+    def slow(repository, phase, paths):
+        start = observed()
+        time.sleep(0.5)  # a long shard, no job lease held
+        seen.append((start, observed()))
+        return CommandResult(('pytest',), 0, '1 passed')
+    result = EngineeringWorker(factory(tester=slow), source=source, direct_dev=True).once()
+    assert result['id'] == job['id'] and seen
+    assert all(after > start for start, after in seen)  # refreshed while the shard ran
+    assert time.time() - observed() < 1
+    # The heartbeat thread stops with the step.
+    assert not [t for t in threading.enumerate() if t.name == 'engineering-heartbeat']
+
+
+def test_queued_counts_only_jobs_claim_would_run(setup):
+    _, db, _ = setup
+    jobs = EngineeringJobs(db)
+    assert not jobs.queued()
+    job = enqueue(db)
+    assert jobs.queued()
+    jobs.control(job['id'], 'pause')
+    assert not jobs.queued()
 
 
 @pytest.mark.skipif(os.environ.get('JARVIS_DOCKER_TESTS') != '1', reason='Opt-in Docker integration')

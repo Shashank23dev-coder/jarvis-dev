@@ -555,18 +555,35 @@ def full_python_shards(root):
 SUMMARY = re.compile(r'\d+ (?:passed|failed|skipped|errors?)\b')
 
 
-def run_sharded(repository, run, shards, seconds):
+class PreparationPaused(Exception):
+    """A queued job is waiting: preparation stops between shards, keeping the shards that ran."""
+
+    def __init__(self, shards, completed):
+        super().__init__('Preparation paused for a queued engineering job')
+        self.shards, self.completed = shards, completed  # completed: [(shard evidence, complete result)]
+
+
+def run_sharded(repository, run, shards, seconds, *, completed=(), pause=None):
     """Run full_python shard by shard, each within `seconds` of sandbox wall time.
 
     Returns (complete, stored), both one full_python result with per-shard evidence in
     sandbox['shards'] and one pytest runner per shard. `complete` keeps every shard's
     whole output for failure attribution; `stored` keeps each shard's output tail, so the
     combined text stays within the 16 KB evidence limit unless a shard's own output exceeds it.
+
+    `completed` holds the (evidence, complete result) pairs a paused run of the same plan
+    already finished; they are kept, not rerun. Before each later shard, a true `pause()`
+    raises PreparationPaused. Every run finishes at least one shard, so it always progresses.
     """
+    if [evidence['paths'] for evidence, _ in completed] != [list(paths) for paths in shards[:len(completed)]]:
+        raise ValueError('Completed shards do not match the shard plan')
     previous, repository.pytest_timeout = repository.pytest_timeout, seconds
-    results, shard_evidence = [], []
+    shard_evidence = [evidence for evidence, _ in completed]
+    results = [result for _, result in completed]
     try:
-        for number, paths in enumerate(shards, 1):
+        for number, paths in enumerate(shards[len(completed):], len(completed) + 1):
+            if pause and number > len(completed) + 1 and pause():
+                raise PreparationPaused(shards, list(zip(shard_evidence, results)))
             started = time.monotonic()
             result = run(list(paths))
             results.append(result)
@@ -616,13 +633,57 @@ def pending_preparation(service):
         record = service.store.get(job['candidate_id'], internal=True, recover=False)
         if (is_direct_candidate(record) and record['state'] == 'passed' and not record['busy']
                 and not record.get('apply') and record.get('commit')
-                and (record.get('apply_preparation') or {}).get('fingerprint') != record['fingerprint']):
+                and ((prepared := record.get('apply_preparation') or {}).get('fingerprint') != record['fingerprint']
+                     or prepared.get('status') == 'paused')):
             return jobs.get(job['id']), record
     return None
 
 
-def prepare_for_apply(service, jobs, job, *, agents=None, budget=None, shard_seconds=None):
-    """Full tests + an independent second review of the exact commit; returns the candidate."""
+# A paused preparation keeps its finished shards' complete output (needed for failure
+# attribution, often over the 16 KB record limit) in a state file. The candidate record
+# holds the file's SHA-256 and the commit/fingerprint; a resumed run reuses the shards only
+# when all of them match, and otherwise reruns every shard.
+
+def _checkpoint_path(state_dir, candidate_id):
+    return state_dir / 'preparation' / f'{candidate_id}.json'
+
+
+def _save_checkpoint(path, shards, completed):
+    from tools.candidate_edit import digest
+    data = json.dumps(dict(shards=shards, completed=[dict(evidence=evidence, result=asdict(result))
+                                                     for evidence, result in completed]),
+                      sort_keys=True, allow_nan=False).encode()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    partial = path.with_suffix('.partial')
+    partial.write_bytes(data)
+    partial.chmod(0o600)
+    os.replace(partial, path)
+    return digest(data)
+
+
+def _load_checkpoint(path, sha256):
+    """(shard plan, completed shards) exactly as the paused run stored them, else None."""
+    from tools.candidate_edit import digest
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not sha256 or digest(data) != sha256:
+        return None
+    value = json.loads(data)
+    return value['shards'], [
+        (item['evidence'], CommandResult(**dict(item['result'], command=tuple(item['result']['command']),
+                                                runners=tuple(item['result']['runners']))))
+        for item in value['completed']]
+
+
+def prepare_for_apply(service, jobs, job, *, agents=None, budget=None, shard_seconds=None, pause=None):
+    """Full tests + an independent second review of the exact commit; returns the candidate.
+
+    A true `pause()` between full_python shards (the worker passes "a job is queued")
+    pauses the step: the finished shards are checkpointed, the candidate's seal is restored,
+    and the next call resumes from the next shard with the paused run's limits.
+    """
     from .candidate_provider import failure_evidence
     from tools.candidate_edit import digest
     default_shard, default_budget = prepare_limits()
@@ -631,25 +692,38 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=None, shard_sec
     candidate_id = job['candidate_id']
     state_dir = _state_dir(service)
     failures = FailureLog(state_dir / 'failures.jsonl')
+    checkpoint_path = _checkpoint_path(state_dir, candidate_id)
     run_id = str(uuid4())
     service.store.claim(candidate_id)
-    stage, sealed = 'testing', None
+    stage, sealed, paused, started = 'testing', None, False, time.monotonic()
     try:
         record = service.store.get(candidate_id, internal=True)
-        record['lease_until'] = time.time() + budget + 1  # crash recovery, as in _operate_locked
-        # _tests clears the review seal before running; an environment block restores it.
+        # _tests clears the review seal before running; an environment block or a pause restores it.
         sealed = json.loads(json.dumps({key: record[key] for key in SEAL_FIELDS if key in record}))
         author = record['improvement']['implementation_provider']
         fingerprint, commit = record['fingerprint'], record['commit']
+        prior = record.get('apply_preparation') or {}
+        checkpoint, used = None, 0
         preparation = dict(run_id=run_id, started_at=timestamp(), fingerprint=fingerprint, commit=commit,
                            budget_seconds=budget, shard_seconds=shard_seconds, status='running')
+        if prior.get('status') == 'paused' and (prior['fingerprint'], prior['commit']) == (fingerprint, commit):
+            # One step across pauses: its first start, limits and pause history; only the
+            # time it actually ran counts against its budget.
+            budget, shard_seconds, used = prior['budget_seconds'], prior['shard_seconds'], prior['active_seconds']
+            checkpoint = _load_checkpoint(checkpoint_path, prior['checkpoint']['sha256'])
+            pauses = prior['pauses'][:-1] + [dict(prior['pauses'][-1], resumed_at=timestamp(), resumed_run_id=run_id,
+                                                  checkpoint='reused' if checkpoint else 'discarded')]
+            preparation.update(started_at=prior['started_at'], budget_seconds=budget, shard_seconds=shard_seconds,
+                               active_seconds=used, pauses=pauses)
+        remaining = max(budget - used, 0)
+        record['lease_until'] = time.time() + remaining + 1  # crash recovery, as in _operate_locked
         record['apply_preparation'] = preparation
-        service.store.save(record, 'apply_preparation_started')
+        service.store.save(record, 'apply_preparation_resumed' if 'pauses' in preparation else 'apply_preparation_started')
         service.record, service.originals = record, {}
         # Limits keep their 900 s candidate ceiling for tool/file/line counts; this step's
         # own deadline below is the preparation budget, which still bounds every shard.
-        service.limits = Limits(seconds=min(budget, 900))
-        service.deadline = time.monotonic() + budget
+        service.limits = Limits(seconds=min(remaining, 900))
+        service.deadline = time.monotonic() + remaining
         if service._workgit('rev-parse', 'HEAD').strip() != commit or service._diff() != fingerprint:
             raise ToolDenied('Candidate changed since its review')
         # Existing phases and evidence format; targeted results on this fingerprint are reused.
@@ -660,8 +734,10 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=None, shard_sec
         def capture(repository, phase, paths):
             if phase == 'full_python':
                 # Recorded as the one full_python phase on ['tests'], which apply checks unchanged.
+                shards = full_python_shards(repository.root)
+                completed = checkpoint[1] if checkpoint and checkpoint[0] == shards else ()
                 raw[phase], stored = run_sharded(repository, lambda shard: _run(tester, repository, phase, shard),
-                                                 full_python_shards(repository.root), shard_seconds)
+                                                 shards, shard_seconds, completed=completed, pause=pause)
                 return stored
             raw[phase] = _run(tester, repository, phase, paths)
             return raw[phase]
@@ -722,6 +798,15 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=None, shard_sec
         preparation.update(status='prepared' if verdict == 'passed' else verdict,
                            review=dict(verdict=verdict, provider=reviewed_by))
         return _finish_preparation(service, jobs, record, preparation)
+    except PreparationPaused as stop:
+        paused = True
+        record = service.store.get(candidate_id, internal=True)
+        preparation.update(status='paused', active_seconds=round(used + time.monotonic() - started, 2),
+                           checkpoint=dict(sha256=_save_checkpoint(checkpoint_path, stop.shards, stop.completed),
+                                           shards_completed=len(stop.completed), shards_planned=len(stop.shards)))
+        preparation['pauses'] = preparation.get('pauses', []) + [
+            dict(run_id=run_id, paused_at=timestamp(), after_shard=len(stop.completed))]
+        return _restore_seal(service, record, sealed, preparation, 'apply_preparation_paused')
     except Exception as exc:
         from .candidate_provider import execution_error_code
         entry = failures.record(run_id, f'apply_preparation.{stage}', getattr(exc, 'provider', None), exc)
@@ -741,6 +826,8 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=None, shard_sec
                            failure=dict(stage=stage, exception=entry['exception'], message=entry['message']))
         return _finish_preparation(service, jobs, record, preparation)
     finally:
+        if not paused:
+            checkpoint_path.unlink(missing_ok=True)
         service.store.release(candidate_id)
 
 
@@ -825,13 +912,17 @@ def _environment_blocked(service, record, sealed, preparation):
     Apply still refuses: the failing full-phase evidence stays on this fingerprint.
     """
     preparation.update(status='environment_blocked', ended_at=timestamp())
+    return _restore_seal(service, record, sealed, preparation, 'apply_preparation_environment_blocked')
+
+
+def _restore_seal(service, record, sealed, preparation, event):
     for key in SEAL_FIELDS:
         if key in sealed:
             record[key] = sealed[key]
         else:
             record.pop(key, None)
     record['apply_preparation'] = preparation
-    service.store.save(record, 'apply_preparation_environment_blocked')
+    service.store.save(record, event)
     service.store.release(record['id'])
     return service.store.get(record['id'])
 
