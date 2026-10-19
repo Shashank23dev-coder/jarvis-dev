@@ -220,6 +220,8 @@ def project(record):
                 error='Candidate operation did not complete successfully.' if record.get('error') else None)
     projected['baseline_outcome'] = baseline_outcome_for(record)
     projected['manual_operations'] = project_manual_operations(record.get('manual_operations', []))
+    from .engineering_jobs import project_deferred_operations
+    projected['deferred_operations'] = project_deferred_operations(record.get('deferred_operations', []))
     projected['execution_state'] = project_execution_state(record, record.get('stage', record['state']))
     if projected['execution_state'] == 'blocked_before_implementation' and projected['baseline_outcome']['failure_code']:
         from .candidate_provider import failure_evidence

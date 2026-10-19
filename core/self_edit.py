@@ -22,6 +22,10 @@ from tools.candidate_edit import CandidateEditor, CandidatePolicy, digest, safe_
 from tools.policy import ToolDenied, ToolError
 from tools.repository import RepositoryTools, stored_output
 
+# An idle worker pass holds the engineering lock for at most one 5 s provider
+# probe. Owner operations wait that long, then queue for the worker.
+ENGINEERING_LOCK_WAIT_SECONDS = 8
+
 
 class Edit(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
@@ -774,21 +778,80 @@ class SelfEditService:
         from .engineering_jobs import EngineeringJobs
         jobs = EngineeringJobs(self.store.database)
         fd = os.open(self.store.database.path + '.engineering.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
+
+        def locked():
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
             except BlockingIOError:
-                raise ToolDenied('Engineering worker is active') from None
-            job = jobs.get(job_id)
-            if job['lease_owner'] or job['control'] and action != 'discard':
-                raise ToolDenied('Engineering job lease is active')
-            self.engineering_lock_fd = fd
-            result = self._operate_locked(candidate_id, action)
-            jobs.reconcile_candidate(result)
-            return result
+                return False
+        try:
+            # An idle worker pass holds the lock briefly; wait that out first.
+            deadline = time.monotonic() + ENGINEERING_LOCK_WAIT_SECONDS
+            while not locked():
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(.1)
+            else:
+                return self._operate_job_locked(fd, candidate_id, action, job_id)
+            # The worker is running a job or preparation. Control changes need
+            # this lock, so a paused/cancelled job stays so until it is free.
+            if jobs.get(job_id)['control'] and action != 'discard':
+                raise ToolDenied('Engineering job is paused or cancelled')
+            operation = jobs.defer(candidate_id, job_id, action)
+            if locked():
+                # Freed after the wait; run it now rather than leave it for the next worker pass.
+                self.run_deferred(fd, jobs, operation_id=operation['id'])
+            # Observe only: the lock holder may still be running this candidate.
+            return jobs.with_deferred(self.store.get(candidate_id, recover=False))
         finally:
-            self.__dict__.pop('engineering_lock_fd', None)
             os.close(fd)
+
+    def _operate_job_locked(self, fd, candidate_id, action, job_id):
+        """The caller holds the engineering lock on fd."""
+        from .engineering_jobs import EngineeringJobs
+        jobs = EngineeringJobs(self.store.database)
+        job = jobs.get(job_id)
+        if job['lease_owner']:
+            raise ToolDenied('Engineering job lease is active')
+        if job['control'] and action != 'discard':
+            raise ToolDenied('Engineering job is paused or cancelled')
+        # The worker's own service already carries its fence; leave that in place.
+        inherited = hasattr(self, 'engineering_lock_fd')
+        self.engineering_lock_fd = fd
+        try:
+            result = self._operate_locked(candidate_id, action)
+        finally:
+            if not inherited:
+                self.__dict__.pop('engineering_lock_fd', None)
+        jobs.reconcile_candidate(result)
+        return jobs.with_deferred(result)
+
+    def run_deferred(self, fd, jobs, *, operation_id=None):
+        """Run queued owner operations. The caller holds the engineering lock on fd."""
+        from .engineering_repository import development_service
+        jobs.interrupt_deferred()
+        for operation in jobs.deferred(status='queued', operation_id=operation_id):
+            if not jobs.start_deferred(operation['id']):
+                continue
+            identifier, action = operation['candidate_id'], operation['action']
+            status, reason = 'completed', None
+            try:
+                service = development_service(self, candidate_id=identifier)
+                record = service.store.get(identifier, internal=True)
+                if record and action == 'discard':
+                    service._cleanup_path(record)
+                if not (record and action == 'discard' and record['state'] == 'discarded'):
+                    service._operate_job_locked(fd, identifier, action, operation['job_id'])
+            except ToolDenied as exc:
+                status, reason = 'not_run', {'Engineering job lease is active': 'job_active',
+                    'Engineering job is paused or cancelled': 'job_controlled',
+                    'Candidate unavailable': 'candidate_unavailable'}.get(str(exc), 'operation_denied')
+            except ValueError:
+                status, reason = 'not_run', 'candidate_unavailable'
+            except Exception:
+                status, reason = 'not_run', 'operation_failed'
+            jobs.finish_deferred(operation['id'], status, reason)
 
     def _operate_locked(self, candidate_id, action):
         if self.store.database.path == ':memory:':

@@ -63,6 +63,11 @@ class EngineeringWorker:
             from .self_edit import model_request
             if self.service.model is model_request:
                 EngineeringRegistry.defaults(self.jobs.database, model_request).refresh_claude(force=False)
+            # Owner candidate operations queued while this lock was held run first,
+            # under the same fence and outside any job lease.
+            if self.jobs.deferred(status='queued') or self.jobs.deferred(status='running'):
+                with heartbeat(self.jobs):
+                    self.service.run_deferred(fd, self.jobs)
             owner = str(uuid4())
             job = self.jobs.claim(owner)
             if job is None:

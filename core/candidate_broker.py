@@ -140,7 +140,8 @@ class Broker:
                 existing = self.service.store.get(identifier, recover=False)
                 if not existing:
                     raise ToolDenied('Candidate unavailable')
-                return project(existing)
+                from .engineering_jobs import EngineeringJobs
+                return project(EngineeringJobs(self.service.store.database).with_deferred(existing))
             from .engineering_repository import development_service
             service = development_service(self.service, candidate_id=identifier)
             existing = service.store.get(identifier, internal=True)
@@ -159,13 +160,17 @@ class Broker:
                 return project_apply(result)
             if request.action == 'inspect':
                 return project(service.inspect(identifier))
-            operations = existing.setdefault('chat_operations', [])
-            if any(item['request_id'] == request.request_id for item in operations):
-                return project(existing)
-            if len(operations) >= 64:
-                raise ToolDenied('Candidate operation audit limit reached')
-            operations.append(context | {'action': request.action})
-            service.store.save(existing, 'production_chat_' + request.action)
+            # The worker may be saving this record (the request is then deferred);
+            # append the audit entry to the latest copy in one transaction.
+            with service.store.database.transaction():
+                existing = service.store.get(identifier, internal=True, recover=False)
+                operations = existing.setdefault('chat_operations', [])
+                if any(item['request_id'] == request.request_id for item in operations):
+                    return project(existing)
+                if len(operations) >= 64:
+                    raise ToolDenied('Candidate operation audit limit reached')
+                operations.append(context | {'action': request.action})
+                service.store.save(existing, 'production_chat_' + request.action)
             handler = {'inspect': service.inspect, 'tests': service.tests,
                        'review': service.review, 'discard': service.discard}[request.action]
             record = handler(identifier)
