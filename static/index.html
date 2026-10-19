@@ -460,8 +460,8 @@
         <option value="activity">Activity</option>
       </select>
 
-      <div class="status-value">
-        Local Development
+      <div id="runtimeMode" class="status-value">
+        Unavailable
       </div>
 
     </div>
@@ -643,6 +643,19 @@ function showView(name) {
     if (name === "tasks" || name === "activity") loadView(name);
 }
 
+async function loadRuntimeMode() {
+    const label = document.getElementById("runtimeMode");
+    try {
+        const response = await fetch("/runtime");
+        if (!response.ok) throw new Error("Runtime unavailable");
+        const runtime = await response.json();
+        label.textContent = runtime.mode === "development" ? "Development" :
+            runtime.mode === "production" ? "Production" : "Unavailable";
+    } catch (error) {
+        label.textContent = "Unavailable";
+    }
+}
+
 function element(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -795,6 +808,7 @@ promptBox.addEventListener("keydown", event => {
     }
 });
 restoreConversation();
+loadRuntimeMode();
 </script>
 
 </body>

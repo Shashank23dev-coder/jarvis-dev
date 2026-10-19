@@ -25,7 +25,7 @@ class Node {
     addEventListener(key, callback) { this.listeners[key] = callback; }
     focus() { this.focused = true; }
 }
-function setup(fetch, savedConversation = null) {
+function setup(fetch, savedConversation = null, runtimeMode = 'development') {
     const nodes = {};
     for (const match of html.matchAll(/id="([^"]+)"/g)) nodes[match[1]] = new Node();
     const nav = [...html.matchAll(/data-view="([^"]+)"/g)].map(match => {
@@ -42,12 +42,29 @@ function setup(fetch, savedConversation = null) {
         setItem: (key, value) => saved.set(key, value),
         removeItem: key => saved.delete(key)
     };
-    const context = vm.createContext({ document, fetch, AbortController, localStorage });
+    const runtimeRequests = [];
+    const appFetch = (url, options) => url === '/runtime'
+        ? (runtimeRequests.push(url),
+            runtimeMode === null ? Promise.reject(new Error('offline')) :
+                Promise.resolve({ ok: true, json: async () => ({ mode: runtimeMode }) }))
+        : fetch(url, options);
+    const context = vm.createContext({ document, fetch: appFetch, AbortController, localStorage });
     vm.runInContext(script, context);
-    return { nodes, nav, saved, run: code => vm.runInContext(code, context) };
+    return { nodes, nav, saved, runtimeRequests, run: code => vm.runInContext(code, context) };
 }
 const text = node => [node.textContent, ...node.children.map(text)].join(' ');
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('runtime label reflects development, production, and unavailable responses', async () => {
+    const development = setup(async () => ({}));
+    const production = setup(async () => ({}), null, 'production');
+    const unavailable = setup(async () => ({}), null, null);
+    await tick();
+    assert.equal(development.nodes.runtimeMode.textContent, 'Development');
+    assert.equal(production.nodes.runtimeMode.textContent, 'Production');
+    assert.equal(unavailable.nodes.runtimeMode.textContent, 'Unavailable');
+    for (const ui of [development, production, unavailable]) assert.deepEqual(ui.runtimeRequests, ['/runtime']);
+});
 
 test('all six views navigate and preserve chat and draft', () => {
     const ui = setup(async () => ({ ok: true, json: async () => ({ tasks: [], activity: [] }) }));

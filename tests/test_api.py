@@ -22,9 +22,26 @@ def test_root_health_and_empty_lists(client):
     assert root.status_code == 200
     assert 'id="assistantView"' in root.text
     assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/runtime").json() == {"mode": "development"}
     assert client.get("/tasks").json() == {"tasks": []}
     assert client.get("/activity").json() == {"activity": []}
     assert client.get("/tasks/missing").status_code == 404
+
+
+def test_runtime_reports_production_mode_from_real_app(tmp_path):
+    from core.deployment import Settings
+
+    token = 'production-test-token-' + 'x' * 32
+    state = tmp_path / 'production-state'
+    settings = Settings(mode='production', state_dir=state, database_path=state / 'jarvis.sqlite3',
+                        auth_token=token, public_origin='http://127.0.0.1')
+    application = main.create_app(settings=settings)
+    with TestClient(application, base_url='http://127.0.0.1') as production_client:
+        assert production_client.get('/runtime').status_code == 401
+        response = production_client.get('/runtime', headers={'Authorization': 'Bearer ' + token})
+        assert response.status_code == 200
+        assert response.json() == {'mode': 'production'}
+        assert production_client.get('/health').json() == {'status': 'ok'}
 
 
 def test_task_plan_and_activity_contract(client):
