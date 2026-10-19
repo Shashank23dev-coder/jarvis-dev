@@ -49,6 +49,15 @@ function setup(fetch, savedConversation = null) {
 const text = node => [node.textContent, ...node.children.map(text)].join(' ');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('UI contract keeps every view, navigation button, and runtime status label', () => {
+    const viewIds = ['assistantView', 'tasksView', 'memoryView', 'agentsView', 'toolsView', 'activityView'];
+    for (const id of viewIds) assert.match(html, new RegExp(`id="${id}"`));
+    const navViews = [...html.matchAll(/<button\b[^>]*data-view="([^"]+)"/g)].map(match => match[1]);
+    assert.deepEqual(navViews, ['assistant', 'tasks', 'memory', 'agents', 'tools', 'activity']);
+    for (const view of navViews) assert.match(html, new RegExp(`<button\\b[^>]*data-view="${view}"`));
+    assert.match(html, /id="runtimeStatus"[\s\S]*?>\s*Unavailable\s*</);
+});
+
 test('all six views navigate and preserve chat and draft', () => {
     const ui = setup(async () => ({ ok: true, json: async () => ({ tasks: [], activity: [] }) }));
     ui.run('addMessage("user", "Keep this conversation")');
