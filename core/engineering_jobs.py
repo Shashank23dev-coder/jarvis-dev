@@ -20,6 +20,13 @@ MAX_ATTEMPTS = 3
 LEASE_SECONDS = 930
 JOB_PAGE_SIZE = 5
 FAILURE_PROJECTION_LIMIT = 16
+# Owner candidate operations queued while the engineering worker holds its lock.
+DEFERRED_ACTIONS = {'tests', 'review', 'discard'}
+DEFERRED_STATUSES = {'queued', 'running', 'completed', 'not_run'}
+DEFERRED_REASONS = {None, 'job_active', 'job_controlled', 'candidate_unavailable', 'interrupted',
+                    'operation_denied', 'operation_failed'}
+DEFERRED_LIMIT = 16
+DEFERRED_PROJECTION_LIMIT = 4
 
 
 @contextmanager
@@ -74,6 +81,62 @@ class EngineeringJobs:
                 job_id TEXT NOT NULL REFERENCES engineering_jobs(id),
                 timestamp TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL)''')
             db.execute('CREATE TABLE IF NOT EXISTS engineering_worker_status (id INTEGER PRIMARY KEY, observed REAL NOT NULL)')
+            db.execute('''CREATE TABLE IF NOT EXISTS engineering_deferred_operations (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+                candidate_id TEXT NOT NULL, job_id TEXT NOT NULL, action TEXT NOT NULL,
+                status TEXT NOT NULL, reason TEXT, requested_at TEXT NOT NULL, finished_at TEXT)''')
+
+    def defer(self, candidate_id, job_id, action):
+        """Queue an owner candidate operation refused only because the engineering lock is held.
+
+        The worker runs it under its own lock (SelfEditService.run_deferred), so it
+        can never overlap the worker. One queued request per candidate and action.
+        """
+        if action not in DEFERRED_ACTIONS:
+            raise ValueError('Unsupported deferred operation')
+        with self.database.transaction() as db:
+            row = db.execute("SELECT * FROM engineering_deferred_operations WHERE candidate_id=? AND action=? "
+                             "AND status='queued'", (candidate_id, action)).fetchone()
+            if row:
+                return dict(row)
+            if db.execute("SELECT COUNT(*) FROM engineering_deferred_operations WHERE status='queued'"
+                          ).fetchone()[0] >= DEFERRED_LIMIT:
+                raise ToolDenied('Deferred candidate operation queue is full')
+            db.execute('INSERT INTO engineering_deferred_operations(id,candidate_id,job_id,action,status,requested_at) '
+                       "VALUES (?,?,?,?,'queued',?)", (str(uuid4()), candidate_id, job_id, action, timestamp()))
+            return dict(db.execute('SELECT * FROM engineering_deferred_operations WHERE sequence=last_insert_rowid()'
+                                   ).fetchone())
+
+    def deferred(self, candidate_id=None, *, status=None, operation_id=None):
+        with self.database.transaction() as db:
+            return [dict(row) for row in db.execute('''SELECT * FROM engineering_deferred_operations
+                WHERE (? IS NULL OR candidate_id=?) AND (? IS NULL OR status=?) AND (? IS NULL OR id=?)
+                ORDER BY sequence''', (candidate_id, candidate_id, status, status, operation_id, operation_id))]
+
+    def with_deferred(self, record):
+        """Attach the candidate's recent deferred owner operations for projection; never saved."""
+        if record is not None:
+            record['deferred_operations'] = self.deferred(record['id'])[-DEFERRED_PROJECTION_LIMIT:]
+        return record
+
+    def start_deferred(self, operation_id):
+        """Caller holds the engineering lock. False when another holder already took it."""
+        with self.database.transaction() as db:
+            return db.execute("UPDATE engineering_deferred_operations SET status='running' WHERE id=? "
+                              "AND status='queued'", (operation_id,)).rowcount == 1
+
+    def finish_deferred(self, operation_id, status, reason=None):
+        if status not in {'completed', 'not_run'} or reason not in DEFERRED_REASONS:
+            raise ValueError('Invalid deferred operation outcome')
+        with self.database.transaction() as db:
+            db.execute('UPDATE engineering_deferred_operations SET status=?,reason=?,finished_at=? WHERE id=?',
+                       (status, reason, timestamp(), operation_id))
+
+    def interrupt_deferred(self):
+        """Caller holds the engineering lock, so a running row belongs to a dead holder. Never rerun it."""
+        with self.database.transaction() as db:
+            db.execute("UPDATE engineering_deferred_operations SET status='not_run',reason='interrupted',"
+                       "finished_at=? WHERE status='running'", (timestamp(),))
 
     def heartbeat(self):
         with self.database.transaction() as db:
@@ -599,3 +662,32 @@ def project_reference(value):
 def project_decision(value):
     from .engineering_decision import Decision
     return Decision.model_validate(value).model_dump() if value is not None else None
+
+
+def project_deferred_operations(values):
+    result = []
+    for item in values[-DEFERRED_PROJECTION_LIMIT:]:
+        if (not valid_id(item.get('id')) or item.get('action') not in DEFERRED_ACTIONS
+                or item.get('status') not in DEFERRED_STATUSES or item.get('reason') not in DEFERRED_REASONS):
+            raise ToolDenied('Invalid deferred operation evidence')
+        result.append({key: item.get(key) for key in ('id', 'action', 'status', 'reason')})
+    return result
+
+
+def deferred_status(item):
+    """Plain owner wording for the latest deferred candidate operation."""
+    label = {'tests': 'test rerun', 'review': 'review', 'discard': 'discard'}[item['action']]
+    if item['status'] == 'queued':
+        return (f'Your {label} request is queued: the engineering worker is busy with other work. '
+                'It will run automatically as soon as the worker is free; nothing has changed yet.')
+    if item['status'] == 'running':
+        return f'Your queued {label} request is running now.'
+    if item['status'] == 'completed':
+        return f'Your queued {label} request ran once the engineering worker was free; the results above include it.'
+    reason = {'job_active': 'its engineering job became active again',
+              'job_controlled': 'its engineering job is paused or cancelled',
+              'candidate_unavailable': 'the candidate was no longer available for it',
+              'interrupted': 'the worker stopped while it was running; ask again to rerun it',
+              'operation_denied': 'it was refused by policy',
+              'operation_failed': 'it failed before completing'}.get(item.get('reason'), 'it could not run')
+    return f'Your queued {label} request did not run: {reason}.'

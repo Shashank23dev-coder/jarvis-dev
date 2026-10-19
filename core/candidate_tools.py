@@ -211,7 +211,7 @@ always requires approval for the exact commit and verified release evidence.
         evidence = {key: record.get(key) for key in (
             'branch', 'worktree', 'files_changed', 'diff_summary', 'diff',
             'test_results', 'reviewer_result', 'error', 'iterations', 'tool_calls', 'elapsed_seconds', 'improvement', 'failure', 'failures', 'provider_results', 'attribution', 'provider_blocker',
-            'baseline_outcome', 'execution_state', 'manual_operations')}
+            'baseline_outcome', 'execution_state', 'manual_operations', 'deferred_operations')}
         encoded = json.dumps(evidence)
         return CandidateEvidence(candidate_id=record['id'], state=record['state'],
                                  busy=record.get('busy', False), evidence=encoded[:12000],
@@ -358,8 +358,11 @@ always requires approval for the exact commit and verified release evidence.
             raise ToolDenied('Unsupported candidate operation')
         if action == 'inspect':
             service = self._service(stored_only=True)
-            return self._record(service.inspect(candidate_id) if self.production else
-                service.store.get(candidate_id, recover=False))
+            if self.production:
+                return self._record(service.inspect(candidate_id))
+            from .engineering_jobs import EngineeringJobs
+            return self._record(EngineeringJobs(service.store.database).with_deferred(
+                service.store.get(candidate_id, recover=False)))
         service = self._service(candidate_id=candidate_id)
         handlers = {'inspect': service.inspect, 'tests': service.tests,
                     'review': service.review, 'discard': service.discard}
@@ -505,7 +508,9 @@ always requires approval for the exact commit and verified release evidence.
         # Authoritative, deterministic evidence prevents model prose from turning
         # rejection into success or claiming a candidate was applied to main.
         summaries = []
+        from .engineering_jobs import deferred_status
         for record in self.records.values():
+            deferred = ''.join('\n' + deferred_status(item) for item in (record.get('deferred_operations') or [])[-1:])
             baseline = record.get('baseline_outcome')
             if record.get('execution_state') == 'blocked_before_implementation' and baseline:
                 manual = record.get('manual_operations') or []
@@ -517,7 +522,7 @@ always requires approval for the exact commit and verified release evidence.
                     f"Retryable: {'Yes' if (record.get('failure') or {}).get('retryable') else 'No'}.")
                 if manual and manual[-1]['result'] == 'unchanged_candidate':
                     summary += '\nManual tests: unchanged candidate; no implementation attempt.'
-                summaries.append(summary)
+                summaries.append(summary + deferred)
                 continue
             tests = ', '.join(f"{item['phase']}: exit {item['returncode']}"
                               + (' (incomplete)' if item.get('timed_out') or item.get('truncated') else '')
@@ -541,4 +546,5 @@ always requires approval for the exact commit and verified release evidence.
                                   f"Confidence: {improvement['confidence']}.")
             if record['state'] == 'passed':
                 summaries[-1] += '\nTests and review passed. Preview classifies development promotion; production deployment requires approval.'
+            summaries[-1] += deferred
         return '\n\n'.join(summaries) + '\nMain was not modified; no merge or apply-to-main was performed.'
