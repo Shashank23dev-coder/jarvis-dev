@@ -361,9 +361,19 @@ def _state_dir(service):
     return service.root.parent / 'direct-dev'
 
 
+def project_blocker(database, project_id):
+    """Why a registered project cannot host a direct run, or None."""
+    from .engineering_portfolio import Portfolio
+    project = next((p for p in Portfolio(database).projects() if p['project_id'] == project_id), None)
+    if not project or not project.get('repository'):
+        return 'project_without_repository'
+    if project.get('read_only'):
+        return 'project_read_only'
+    return None
+
+
 def direct_route(service, job):
     """Choose the direct path only when every condition holds; anything else stays legacy."""
-    from .engineering_portfolio import Portfolio
     reason = None
     if job.get('operator'):
         reason = 'operator_job'
@@ -372,13 +382,8 @@ def direct_route(service, job):
     elif job.get('provider') not in AGENT_FOR_PROVIDER:
         reason = 'provider_not_subscription_cli'  # codex_api/openai keep the legacy spend gate
     else:
-        project = next((p for p in Portfolio(service.store.database).projects()
-                        if p['project_id'] == job.get('project_id')), None)
-        if not project or not project.get('repository'):
-            reason = 'project_without_repository'
-        elif project.get('read_only'):
-            reason = 'project_read_only'
-        elif job.get('candidate_id') and not is_direct_candidate(
+        reason = project_blocker(service.store.database, job.get('project_id'))
+        if reason is None and job.get('candidate_id') and not is_direct_candidate(
                 service.store.get(job['candidate_id'], internal=True, recover=False)):
             reason = 'legacy_candidate_resume'
     decision = dict(at=timestamp(), job_id=job['id'], attempt=job['attempts'], provider=job.get('provider'),
