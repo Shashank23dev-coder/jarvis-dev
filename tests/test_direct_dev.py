@@ -231,20 +231,18 @@ def test_cli_unavailable_blocks_without_api_fallback(tmp_path, monkeypatch):
     assert blocked.value.decision['reason'] == 'no_usable_agent'
 
 
-def fake_codex(tmp_path):
+def fake_codex(tmp_path, executable_script):
     dump = tmp_path / 'env'
-    script = tmp_path / 'fake-codex'
-    script.write_text(f'''#!/bin/sh
+    script = executable_script('fake-codex', f'''#!/bin/sh
 env > {dump}.$1
 if [ "$1" = login ]; then echo "Logged in using ChatGPT" >&2; exit 0; fi
 while [ $# -gt 0 ]; do if [ "$1" = -o ]; then echo "done" > "$2"; fi; shift; done
 ''')
-    script.chmod(0o755)
     return script, dump
 
 
-def test_codex_process_inherits_no_api_variables_and_no_bwrap(tmp_path, monkeypatch):
-    script, dump = fake_codex(tmp_path)
+def test_codex_process_inherits_no_api_variables_and_no_bwrap(tmp_path, monkeypatch, executable_script):
+    script, dump = fake_codex(tmp_path, executable_script)
     monkeypatch.setenv('JARVIS_CODEX_EXECUTABLE', str(script))
     for key, value in API_VARS.items():
         monkeypatch.setenv(key, value)
@@ -262,8 +260,8 @@ def test_codex_process_inherits_no_api_variables_and_no_bwrap(tmp_path, monkeypa
     assert 'bwrap' not in tools and {'codex', 'sh', 'git'} <= tools
 
 
-def test_agent_failure_logs_real_class_sanitized_message_and_stage(tmp_path, monkeypatch):
-    script, _ = fake_codex(tmp_path)
+def test_agent_failure_logs_real_class_sanitized_message_and_stage(tmp_path, monkeypatch, executable_script):
+    script, _ = fake_codex(tmp_path, executable_script)
     monkeypatch.setenv('JARVIS_CODEX_EXECUTABLE', str(script))
     failures = dev_agents.FailureLog(tmp_path / 'private/failures.jsonl')
     agent = dev_agents.CodexCLIAgent(tmp_path / 'bin', failures, 'run-1')
@@ -281,11 +279,10 @@ def test_agent_failure_logs_real_class_sanitized_message_and_stage(tmp_path, mon
     assert oct(failures.path.stat().st_mode & 0o777) == '0o600'
 
 
-def test_cli_exit_failure_keeps_process_error_and_classifies(tmp_path, monkeypatch):
-    script = tmp_path / 'fake-codex'
-    script.write_text('#!/bin/sh\nif [ "$1" = login ]; then echo "Logged in using ChatGPT" >&2; exit 0; fi\n'
+def test_cli_exit_failure_keeps_process_error_and_classifies(tmp_path, monkeypatch, executable_script):
+    script = executable_script(
+        'fake-codex', '#!/bin/sh\nif [ "$1" = login ]; then echo "Logged in using ChatGPT" >&2; exit 0; fi\n'
                       'echo "You hit your usage limit" >&2; exit 3\n')
-    script.chmod(0o755)
     monkeypatch.setenv('JARVIS_CODEX_EXECUTABLE', str(script))
     failures = dev_agents.FailureLog(tmp_path / 'failures.jsonl')
     agent = dev_agents.CodexCLIAgent(tmp_path / 'bin', failures, 'run-2')
@@ -313,13 +310,13 @@ def test_review_verdict_parsing():
         dev_agents.parse_verdict('looks fine to me')
 
 
-def scripted_codex(tmp_path, failing_execs, *, logout_on_failure=False, error='401 Unauthorized: token expired'):
+def scripted_codex(tmp_path, executable_script, failing_execs, *, logout_on_failure=False,
+                   error='401 Unauthorized: token expired'):
     """Fake Codex whose first `failing_execs` exec calls fail with `error`; counts every call."""
     state = tmp_path / 'codex-state'
     state.mkdir()
     (state / 'logged-in').touch()
-    script = tmp_path / 'fake-codex'
-    script.write_text(f'''#!/bin/sh
+    script = executable_script('fake-codex', f'''#!/bin/sh
 S={state}
 echo "$1" >> $S/calls
 if [ "$1" = login ]; then
@@ -333,7 +330,6 @@ if [ "$n" -le {failing_execs} ]; then
 fi
 while [ $# -gt 0 ]; do if [ "$1" = -o ]; then echo "done" > "$2"; fi; shift; done
 ''')
-    script.chmod(0o755)
     return script, lambda: (state / 'calls').read_text().split()
 
 
@@ -344,8 +340,8 @@ while [ $# -gt 0 ]; do if [ "$1" = -o ]; then echo "done" > "$2"; fi; shift; don
     (9, False, 'You hit your usage limit', 'provider_quota', ['login', 'exec']),
 ])
 def test_codex_retries_once_only_for_authentication_after_reprobing_login(
-        tmp_path, monkeypatch, failing, logout, error, code, calls):
-    script, observed = scripted_codex(tmp_path, failing, logout_on_failure=logout, error=error)
+        tmp_path, monkeypatch, executable_script, failing, logout, error, code, calls):
+    script, observed = scripted_codex(tmp_path, executable_script, failing, logout_on_failure=logout, error=error)
     monkeypatch.setenv('JARVIS_CODEX_EXECUTABLE', str(script))
     failures = dev_agents.FailureLog(tmp_path / 'failures.jsonl')
     agent = dev_agents.CodexCLIAgent(tmp_path / 'bin', failures, 'run-3')
@@ -366,8 +362,8 @@ def test_codex_retries_once_only_for_authentication_after_reprobing_login(
         assert 'implementing.exec_auth_retry' not in stages
 
 
-def test_codex_authentication_failure_never_falls_back_to_an_api_agent(tmp_path, monkeypatch):
-    script, observed = scripted_codex(tmp_path, 9)
+def test_codex_authentication_failure_never_falls_back_to_an_api_agent(tmp_path, monkeypatch, executable_script):
+    script, observed = scripted_codex(tmp_path, executable_script, 9)
     monkeypatch.setenv('JARVIS_CODEX_EXECUTABLE', str(script))
     source, database = fixture_project(tmp_path)
     codex = dev_agents.CodexCLIAgent(tmp_path / 'bin')

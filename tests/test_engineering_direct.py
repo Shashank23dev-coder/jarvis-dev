@@ -440,6 +440,7 @@ def test_environment_blocked_preparation_leaves_candidate_and_job_unchanged(
     if scenario == 'pre_existing_only':
         assert preparation['failing_tests'] == [
             dict(phase='full_python', test='tests/test_old.py::test_broken', pre_existing=True)]
+        assert [(s['returncode'], s['summary']) for s in preparation['baseline_shards']] == [(1, [])]
     # Seal, state and job are exactly as before; no second review ran.
     assert {k: candidate.get(k) for k in SEAL} == {k: before.get(k) for k in SEAL}
     assert candidate['state'] == 'passed'
@@ -600,6 +601,11 @@ def test_new_failure_in_one_shard_reruns_only_that_shard_on_the_base_commit(setu
     assert preparation['failing_tests'] == [
         dict(phase='full_python', test='tests/test_candidate_apply.py::test_b', pre_existing=False)]
     assert [s['returncode'] for s in preparation['full_python_shards']] == [0, 1, 0]
+    # The base commit's shard summary is kept, not only the per-test pre_existing flags.
+    [base] = preparation['baseline_shards']
+    assert (base['shard'], base['paths'], base['returncode'], base['timed_out'], base['summary']) == (
+        'python-1', SHARD_PATHS[1], 0, False, ['1 passed'])
+    assert base['elapsed_seconds'] >= 0
     assert CandidateApply(factory(tester=passed)).preview(job['candidate_id'])['eligible'] is False
 
 
