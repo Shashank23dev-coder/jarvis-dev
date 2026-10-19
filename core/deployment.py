@@ -234,7 +234,7 @@ class DeploymentMiddleware:
                 if self.settings.mode == 'production':
                     message['headers'] = list(message.get('headers', [])) + [
                         (b'cache-control', b'no-store'), (b'x-content-type-options', b'nosniff'),
-                        (b'x-frame-options', b'DENY'), (b'referrer-policy', b'no-referrer')]
+                        (b'x-frame-options', b'DENY'), (b'referrer-policy', b'same-origin')]
             await send(message)
 
         try:

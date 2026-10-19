@@ -652,3 +652,45 @@ def test_restore_to_an_older_container_without_the_hash(runtime_env, monkeypatch
     monkeypatch.setattr(runtime, 'cleanup', lambda record: None)
     runtime.restore(dict(id='abc', previous=dict(container_id='old-container', image='sha256:old')))
     assert calls[-1] == ('start', 'old-container')
+
+
+# --- referrer policy and real browser form POSTs (login-origin-fix) ---------------
+# Regression: production sent Referrer-Policy: no-referrer, which makes browsers send
+# Origin: null on the login form POST, so the strict origin check refused every login.
+
+LIVE_ORIGIN = "https://shashank-jarvis.duckdns.org"
+
+
+def test_production_responses_use_same_origin_referrer_policy(production):
+    client, _ = client_for(production)
+    with client:
+        for path in ("/login", "/"):
+            assert client.get(path).headers["referrer-policy"] == "same-origin"
+
+
+def live_client(production):
+    settings = Settings.from_env(dict(production, JARVIS_PUBLIC_ORIGIN=LIVE_ORIGIN))
+    return TestClient(main.create_app(settings=settings), base_url=LIVE_ORIGIN, follow_redirects=False)
+
+
+def browser_post(client, origin):
+    page = client.get("/login")
+    headers = {"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document",
+               "Content-Type": "application/x-www-form-urlencoded"}
+    if origin is not None:
+        headers["Origin"] = origin
+    return client.post("/login", headers=headers,
+                       data={"username": OWNER_USERNAME, "password": OWNER_PASSWORD, "csrf": csrf_from(page)})
+
+
+def test_real_browser_login_post_passes_origin_check(production):
+    with live_client(production) as client:
+        response = browser_post(client, LIVE_ORIGIN)
+        assert response.status_code == 303 and response.headers["location"] == "/"
+
+
+@pytest.mark.parametrize("origin", ["null", None])
+def test_real_browser_login_post_with_null_origin_still_refused(production, origin):
+    with live_client(production) as client:
+        response = browser_post(client, origin)
+        assert response.status_code == 403 and response.json() == {"detail": "Cross-origin request denied"}
