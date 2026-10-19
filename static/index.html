@@ -460,9 +460,7 @@
         <option value="activity">Activity</option>
       </select>
 
-      <div class="status-value">
-        Local Development
-      </div>
+      <div class="status-value" id="runtimeMode">Unavailable</div>
 
     </div>
 
@@ -601,6 +599,17 @@ const messages = document.getElementById("messages");
 const welcome = document.getElementById("welcome");
 const viewNames = ["assistant", "tasks", "memory", "agents", "tools", "activity"];
 const requests = {};
+async function loadRuntimeMode() {
+    const label = document.getElementById("runtimeMode");
+    try {
+        const response = await fetch("/runtime", { cache: "no-store" });
+        if (!response.ok) throw new Error("Runtime unavailable");
+        const data = await response.json();
+        label.textContent = data.mode === "development" ? "Development" :
+            data.mode === "production" ? "Production" : "Unavailable";
+    } catch (_) { label.textContent = "Unavailable"; }
+}
+loadRuntimeMode();
 let activeView = "assistant";
 let conversationId = null;
 try { conversationId = localStorage.getItem("jarvis.conversationId"); } catch (_) {}

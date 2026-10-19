@@ -25,7 +25,7 @@ class Node {
     addEventListener(key, callback) { this.listeners[key] = callback; }
     focus() { this.focused = true; }
 }
-function setup(fetch, savedConversation = null) {
+function setup(fetch, savedConversation = null, runtimeResponse = { ok: true, json: async () => ({ mode: 'development' }) }) {
     const nodes = {};
     for (const match of html.matchAll(/id="([^"]+)"/g)) nodes[match[1]] = new Node();
     const nav = [...html.matchAll(/data-view="([^"]+)"/g)].map(match => {
@@ -42,7 +42,8 @@ function setup(fetch, savedConversation = null) {
         setItem: (key, value) => saved.set(key, value),
         removeItem: key => saved.delete(key)
     };
-    const context = vm.createContext({ document, fetch, AbortController, localStorage });
+    const pageFetch = (url, options) => url === '/runtime' ? runtimeResponse : fetch(url, options);
+    const context = vm.createContext({ document, fetch: pageFetch, AbortController, localStorage });
     vm.runInContext(script, context);
     return { nodes, nav, saved, run: code => vm.runInContext(code, context) };
 }
@@ -50,7 +51,8 @@ const text = node => [node.textContent, ...node.children.map(text)].join(' ');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('all six views navigate and preserve chat and draft', () => {
-    const ui = setup(async () => ({ ok: true, json: async () => ({ tasks: [], activity: [] }) }));
+    const ui = setup(async () => ({ ok: true, json: async () => ({ mode: 'development', tasks: [], activity: [] }) }));
+    ui.nodes.runtimeMode.textContent = 'Development';
     ui.run('addMessage("user", "Keep this conversation")');
     ui.nodes.prompt.value = 'Unsent draft';
     for (const nav of ui.nav) {
@@ -63,13 +65,26 @@ test('all six views navigate and preserve chat and draft', () => {
     assert.equal(ui.nodes.prompt.value, 'Unsent draft');
 });
 
+test('runtime mode displays Development and Production, and falls back to Unavailable', async () => {
+    for (const [response, expected] of [
+        [{ ok: true, json: async () => ({ mode: 'development' }) }, 'Development'],
+        [{ ok: true, json: async () => ({ mode: 'production' }) }, 'Production'],
+        [{ ok: false, json: async () => ({}) }, 'Unavailable'],
+        [{ ok: true, json: async () => ({ mode: 'other' }) }, 'Unavailable']
+    ]) {
+    const ui = setup(async () => { throw new Error('unexpected request'); }, null, response);
+        await tick();
+        assert.equal(ui.nodes.runtimeMode.textContent, expected);
+    }
+});
+
 test('tasks load safely, include plan details, and support empty/error/retry', async () => {
     let payload = { tasks: [{ goal: '<img src=x onerror=alert(1)>', status: 'planned', created_at: '2026-09-24T12:00:00', steps: [{ description: 'Inspect', agent: 'reviewer' }] }] };
     let ok = true;
     const calls = [];
     const ui = setup(async url => { calls.push(url); return { ok, json: async () => payload }; });
     await ui.run('loadView("tasks")');
-    assert.deepEqual(calls, ['/tasks']);
+    assert.deepEqual(calls, ['/tasks']); // /runtime is intercepted by setup's startup mock.
     assert.match(text(ui.nodes.tasksContent), /<img src=x onerror=alert\(1\)>/);
     assert.match(text(ui.nodes.tasksContent), /Inspect \[reviewer\]/);
     assert.equal(ui.nodes.tasksContent.children[0].children[0].children[0].children[0].children.length, 0);

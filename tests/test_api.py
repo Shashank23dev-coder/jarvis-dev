@@ -22,6 +22,7 @@ def test_root_health_and_empty_lists(client):
     assert root.status_code == 200
     assert 'id="assistantView"' in root.text
     assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/runtime").json() == {"mode": "development"}
     assert client.get("/tasks").json() == {"tasks": []}
     assert client.get("/activity").json() == {"activity": []}
     assert client.get("/tasks/missing").status_code == 404
