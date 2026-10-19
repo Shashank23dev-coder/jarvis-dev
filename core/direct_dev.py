@@ -184,19 +184,25 @@ class DirectDevelopment:
                 stage_changed('testing')
                 # Only this attempt's results: an unchanged revision has the previous attempt's fingerprint.
                 start = len(record['test_results'])
-                service._tests(focused=True)
+                record['targeted_tests'] = _scoped_tests(service, targeted_tests)
+                if record['targeted_tests'] or not record['files_changed']:
+                    service._tests(focused=True)  # raises for an attempt with no changes
+                else:
+                    record.update(state='needs_revision', reviewer_result=None, tested_fingerprint=None)
+                    service.store.save(record, 'tests_not_identified')
                 current = record['test_results'][start:]
                 tests = [_test_summary(t) for t in current]
-                passed = record.get('tested_fingerprint') == record['fingerprint']
+                passed = bool(record['targeted_tests']) and record.get('tested_fingerprint') == record['fingerprint']
                 unchanged, previous = previous == record['fingerprint'], record['fingerprint']
                 attempt.update(tests=tests, tests_passed=passed, files_changed=record['files_changed'],
-                               unchanged=unchanged)
+                               targeted_tests=record['targeted_tests'], unchanged=unchanged)
                 report.update(diff=record['diff'], diff_summary=record['diff_summary'],
                               files_changed=record['files_changed'], tests=tests, tests_passed=passed)
                 if not passed:
                     # As in _review: only a change with passing sandboxed tests is reviewed.
                     attempt['outcome'] = report['status'] = 'tests_failed'
-                    feedback = _failure_feedback(number, unchanged, current)
+                    feedback = (_failure_feedback(number, unchanged, current) if record['targeted_tests']
+                                else NO_TESTS_NOTE)
                     continue
 
                 report['stage'] = 'commit'
@@ -265,6 +271,23 @@ def _test_summary(evidence):
 SANDBOX_NOTE = ("These tests ran in Jarvis's sandbox, not in your worktree, so you may not be able to run "
                 "them yourself. The failures below are real test results: fix the code or the tests to "
                 "address the errors shown. Do not assume an environment problem.")
+
+
+TEST_FILE = re.compile(r'^tests/(?:[^/]+/)*(?:test_[^/]+\.py|[^/]+_test\.py|[^/]+\.test\.c?js)$')
+NO_TESTS_NOTE = ("No focused tests cover this change: the plan named none and you added or changed no test "
+                 "file. Add or update a test under tests/ (test_*.py or *.test.cjs) that exercises the change.")
+
+
+def _scoped_tests(service, planned):
+    """Planned tests plus test files the agent added or changed: scope found while implementing.
+
+    Still bounded: changed files are capped by the candidate limits and policy-checked by _diff.
+    """
+    service._diff()
+    worktree = Path(service.record['worktree'])
+    found = [path for path in service.record['files_changed']
+             if TEST_FILE.match(path) and (worktree / path).is_file()]
+    return list(dict.fromkeys([*planned, *found]))[:8]
 
 
 def _failure_feedback(number, unchanged, results):

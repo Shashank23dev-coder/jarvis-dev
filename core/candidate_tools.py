@@ -23,6 +23,10 @@ class CreateArguments(StrictModel):
 
 
 class EngineeringArguments(CreateArguments):
+    # Optional hints: the implementing agent discovers scope in its worktree and
+    # the tests it adds or changes join the targeted run (see direct_dev).
+    inspect_paths: Annotated[list[PathArgument], Field(max_length=8)] = Field(default_factory=list)
+    targeted_tests: Annotated[list[PathArgument], Field(max_length=8)] = Field(default_factory=list)
     problem_detected: Annotated[str, Field(min_length=1, max_length=2000)]
     hypothesis: Annotated[str, Field(min_length=1, max_length=2000)]
 
@@ -33,6 +37,9 @@ class BrainEngineeringArguments(EngineeringArguments):
 
 
 class OperatorArguments(EngineeringArguments):
+    # The operator runs a baseline on its planned tests, so it still needs them.
+    inspect_paths: Annotated[list[PathArgument], Field(min_length=1, max_length=8)]
+    targeted_tests: Annotated[list[PathArgument], Field(min_length=1, max_length=8)]
     execution_mode: Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW'] = 'CODEX_BUILD_CLAUDE_REVIEW'
 
 
@@ -61,7 +68,7 @@ APPLY_READ = re.compile(PREFIX + r'(?:show (?:the )?apply eligibility preview fo
 
 class CandidateTools:
     CONTINUE_ENGINEERING = ('The current task has an authorized, prepared engineering action but no candidate. '
-        'Continue this same task by calling create_engineering_job with provider=codex_cli and paths from the returned workspace catalog. '
+        'Continue this same task by calling create_engineering_job with provider=codex_cli; paths from the returned workspace catalog are optional hints. '
         'One tool per response allows additional tool responses in this task. Do not ask for another user request. '
         'Return the queued job ID; the separate worker implements, tests and reviews. Never apply or deploy.')
 
@@ -88,7 +95,8 @@ class CandidateTools:
         self.records = {}
         self.apply_results = {}
         self.previews = {}
-        self.created = False
+        self.created = False  # A live (not rejected or failed) candidate or job exists.
+        self.attempts = 0
         self.jobs = {}
         self.allowed = set()
         self.ids = set()
@@ -113,8 +121,9 @@ Infer registered project names; use inspect_engineering_runtime for availability
 and the portfolio. Capabilities and decide_engineering are advisory observations.
 Use list_files/read_text or inspect_project_repository for source inspection.
 Unknown locations need clarification; unavailable runtime never blocks source work.
-Create engineering jobs directly with project_id, observed problem, hypothesis,
-inspection paths and tests. prepare_engineering is optional workspace discovery.
+Create engineering jobs directly with project_id, observed problem and hypothesis.
+Inspection paths and tests are optional hints; the implementing agent discovers
+the files and tests it needs. prepare_engineering is optional workspace discovery.
 Prefer start_engineering_operator for coordinated implementation and review.
 Default CODEX_BUILD_CLAUDE_REVIEW: Codex implements, Claude reviews independently.
 Use CODEX_ONLY for a requested Codex implementation or CLAUDE_ONLY for a requested
@@ -188,7 +197,8 @@ always requires approval for the exact commit and verified release evidence.
 
     @property
     def implementation_pending(self):
-        return self.workspace is not None and not self.created
+        # Prompts for the first submission only; a retry after rejection is allowed, not forced.
+        return self.workspace is not None and not self.attempts
 
     def _record(self, record):
         if record is None:
@@ -207,21 +217,37 @@ always requires approval for the exact commit and verified release evidence.
                                  busy=record.get('busy', False), evidence=encoded[:12000],
                                  truncated=len(encoded) > 12000)
 
+    def _check_slot(self, message):
+        # One live candidate per task; a rejected or failed attempt frees the
+        # slot, bounded by the existing attempt budget.
+        from .engineering_jobs import MAX_ATTEMPTS
+        if self.created:
+            raise ToolDenied(message)
+        if self.attempts >= MAX_ATTEMPTS:
+            raise ToolDenied('Candidate retry budget exhausted for this task')
+
     def create(self, inspect_paths, targeted_tests, project_id=None):
-        if 'create' not in self.allowed or self.created:
+        if 'create' not in self.allowed:
             raise ToolDenied('One candidate per explicit request')
+        self._check_slot('One candidate per explicit request')
         from .engineering_decision import resolve_project, submission_decision
         project_id = resolve_project(self.project_reference, self.projects, project_id)
         if not self.production:
             submission_decision(self.database, self.goal, project_id=project_id,
                 task_id=(self.source_context or {}).get('task_id'))
-        self.created = True  # Bound duplicate execution, not owner authority.
-        if self.production:
-            record = self._service().invoke('create', dict(inspect_paths=inspect_paths,
-                targeted_tests=targeted_tests, project_id=project_id))
-        else:
-            record = self._service(project_id).start(self.goal, inspect_paths, targeted_tests,
-                source_context=dict(self.source_context or {}, project_id=project_id))
+        self.attempts += 1  # Bound duplicate execution, not owner authority.
+        self.created = True  # Held while the attempt runs.
+        try:
+            if self.production:
+                record = self._service().invoke('create', dict(inspect_paths=inspect_paths,
+                    targeted_tests=targeted_tests, project_id=project_id))
+            else:
+                record = self._service(project_id).start(self.goal, inspect_paths, targeted_tests,
+                    source_context=dict(self.source_context or {}, project_id=project_id))
+        except Exception:
+            self.created = False
+            raise
+        self.created = record.get('busy') or record['state'] not in {'rejected', 'needs_revision', 'discarded'}
         self.ids.add(record['id'])
         return self._record(record)
 
@@ -258,8 +284,7 @@ always requires approval for the exact commit and verified release evidence.
                              project_id=project_id, execution_mode=execution_mode)
 
     def engineer(self, inspect_paths, targeted_tests, problem_detected, hypothesis, provider='codex_cli', project_id=None, execution_mode=None):
-        if self.created:
-            raise ToolDenied('One candidate per authorized task')
+        self._check_slot('One candidate per authorized task')
         require_owner(self.authority)
         if self.workspace is not None:
             if (not set(inspect_paths) <= set(self.workspace.editable_paths)
@@ -272,7 +297,6 @@ always requires approval for the exact commit and verified release evidence.
                 goal_digest=goal_digest(self.goal))
         from .engineering_decision import resolve_project
         project_id = resolve_project(self.project_reference, self.projects, project_id)
-        self.created = True
         if self.engineering_action:
             from .engineering_jobs import EngineeringJobs, project_job
             from .engineering_tools import JobEvidence
@@ -285,8 +309,12 @@ always requires approval for the exact commit and verified release evidence.
             record = (self._service().invoke('job_create', arguments) if self.production else
                       project_job(EngineeringJobs(self.database).create(self.goal,
                           self.engineering_action.model_dump(), arguments, self.source_context)))
+            # A denied submission creates nothing; a blocked or failed job is not live.
+            self.attempts += 1
+            self.created = record['status'] not in {'blocked', 'failed'}
             self.jobs[record['id']] = record
             return JobEvidence(jobs=[record])
+        self.created = True
         options = ({'engineering_action': self.engineering_action.model_dump()}
                    if self.engineering_action and not self.production else {})
         record = self._service(project_id).engineer(self.goal, inspect_paths, targeted_tests, problem_detected, hypothesis, **options)

@@ -111,6 +111,12 @@ class EngineeringJobs:
             raise ToolDenied('Invalid job source')
         schema = OperatorArguments if 'execution_mode' in arguments else EngineeringArguments
         args = schema.model_validate(arguments).model_dump(exclude_none=True)
+        if not (args['inspect_paths'] and args['targeted_tests']):
+            # Scope discovery needs an agent in a worktree (direct path); the
+            # legacy model proposal path only edits files it was shown.
+            from .direct_dev import AGENT_FOR_PROVIDER
+            if action.scope != 'code' or action.provider not in AGENT_FOR_PROVIDER:
+                raise ToolDenied('This engineering route needs explicit inspect_paths and targeted_tests')
         from .engineering_decision import resolve_project
         from .engineering_portfolio import Portfolio
         project_id = resolve_project(goal, Portfolio(self.database).projects(), args.get('project_id'))
@@ -130,22 +136,14 @@ class EngineeringJobs:
         # refused. Idempotent retries keep the originally committed decision.
         with self.database.transaction() as db:
             prior = db.execute('SELECT record FROM engineering_jobs WHERE task_id=?', (action.task_id,)).fetchone()
-        if prior:
-            job = json.loads(prior[0])
-            if any(job[key] != value for key, value in
-                   [('goal', goal), ('action', action.model_dump()), ('arguments', args), ('source', source)]):
-                raise ToolDenied('Engineering job source mismatch')
-            return self.get(job['id'])
+            if prior:
+                return self.get(self._resubmit(db, json.loads(prior[0]), goal, action, args, source))
         from .engineering_decision import submission_decision
         decision = submission_decision(self.database, goal, project_id=args.get('project_id'), task_id=action.task_id)
         with self.database.transaction() as db:
             row = db.execute('SELECT record FROM engineering_jobs WHERE task_id=?', (action.task_id,)).fetchone()
             if row:
-                job = json.loads(row[0])
-                if any(job[key] != value for key, value in
-                       [('goal', goal), ('action', action.model_dump()), ('arguments', args), ('source', source)]):
-                    raise ToolDenied('Engineering job source mismatch')
-                return self.get(job['id'])
+                return self.get(self._resubmit(db, json.loads(row[0]), goal, action, args, source))
             job = dict(id=str(uuid4()), type='engineering', goal=goal, source=source,
                 project_id=project_id, decision=decision,
                 status='queued', provider=action.provider, created_at=timestamp(), started_at=None,
@@ -164,6 +162,35 @@ class EngineeringJobs:
                        (job['id'], action.task_id, job['created_at'], json.dumps(job)))
             self._save(db, job, 'created')
         return self.get(job['id'])
+
+    def _resubmit(self, db, job, goal, action, args, source):
+        """The task's one job: idempotent while live; a rejected attempt is requeued for a new candidate.
+
+        Requeueing keeps the job's attempt count and limit, so it spends the
+        existing retry budget and never renews it.
+        """
+        if any(job[key] != value for key, value in
+               [('goal', goal), ('action', action.model_dump()), ('source', source)]):
+            raise ToolDenied('Engineering job source mismatch')
+        retry = (job['status'] == 'blocked' and job['control'] is None and not job['lease_owner']
+                 and not job.get('operator') and job['attempts'] < job.get('attempt_limit', MAX_ATTEMPTS))
+        if retry and job.get('candidate_id'):
+            busy = db.execute('SELECT busy FROM candidates WHERE id=?', (job['candidate_id'],)).fetchone()
+            retry = not (busy and busy[0])
+        if not retry:
+            if job['arguments'] != args:
+                raise ToolDenied('Engineering retry budget exhausted' if job['status'] == 'failed'
+                                 else 'Engineering job source mismatch')
+            return job['id']
+        if job['arguments'] != args:
+            job.setdefault('input_revisions', []).append(dict(timestamp=timestamp(), arguments=job['arguments']))
+            job['arguments'] = args
+            job['improvement'].update(observed_problem=args['problem_detected'], hypothesis=args['hypothesis'])
+        # candidate_ids keeps the rejected candidate; the worker starts a new one.
+        job.update(status='queued', current_stage='queued', candidate_id=None, control=None,
+                   error=None, block_reason=None, completed_at=None)
+        self._save(db, job, 'resubmitted')
+        return job['id']
 
     def get(self, identifier):
         with self.database.transaction() as db:
