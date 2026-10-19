@@ -301,6 +301,91 @@ def test_real_post_apply_sandbox_python_and_ui(setup):
     assert all(t['returncode'] == 0 for t in result['verification'])
 
 
+# tests/test_self_edit.py and tests/test_candidate_apply.py are in release shards 1 and 2;
+# the fixture's own tests/test_app.py is in none, so it runs in a final extra shard.
+SHARD_PATHS = [['tests/test_self_edit.py'], ['tests/test_candidate_apply.py'], ['tests/test_app.py']]
+
+
+def sharded_candidate(setup):
+    source, _, factory = setup
+    for paths, name in zip(SHARD_PATHS[:2], 'ab'):
+        (source / paths[0]).write_text(f'def test_{name}(): pass\n')
+    git(source, 'add', '.')
+    git(source, 'commit', '-m', 'Tests in two release shards')
+    return start(factory())
+
+
+def test_post_apply_full_python_runs_release_shards_within_their_budget(setup, monkeypatch):
+    import time
+    source, database, factory = setup
+    candidate = sharded_candidate(setup)
+    monkeypatch.setenv('JARVIS_PREPARE_SHARD_SECONDS', '240')
+    monkeypatch.setenv('JARVIS_PREPARE_BUDGET_SECONDS', '1200')
+    calls = []
+    apply = CandidateApply(factory())
+    def tester(repository, phase, paths):
+        assert (repository.root / 'src/app.py').read_text() == 'value = 2\n'
+        calls.append((phase, paths, repository.pytest_timeout, apply.service._check()))
+        return CommandResult(('pytest', *paths), 0, '1 passed', sandbox=dict(backend='docker'))
+    apply.service.tester = tester
+    result = apply.apply(candidate['id'], confirmation(candidate['id']))['apply']
+    assert result['status'] == 'applied', result
+    full = [call for call in calls if call[0] == 'full_python']
+    # One sandbox run per release shard, in order, each with the configured per-shard limit.
+    assert [call[1] for call in full] == SHARD_PATHS and {call[2] for call in full} == {240}
+    # The verification deadline is the configured budget, not the 900 s candidate ceiling.
+    assert all(900 < call[3] <= 1200 for call in full)
+    assert [call[2] for call in calls if call[0] == 'targeted'] == [120]
+    assert (result['shard_seconds'], result['budget_seconds']) == (240, 1200)
+    evidence = next(t for t in result['verification'] if t['phase'] == 'full_python')
+    assert [(s['shard'], s['paths'], s['returncode']) for s in evidence['sandbox']['shards']] == [
+        (f'python-{n}', paths, 0) for n, paths in enumerate(SHARD_PATHS, 1)]
+    assert [r['shard'] for r in evidence['runners']] == ['python-1', 'python-2', 'python-3']
+    assert evidence['returncode'] == 0 and not evidence['timed_out'] and not evidence['truncated']
+    record = factory().store.get(candidate['id'], internal=True)
+    assert record['lease_until'] > time.time() + 900  # no recovery while the shards run
+    assert git(source, 'rev-parse', 'HEAD').strip() == result['commit']
+
+
+@pytest.mark.parametrize('outcome', ['failed', 'timed_out'])
+def test_post_apply_failing_or_timed_out_shard_rolls_back(setup, outcome):
+    source, _, factory = setup
+    candidate = sharded_candidate(setup)
+    calls = []
+    def tester(repository, phase, paths):
+        calls.append((phase, paths))
+        if phase == 'full_python' and paths == SHARD_PATHS[1]:
+            return CommandResult(('pytest',), -9 if outcome == 'timed_out' else 1, 'FAILED x',
+                                 timed_out=outcome == 'timed_out')
+        return CommandResult(('pytest',), 0, '1 passed')
+    result = CandidateApply(factory(tester=tester)).apply(candidate['id'], confirmation(candidate['id']))['apply']
+    assert result['status'] == 'rolled_back' and result['rollback'] and not result['post_apply_verified']
+    ran = [paths for phase, paths in calls if phase == 'full_python']
+    # A failure still runs every shard for evidence; a timeout stops as an environment limit.
+    assert ran == (SHARD_PATHS if outcome == 'failed' else SHARD_PATHS[:2])
+    shards = result['verification'][-1]['sandbox']['shards']
+    assert [s['returncode'] for s in shards] == ([0, 1, 0] if outcome == 'failed' else [0, -9])
+    assert (source / 'src/app.py').read_text() == 'value = 1\n'
+    assert git(source, 'rev-parse', 'HEAD').strip() == candidate['base_commit']
+    assert git(source, 'status', '--porcelain') == ''
+
+
+def test_real_post_apply_shards_in_the_sandbox(setup, monkeypatch):
+    source, _, factory = setup
+    require_live_sandbox(source)
+    candidate = sharded_candidate(setup)
+    monkeypatch.setenv('JARVIS_PREPARE_SHARD_SECONDS', '300')
+    result = CandidateApply(factory(tester=None)).apply(candidate['id'], confirmation(candidate['id']))['apply']
+    assert result['status'] == 'applied', (result.get('error'), [
+        (t['phase'], t['returncode'], t['timed_out'], t['truncated'], t['stdout'][-800:], t['stderr'][-800:],
+         t['sandbox']) for t in result['verification']])
+    evidence = next(t for t in result['verification'] if t['phase'] == 'full_python')
+    shards = evidence['sandbox']['shards']
+    assert [(s['paths'], s['returncode'], s['summary'][-1:]) for s in shards] == [
+        (paths, 0, ['1 passed']) for paths in SHARD_PATHS]
+    assert all(0 < s['sandbox']['limits']['wall_seconds'] <= 300 for s in shards)
+
+
 def test_previous_turn_approval_does_not_authorize_current_chat(setup):
     from core.agent import AgentRunner
     from test_agent import ScriptedModel, call, final

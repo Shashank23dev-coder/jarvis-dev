@@ -275,7 +275,15 @@ class CandidateApply:
             raise ToolDenied('Index changed during apply')
 
     def _verify(self):
+        # full_python runs as preparation does: the release shards in sequence, each within
+        # its own sandbox limit, the whole verification inside the preparation budget.
+        from .direct_dev import _run, full_python_shards, prepare_limits, run_sharded
         r, audit = self.record, self.record['apply']
+        shard_seconds, budget = prepare_limits()
+        self.service.deadline = max(self.service.deadline, time.monotonic() + budget)
+        r['lease_until'] = time.time() + budget + 1  # crash recovery, as in prepare_for_apply
+        audit['shard_seconds'], audit['budget_seconds'] = shard_seconds, budget
+        self._save('post_apply_verification_started')
         repository = CandidateRepository(self.source, source_root=self.source, check=self.service._check)
         phases = [('targeted', r['targeted_tests']), ('full_python', ['tests'])]
         if (self.source / 'tests/ui.test.cjs').is_file():
@@ -284,10 +292,11 @@ class CandidateApply:
             audit['ui'] = 'not_present'
         for phase, paths in phases:
             self.service._tick('post_apply_' + phase)
-            if self.service.tester:
-                result = self.service.tester(repository, phase, paths)
+            if phase == 'full_python':
+                result = run_sharded(repository, lambda shard: _run(self.service.tester, repository, phase, shard),
+                                     full_python_shards(self.source), shard_seconds)[1]
             else:
-                result = repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths)
+                result = _run(self.service.tester, repository, phase, paths)
             stdout, stderr, runners = stored_output(result, paths)
             evidence = dict(sandbox=result.sandbox, phase=phase, returncode=result.returncode, timed_out=result.timed_out,
                             runners=runners,
