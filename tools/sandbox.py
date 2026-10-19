@@ -34,6 +34,11 @@ assert a == b
 ENV = {'PATH': '/runtime/bin:/usr/bin', 'HOME': '/tmp', 'LANG': 'C.UTF-8',
        'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1', 'JARVIS_MODE': 'development',
        'JARVIS_DB_PATH': ':memory:'}
+# Wall time for the hardened Docker probe (container start, Python and pytest import).
+# Measured on the 2-CPU dev host: 3.6-6.2 s idle, 6.9-8.5 s beside one 1-CPU sandbox
+# run, 10.2-14.9 s beside two. 10 s failed under load. 60 s is 4x the worst seen, still
+# detects a hung daemon within a minute, and is charged to the caller's test deadline.
+DOCKER_PROBE_SECONDS = 60
 
 
 def stamp():
@@ -114,8 +119,11 @@ def select_backend(repo, snapshot):
         # Probe the actual hardened configuration, not just CLI/daemon existence.
         probe = docker_execute(repo, snapshot, image,
                                ['/runtime/bin/python', '-I', '-c',
-                                PROBE], 10)
-        if probe.returncode or probe.timed_out or probe.truncated:
+                                PROBE], DOCKER_PROBE_SECONDS)
+        if probe.timed_out:
+            # Unfinished, not failed: an availability problem, not a safety violation.
+            raise ToolDenied('Docker hardened runtime probe timed out')
+        if probe.returncode or probe.truncated:
             raise ToolDenied('Docker hardened runtime probe failed')
         return 'docker', image, reasons
     except (ToolError, ValueError, KeyError, IndexError, TypeError) as exc:

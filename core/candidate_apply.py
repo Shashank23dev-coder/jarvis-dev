@@ -434,8 +434,11 @@ class CandidateApply:
                               audit['commit'], audit['baseline'])
                     audit.update(status='applied', completed_at=timestamp())
                     self._save('apply_succeeded')
-                except Exception:
-                    audit['error'] = 'Apply or post-apply verification failed'
+                except Exception as exc:
+                    from .candidate_provider import execution_error_code
+                    # Closed code only (e.g. sandbox_unavailable), never exception prose.
+                    audit.update(error='Apply or post-apply verification failed',
+                                 failure_code=execution_error_code(exc))
                     self._recover()
                 return self._public()
         finally:

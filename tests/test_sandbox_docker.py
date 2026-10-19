@@ -68,6 +68,38 @@ def test_fail_closed_and_production_does_not_use_docker(repository, monkeypatch)
     assert not calls
 
 
+@pytest.mark.parametrize('probe,code', [
+    (CommandResult((), 1, '', 'AssertionError'), 'sandbox_integrity_failed'),
+    (CommandResult((), -9, '', '', True), 'sandbox_unavailable'),
+])
+def test_only_a_completed_failing_probe_is_an_integrity_failure(repository, monkeypatch, probe, code):
+    from core.candidate_provider import execution_error_code
+    repository._bwrap = '/missing/bwrap'
+    def execute(argv, **kwargs):
+        if 'inspect' in argv:
+            return CommandResult(tuple(argv), 0, json.dumps([{'Id': 'sha256:test', 'Config': {}}]))
+        assert kwargs['timeout'] == sandbox.DOCKER_PROBE_SECONDS
+        return probe
+    monkeypatch.setattr(repository, '_execute', execute)
+    monkeypatch.setattr(RepositoryTools, '_execute', lambda *a, **k: CommandResult((), 0, ''))
+    with pytest.raises(ToolDenied, match='host execution disabled') as denied:
+        sandbox.select_backend(repository, repository.root)
+    assert execution_error_code(denied.value) == code
+
+
+def test_real_probe_past_its_budget_is_unavailable_not_an_integrity_failure(repository, monkeypatch):
+    from core.candidate_provider import execution_error_code
+    from test_self_edit import require_live_sandbox
+    require_live_sandbox(repository.root)  # the real probe passes within DOCKER_PROBE_SECONDS
+    repository._bwrap = '/missing/bwrap'
+    # Container start alone takes longer than 1 s (the probe measured 3.6 s at best).
+    monkeypatch.setattr(sandbox, 'DOCKER_PROBE_SECONDS', 1)
+    with pytest.raises(ToolDenied, match='host execution disabled') as denied:
+        sandbox.select_backend(repository, repository.root)
+    assert str(denied.value.__cause__) == 'Docker hardened runtime probe timed out'
+    assert execution_error_code(denied.value) == 'sandbox_unavailable'
+
+
 def test_docker_configuration_is_fixed():
     argv = sandbox.docker_command('/tmp/snapshot', 'sha256:test', 'name', 10)
     for option in ('--network=none', '--user=10001:10001', '--read-only', '--cap-drop=ALL',
