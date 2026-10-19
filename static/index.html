@@ -462,12 +462,13 @@
     .jump-latest { align-self: center; position: relative; z-index: 1; min-height: 44px; margin: -60px 0 16px; padding: 0 18px; font: inherit; font-size: 13px; font-weight: 600; color: var(--ground); background: var(--cyan); border: 0; border-radius: 22px; box-shadow: 0 6px 18px rgba(0,0,0,.35); cursor: pointer; }
     .composer:focus-within { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(79,209,232,.12); }
     textarea::placeholder { color: #A5B4C0; }
-    .small-button, .mobile-nav { min-height: 44px; color: #D2E0E7; background: rgba(10,19,29,.9); border: 1px solid rgba(79,209,232,.3); border-radius: 10px; }
+    .small-button, .mobile-nav { min-height: 44px; min-width: 44px; color: #D2E0E7; background: rgba(10,19,29,.9); border: 1px solid rgba(79,209,232,.3); border-radius: 10px; }
     .small-button:hover { color: white; border-color: var(--cyan); }
     .logout-button { min-height: 44px; padding: 0 16px; color: var(--ink); background: var(--panel); border-color: var(--line); }
     .logout-button:hover { color: var(--ground); background: var(--cyan); border-color: var(--cyan); }
     .send-button { min-height: 44px; height: 44px; background: #08758A; }
-    .send-button:hover { background: #0B899F; }
+    /* Darker on hover so the white label keeps more than 4.5:1 contrast (about 7:1). */
+    .send-button:hover { background: #065E6F; box-shadow: 0 0 0 1px var(--cyan); }
     button:focus-visible, select:focus-visible { outline-color: var(--cyan); }
     .footer-text { color: #A3B2BE; }
     .view-state .small-button { margin-top: 20px; }
@@ -482,6 +483,19 @@
       .workspace { padding: 22px 16px; }
       .welcome { margin-top: 24px; }
       .view-header { align-items: flex-start; }
+    }
+    /* Assistant layout: chat column plus a right column that stacks underneath on narrow screens. */
+    .assistant-layout { flex: 1; min-height: 0; display: flex; gap: 24px; }
+    .assistant-chat { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .composer-label { display: block; margin: 0 0 6px 5px; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 500; letter-spacing: .18em; color: var(--cyan); }
+    .plus-point { flex: 0 0 260px; align-self: flex-start; padding: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; backdrop-filter: blur(14px); }
+    .plus-point h2 { margin: 0 0 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 500; letter-spacing: .18em; color: var(--green); }
+    .plus-point p { margin: 0; color: var(--ink); font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media(max-width: 900px) {
+      #assistantView { height: auto; }
+      .assistant-layout { flex-direction: column; }
+      .assistant-chat { height: calc(100vh - 116px); height: calc(100dvh - 116px); min-height: 440px; }
+      .plus-point { flex: none; align-self: stretch; }
     }
     @media(prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
@@ -570,6 +584,8 @@
 
 
     <section id="assistantView" class="workspace" aria-label="Assistant">
+     <div class="assistant-layout">
+     <div class="assistant-chat">
 
       <header class="core-header">
         <div id="coreOrb" class="core idle" role="status" aria-live="polite">
@@ -604,9 +620,9 @@
 
         <div class="composer">
 
+          <label id="composerLabel" class="composer-label" for="prompt">ASK JARVIS ANYTHING</label>
           <textarea
             id="prompt"
-            aria-label="Message Jarvis"
             placeholder="Message Jarvis..."
           ></textarea>
 
@@ -649,6 +665,13 @@
         </div>
 
       </div>
+
+     </div>
+     <aside id="plusPoint" class="plus-point" aria-labelledby="plusPointTitle" hidden>
+       <h2 id="plusPointTitle">LATEST PLUS POINT</h2>
+       <p id="plusPointLesson"></p>
+     </aside>
+     </div>
 
     </section>
 
@@ -720,6 +743,11 @@ const runtimeStatus = document.getElementById("runtimeStatus");
 const coreOrb = document.getElementById("coreOrb");
 const coreLabel = document.getElementById("coreLabel");
 const coreStates = { idle: "STANDING BY", listening: "LISTENING", thinking: "THINKING", working: "WORKING", needs_you: "NEEDS YOU", done: "DONE" };
+// After an answer the orb shows done briefly, then settles back to idle.
+const CORE_DONE_MS = 5000;
+let coreIdleTimer = null;
+const plusPoint = document.getElementById("plusPoint");
+const plusPointLesson = document.getElementById("plusPointLesson");
 const jumpLatest = document.getElementById("jumpLatest");
 // The owner keeps following new messages unless they have scrolled up further than this.
 const FOLLOW_THRESHOLD = 120;
@@ -740,8 +768,23 @@ async function loadRuntime() {
 
 function setCoreState(name) {
     if (!Object.prototype.hasOwnProperty.call(coreStates, name)) return;
+    // Any new state, such as thinking for a new request, cancels a pending return to idle.
+    clearTimeout(coreIdleTimer);
+    coreIdleTimer = null;
     coreOrb.className = "core " + name;
     coreLabel.textContent = coreStates[name];
+    if (name === "done") coreIdleTimer = setTimeout(() => setCoreState("idle"), CORE_DONE_MS);
+}
+
+// Shows the newest experience's lesson as plain text; hidden when there is none or the request fails.
+async function loadPlusPoint() {
+    try {
+        const response = await fetch("/experiences?limit=1", { cache: "no-store" });
+        const data = response.ok ? await response.json() : null;
+        const lesson = Array.isArray(data) && typeof data[0]?.reusable_lesson === "string" ? data[0].reusable_lesson.trim() : "";
+        plusPointLesson.textContent = lesson;
+        plusPoint.hidden = !lesson;
+    } catch (_) { plusPoint.hidden = true; }
 }
 
 function greetingFor(hour) {
@@ -1070,6 +1113,7 @@ renderGreeting();
 setInterval(() => renderGreeting(), 30000);
 restoreConversation();
 loadRuntime();
+loadPlusPoint();
 </script>
 
 </body>

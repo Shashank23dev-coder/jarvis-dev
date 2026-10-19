@@ -55,7 +55,11 @@ function setup(fetch, savedConversation = null, globals = {}) {
         setItem: (key, value) => saved.set(key, value),
         removeItem: key => saved.delete(key)
     };
-    const context = vm.createContext({ document, fetch, AbortController, localStorage, setInterval: () => 0, ...globals });
+    // The plus-point card's startup request goes to its own handler so other tests see only their endpoints.
+    const { experiences = async () => ({ ok: false }), ...rest } = globals;
+    const route = (url, options) => String(url).startsWith('/experiences') ? experiences(url, options) : fetch(url, options);
+    const context = vm.createContext({ document, fetch: route, AbortController, localStorage,
+        setInterval: () => 0, setTimeout: () => 0, clearTimeout: () => {}, ...rest });
     vm.runInContext(script, context);
     return { nodes, nav, saved, run: code => vm.runInContext(code, context) };
 }
@@ -339,6 +343,83 @@ test('core orb returns to idle after a network error', async () => {
     await sending;
     assert.equal(ui.nodes.coreOrb.className, 'core idle');
     assert.equal(ui.nodes.coreLabel.textContent, 'STANDING BY');
+});
+
+// Fake timers: run() fires every pending callback scheduled for at most the given delay.
+function timers() {
+    const pending = new Map();
+    let next = 1;
+    return {
+        pending,
+        setTimeout: (callback, delay) => { pending.set(next, { callback, delay }); return next++; },
+        clearTimeout: id => pending.delete(id),
+        run: upTo => { for (const [id, timer] of [...pending]) if (timer.delay <= upTo) { pending.delete(id); timer.callback(); } }
+    };
+}
+
+test('core orb returns to idle 5 seconds after an answer', async () => {
+    const clock = timers();
+    const ui = setup(async () => ({ ok: true, json: async () => ({ response: 'Hi there' }) }), null, clock);
+    ui.nodes.prompt.value = 'Hello';
+    await ui.run('sendTask()');
+    assert.equal(ui.nodes.coreOrb.className, 'core done');
+    clock.run(4999);
+    assert.equal(ui.nodes.coreOrb.className, 'core done');
+    clock.run(5000);
+    assert.equal(ui.nodes.coreOrb.className, 'core idle');
+    assert.equal(ui.nodes.coreLabel.textContent, 'STANDING BY');
+});
+
+test('core orb stays busy when a new request starts before the idle return', async () => {
+    const clock = timers();
+    let resolveSecond;
+    let calls = 0;
+    const ui = setup(url => url !== '/task' ? Promise.resolve({ ok: false })
+        : ++calls === 1 ? Promise.resolve({ ok: true, json: async () => ({ response: 'First' }) })
+        : new Promise(resolve => { resolveSecond = resolve; }), null, clock);
+    ui.nodes.prompt.value = 'First';
+    await ui.run('sendTask()');
+    assert.equal(ui.nodes.coreOrb.className, 'core done');
+    ui.nodes.prompt.value = 'Second';
+    const sending = ui.run('sendTask()');
+    clock.run(5000);
+    assert.equal(ui.nodes.coreOrb.className, 'core thinking');
+    resolveSecond({ ok: true, json: async () => ({ response: 'Second' }) });
+    await sending;
+    assert.equal(ui.nodes.coreOrb.className, 'core done');
+});
+
+test('composer is labelled and the Send hover colour keeps its contrast', () => {
+    assert.match(html, /<label\b[^>]*for="prompt"[^>]*>ASK JARVIS ANYTHING<\/label>/);
+    assert.match(html, /\.send-button:hover\s*\{[^}]*background:\s*#065E6F/);
+});
+
+test('plus-point card loads the latest experience and shows its lesson as plain text', async () => {
+    const urls = [];
+    const lesson = 'Run the parser tests first. <img src=x onerror=alert(1)>';
+    const ui = setup(async () => ({ ok: false }), null, { experiences: async url => {
+        urls.push(url);
+        return { ok: true, json: async () => [{ id: 'e1', reusable_lesson: lesson }] };
+    } });
+    await tick();
+    assert.deepEqual(urls, ['/experiences?limit=1']);
+    assert.equal(ui.nodes.plusPoint.hidden, false);
+    assert.equal(ui.nodes.plusPointLesson.textContent, lesson);
+    assert.equal(ui.nodes.plusPointLesson.children.length, 0);
+    assert.match(html, /id="plusPoint"[^>]*hidden/);
+    assert.match(html, /LATEST PLUS POINT/);
+});
+
+test('plus-point card hides on an empty list and on errors', async () => {
+    for (const experiences of [
+        async () => ({ ok: true, json: async () => [] }),
+        async () => ({ ok: false, status: 500 }),
+        async () => { throw new Error('offline'); }
+    ]) {
+        const ui = setup(async () => ({ ok: false }), null, { experiences });
+        await tick();
+        assert.equal(ui.nodes.plusPoint.hidden, true);
+    }
 });
 
 test('greeting and date line follow the local hour', () => {
