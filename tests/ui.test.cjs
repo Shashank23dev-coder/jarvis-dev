@@ -42,7 +42,7 @@ function setup(fetch, savedConversation = null) {
         setItem: (key, value) => saved.set(key, value),
         removeItem: key => saved.delete(key)
     };
-    const context = vm.createContext({ document, fetch, AbortController, localStorage });
+    const context = vm.createContext({ document, fetch, AbortController, localStorage, setInterval: () => 0 });
     vm.runInContext(script, context);
     return { nodes, nav, saved, run: code => vm.runInContext(code, context) };
 }
@@ -269,6 +269,63 @@ test('missing conversation clears stored ID, but temporary outages retain it', a
     await tick();
     assert.equal(offline.saved.get('jarvis.conversationId'), 'keep');
     assert.equal(offline.nodes.sendBtn.disabled, false);
+});
+
+test('core orb is a polite status region and shows every state', () => {
+    assert.match(html, /id="coreOrb"[^>]*role="status"[^>]*aria-live="polite"/);
+    const ui = setup(async () => ({ ok: false }));
+    for (const [name, label] of [['listening', 'LISTENING'], ['thinking', 'THINKING'], ['working', 'WORKING'],
+        ['needs_you', 'NEEDS YOU'], ['done', 'DONE'], ['idle', 'STANDING BY']]) {
+        ui.run(`setCoreState(${JSON.stringify(name)})`);
+        assert.equal(ui.nodes.coreOrb.className, 'core ' + name);
+        assert.equal(ui.nodes.coreLabel.textContent, label);
+    }
+});
+
+test('core orb ignores unknown state names', () => {
+    const ui = setup(async () => ({ ok: false }));
+    ui.run('setCoreState("working")');
+    for (const name of ['"exploding"', '"toString"', '""', 'undefined']) {
+        ui.run(`setCoreState(${name})`);
+        assert.equal(ui.nodes.coreOrb.className, 'core working');
+        assert.equal(ui.nodes.coreLabel.textContent, 'WORKING');
+    }
+});
+
+test('core orb is idle on load, thinking while pending and done on answer', async () => {
+    let resolveTask;
+    const ui = setup(url => url === '/task'
+        ? new Promise(resolve => { resolveTask = resolve; })
+        : Promise.resolve({ ok: false }));
+    assert.equal(ui.nodes.coreOrb.className, 'core idle');
+    assert.equal(ui.nodes.coreLabel.textContent, 'STANDING BY');
+    ui.nodes.prompt.value = 'Hello';
+    const sending = ui.run('sendTask()');
+    assert.equal(ui.nodes.coreOrb.className, 'core thinking');
+    assert.equal(ui.nodes.coreLabel.textContent, 'THINKING');
+    resolveTask({ ok: true, json: async () => ({ response: 'Hi there' }) });
+    await sending;
+    assert.equal(ui.nodes.coreOrb.className, 'core done');
+    assert.equal(ui.nodes.coreLabel.textContent, 'DONE');
+});
+
+test('core orb returns to idle after a network error', async () => {
+    const ui = setup(async () => { throw new Error('offline'); });
+    ui.nodes.prompt.value = 'Hello';
+    const sending = ui.run('sendTask()');
+    assert.equal(ui.nodes.coreOrb.className, 'core thinking');
+    await sending;
+    assert.equal(ui.nodes.coreOrb.className, 'core idle');
+    assert.equal(ui.nodes.coreLabel.textContent, 'STANDING BY');
+});
+
+test('greeting and date line follow the local hour', () => {
+    const ui = setup(async () => ({ ok: false }));
+    for (const [hour, greeting] of [[9, 'Good morning, Shashank.'], [14, 'Good afternoon, Shashank.'], [20, 'Good evening, Shashank.']]) {
+        ui.run(`renderGreeting(new Date(2026, 9, 19, ${hour}, 5))`);
+        assert.equal(ui.nodes.coreGreeting.textContent, greeting);
+        assert.match(ui.nodes.coreTime.textContent, /19.*·.*05/);
+    }
 });
 
 test('failed task retains conversation ID from response headers', async () => {

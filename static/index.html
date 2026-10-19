@@ -181,40 +181,8 @@
 
     .welcome {
       text-align: center;
-      margin-top: 85px;
+      margin-top: 32px;
       margin-bottom: 42px;
-    }
-
-    .orb {
-      height: 76px;
-      width: 76px;
-      margin: auto;
-      border-radius: 50%;
-
-      background:
-        radial-gradient(circle at 35% 30%, #c9e0ff 0%, #75a8ff 15%, #375ed8 50%, #152149 100%);
-
-      box-shadow:
-        0 0 30px rgba(84,127,255,0.45),
-        0 0 75px rgba(84,127,255,0.13);
-
-      animation: pulse 3s infinite ease-in-out;
-    }
-
-    @keyframes pulse {
-      0%, 100% {
-        transform: scale(1);
-        box-shadow:
-          0 0 30px rgba(84,127,255,0.4),
-          0 0 75px rgba(84,127,255,0.12);
-      }
-
-      50% {
-        transform: scale(1.04);
-        box-shadow:
-          0 0 40px rgba(84,127,255,0.58),
-          0 0 95px rgba(84,127,255,0.18);
-      }
     }
 
     .welcome h1 {
@@ -443,7 +411,36 @@
     .workspace { max-width: 1100px; }
     .welcome h1, .view-header h1 { color: #F4FAFC; font-weight: 600; letter-spacing: .01em; }
     .welcome p, .view-header p, .view-state p, .card-meta { color: #B1C0CA; }
-    .orb { background: radial-gradient(circle at 35% 30%, #D9FCFF 0%, var(--cyan) 20%, #167994 58%, #0B1C2B 100%); box-shadow: 0 0 30px rgba(79,209,232,.32), 0 0 75px rgba(79,209,232,.12); }
+    /* Jarvis core orb: the state class on .core picks colour and motion. */
+    .core-header { display: flex; align-items: center; gap: 28px; margin-bottom: 8px; }
+    .core { --core: var(--cyan); flex: none; width: 132px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .core.needs_you { --core: var(--amber); }
+    .core.done { --core: var(--green); }
+    .core-rings { position: relative; width: 132px; height: 132px; }
+    .core-ring, .core-orbit, .core-center, .core-rings::before, .core-rings::after { position: absolute; border-radius: 50%; }
+    .core-ring.outer { inset: 0; border: 1px dashed var(--core); opacity: .75; animation: core-spin 16s linear infinite; }
+    .core-ring.middle { inset: 16px; border: 2px solid transparent; border-top-color: var(--core); border-bottom-color: var(--core); animation: core-spin 10s linear infinite reverse; }
+    .core-center { inset: 42px; background: radial-gradient(circle at 35% 30%, #F2FDFF 0%, var(--core) 45%, rgba(5,8,14,.9) 100%); box-shadow: 0 0 26px var(--core); animation: core-pulse 3s ease-in-out infinite; }
+    .core-orbit { inset: 6px; display: none; animation: core-spin 2.4s linear infinite; }
+    .core-orbit::before { content: ''; position: absolute; top: -4px; left: 50%; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--core); box-shadow: 0 0 10px var(--core); }
+    .core-rings::before, .core-rings::after { content: ''; inset: 42px; border: 1px solid var(--core); opacity: 0; }
+    .core.thinking .core-ring.outer { animation-duration: 3s; }
+    .core.thinking .core-ring.middle { animation-duration: 1.8s; }
+    .core.working .core-orbit { display: block; }
+    .core.listening .core-rings::before, .core.needs_you .core-rings::before { animation: core-ripple 2.4s ease-out infinite; }
+    .core.listening .core-rings::after, .core.needs_you .core-rings::after { animation: core-ripple 2.4s ease-out 1.2s infinite; }
+    .core.done .core-ring { animation: none; }
+    .core.done .core-center { animation: core-pop .45s ease-out 1; }
+    .core-label { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 500; letter-spacing: .18em; text-transform: uppercase; color: var(--core); }
+    .core-time { margin: 0 0 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: #B1C0CA; }
+    .core-greeting h1 { margin: 0; font-size: 30px; font-weight: 600; color: #F4FAFC; }
+    @keyframes core-spin { to { transform: rotate(360deg); } }
+    @keyframes core-pulse { 50% { transform: scale(1.08); box-shadow: 0 0 38px var(--core); } }
+    @keyframes core-ripple { from { transform: scale(1); opacity: .8; } to { transform: scale(2.75); opacity: 0; } }
+    @keyframes core-pop { 50% { transform: scale(1.18); } }
+    @media(max-width: 600px) {
+      .core-header { flex-direction: column; gap: 16px; text-align: center; }
+    }
     .view-state, .data-card, .composer { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; backdrop-filter: blur(14px); }
     .jarvis-message { background: rgba(12,24,35,.82); border-color: rgba(79,209,232,.2); }
     .user-message { background: #12677A; }
@@ -467,11 +464,12 @@
       .topbar { min-height: 72px; height: auto; gap: 10px; padding: 12px 16px; flex-wrap: wrap; }
       .mobile-nav { display: block; }
       .workspace { padding: 22px 16px; }
-      .welcome { margin-top: 45px; }
+      .welcome { margin-top: 24px; }
       .view-header { align-items: flex-start; }
     }
     @media(prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
+      .core *, .core *::before, .core-rings::after { animation: none !important; }
     }
   </style>
 </head>
@@ -557,11 +555,23 @@
 
     <section id="assistantView" class="workspace" aria-label="Assistant">
 
+      <header class="core-header">
+        <div id="coreOrb" class="core idle" role="status" aria-live="polite">
+          <div class="core-rings" aria-hidden="true">
+            <span class="core-ring outer"></span>
+            <span class="core-ring middle"></span>
+            <span class="core-orbit"></span>
+            <span class="core-center"></span>
+          </div>
+          <span id="coreLabel" class="core-label">STANDING BY</span>
+        </div>
+        <div class="core-greeting">
+          <p id="coreTime" class="core-time"></p>
+          <h1 id="coreGreeting">Good evening, Shashank.</h1>
+        </div>
+      </header>
+
       <div id="welcome" class="welcome">
-
-        <div class="orb"></div>
-
-        <h1>Good evening, Shashank.</h1>
 
         <p>
           What would you like me to work on?
@@ -690,6 +700,9 @@ const welcome = document.getElementById("welcome");
 const viewNames = ["assistant", "tasks", "memory", "agents", "tools", "activity"];
 const requests = {};
 const runtimeStatus = document.getElementById("runtimeStatus");
+const coreOrb = document.getElementById("coreOrb");
+const coreLabel = document.getElementById("coreLabel");
+const coreStates = { idle: "STANDING BY", listening: "LISTENING", thinking: "THINKING", working: "WORKING", needs_you: "NEEDS YOU", done: "DONE" };
 let activeView = "assistant";
 let conversationId = null;
 try { conversationId = localStorage.getItem("jarvis.conversationId"); } catch (_) {}
@@ -700,6 +713,24 @@ async function loadRuntime() {
         const data = response.ok ? await response.json() : null;
         runtimeStatus.textContent = data?.mode === "development" ? "Development" : data?.mode === "production" ? "Production" : "Unavailable";
     } catch (_) { runtimeStatus.textContent = "Unavailable"; }
+}
+
+function setCoreState(name) {
+    if (!Object.prototype.hasOwnProperty.call(coreStates, name)) return;
+    coreOrb.className = "core " + name;
+    coreLabel.textContent = coreStates[name];
+}
+
+function greetingFor(hour) {
+    const part = hour >= 5 && hour < 12 ? "morning" : hour >= 12 && hour < 18 ? "afternoon" : "evening";
+    return "Good " + part + ", Shashank.";
+}
+
+function renderGreeting(now = new Date()) {
+    document.getElementById("coreTime").textContent =
+        now.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }) + " · " +
+        now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    document.getElementById("coreGreeting").textContent = greetingFor(now.getHours());
 }
 
 function rememberConversation(id) {
@@ -848,6 +879,7 @@ async function sendTask() {
     addMessage("user", goal);
     promptBox.value = "";
     sendBtn.disabled = true;
+    setCoreState("thinking");
     const waiting = addMessage("jarvis", "Thinking...");
     try {
         const response = await fetch("/task", {
@@ -859,8 +891,10 @@ async function sendTask() {
         const id = data.conversation_id || response.headers?.get("X-Conversation-ID");
         if (id) rememberConversation(id);
         waiting.textContent = response.ok ? formatPlan(data.plan || data) : (typeof data.detail === "string" ? data.detail : "Something went wrong.");
+        setCoreState(response.ok ? "done" : "idle");
     } catch (error) {
         waiting.textContent = "Unable to reach Jarvis backend.";
+        setCoreState("idle");
     } finally {
         sendBtn.disabled = false;
         if (activeView === "assistant") {
@@ -891,6 +925,9 @@ promptBox.addEventListener("keydown", event => {
         sendTask();
     }
 });
+setCoreState("idle");
+renderGreeting();
+setInterval(() => renderGreeting(), 30000);
 restoreConversation();
 loadRuntime();
 </script>
