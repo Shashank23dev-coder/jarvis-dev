@@ -15,7 +15,7 @@ import time
 from uuid import uuid4
 
 from tools.policy import ToolDenied
-from tools.repository import runner_results
+from tools.repository import CommandResult, runner_results
 from .candidate_provider import FAILURES, ProviderFailure, execution_error_code
 from .database import timestamp
 from .dev_agents import ADAPTERS, FailureLog
@@ -485,7 +485,94 @@ def _other(agent):
 # and records both in the fields apply already checks. Failures (pre-existing or
 # new) leave the candidate needs_revision exactly as the legacy test path does.
 
-PREPARE_BUDGET_SECONDS = 900  # the candidate Limits ceiling; independent of the job lease
+# The full Python suite takes ~20 minutes, far over one sandbox run's default 120 s
+# wall limit. Preparation runs it as the release validator's fixed shards, one after
+# another, each with its own sandbox limit; the whole step stays inside one budget.
+# Both limits come from the host environment, clamped; invalid values use the default.
+PREPARE_SHARD_SECONDS = (600, 60, 900)      # default, floor, ceiling per shard (as the release validator)
+PREPARE_BUDGET_SECONDS = (3000, 300, 3600)  # whole step: shards, UI, baseline reruns, second review
+
+
+def _bounded(value, limits):
+    default, floor, ceiling = limits
+    try:
+        value = float(value) if value is not None else default
+    except ValueError:
+        value = default
+    return min(max(value, floor), ceiling) if value == value else default  # NaN -> default
+
+
+def prepare_limits(environ=os.environ):
+    """(seconds per full_python shard, seconds for the whole preparation step)."""
+    return (_bounded(environ.get('JARVIS_PREPARE_SHARD_SECONDS'), PREPARE_SHARD_SECONDS),
+            _bounded(environ.get('JARVIS_PREPARE_BUDGET_SECONDS'), PREPARE_BUDGET_SECONDS))
+
+
+def full_python_shards(root):
+    """The release shards' files present in `root`, then one shard for any unassigned test file.
+
+    Unlike release validation this does not fail closed on inventory changes: a candidate
+    may add or remove test files, and every discovered file still runs exactly once.
+    """
+    from .deployment_release import PYTHON_SHARDS
+    root = Path(root)
+    discovered = sorted({path.relative_to(root).as_posix() for pattern in ('test_*.py', '*_test.py')
+                         for path in (root / 'tests').rglob(pattern)})
+    shards = [[path for path in shard if path in discovered] for shard in PYTHON_SHARDS]
+    assigned = {path for shard in shards for path in shard}
+    shards.append([path for path in discovered if path not in assigned])
+    return [shard for shard in shards if shard] or [['tests']]
+
+
+SUMMARY = re.compile(r'\d+ (?:passed|failed|skipped|errors?)\b')
+
+
+def run_sharded(repository, run, shards, seconds):
+    """Run full_python shard by shard, each within `seconds` of sandbox wall time.
+
+    Returns (complete, stored), both one full_python result with per-shard evidence in
+    sandbox['shards'] and one pytest runner per shard. `complete` keeps every shard's
+    whole output for failure attribution; `stored` keeps each shard's output tail, so the
+    combined text stays within the 16 KB evidence limit unless a shard's own output exceeds it.
+    """
+    previous, repository.pytest_timeout = repository.pytest_timeout, seconds
+    results, shard_evidence = [], []
+    try:
+        for number, paths in enumerate(shards, 1):
+            started = time.monotonic()
+            result = run(list(paths))
+            results.append(result)
+            shard_evidence.append(dict(
+                shard=f'python-{number}', paths=list(paths), returncode=result.returncode,
+                timed_out=result.timed_out,
+                truncated=result.truncated or len(result.stdout) > 16000 or len(result.stderr) > 16000,
+                elapsed_seconds=round(time.monotonic() - started, 2),
+                summary=SUMMARY.findall(result.stdout)[-4:], sandbox=result.sandbox))
+            if result.timed_out:
+                break  # an environment limit: the remaining shards cannot make this phase pass
+    finally:
+        repository.pytest_timeout = previous
+    tail = 15000 // len(shards)
+
+    def combine(cut):
+        texts, runners = dict(stdout='', stderr=''), []
+        for evidence, result in zip(shard_evidence, results):
+            runner = dict(runner='pytest', shard=evidence['shard'], returncode=result.returncode,
+                          timed_out=result.timed_out)
+            for stream in texts:
+                piece = f"=== {evidence['shard']} ===\n" + cut(getattr(result, stream) or '')
+                runner[stream + '_span'] = [len(texts[stream]), len(texts[stream]) + len(piece)]
+                texts[stream] += piece
+            runners.append(runner)
+        return CommandResult(
+            tuple(part for result in results for part in result.command),
+            next((result.returncode for result in results if result.returncode), 0),
+            texts['stdout'], texts['stderr'], any(result.timed_out for result in results),
+            any(evidence['truncated'] for evidence in shard_evidence),
+            dict(backend=(results[0].sandbox or {}).get('backend'), shard_seconds=seconds,
+                 planned_shards=len(shards), shards=shard_evidence),
+            tuple(runners))
+    return combine(lambda text: text), combine(lambda text: text[-tail:])
 
 
 def pending_preparation(service):
@@ -506,10 +593,13 @@ def pending_preparation(service):
     return None
 
 
-def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_SECONDS):
+def prepare_for_apply(service, jobs, job, *, agents=None, budget=None, shard_seconds=None):
     """Full tests + an independent second review of the exact commit; returns the candidate."""
     from .candidate_provider import failure_evidence
     from tools.candidate_edit import digest
+    default_shard, default_budget = prepare_limits()
+    shard_seconds = _bounded(shard_seconds, (default_shard, *PREPARE_SHARD_SECONDS[1:]))
+    budget = _bounded(budget, (default_budget, *PREPARE_BUDGET_SECONDS[1:]))
     candidate_id = job['candidate_id']
     state_dir = _state_dir(service)
     failures = FailureLog(state_dir / 'failures.jsonl')
@@ -524,11 +614,13 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
         author = record['improvement']['implementation_provider']
         fingerprint, commit = record['fingerprint'], record['commit']
         preparation = dict(run_id=run_id, started_at=timestamp(), fingerprint=fingerprint, commit=commit,
-                           budget_seconds=budget, status='running')
+                           budget_seconds=budget, shard_seconds=shard_seconds, status='running')
         record['apply_preparation'] = preparation
         service.store.save(record, 'apply_preparation_started')
         service.record, service.originals = record, {}
-        service.limits = Limits(seconds=budget)
+        # Limits keep their 900 s candidate ceiling for tool/file/line counts; this step's
+        # own deadline below is the preparation budget, which still bounds every shard.
+        service.limits = Limits(seconds=min(budget, 900))
         service.deadline = time.monotonic() + budget
         if service._workgit('rev-parse', 'HEAD').strip() != commit or service._diff() != fingerprint:
             raise ToolDenied('Candidate changed since its review')
@@ -538,10 +630,13 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
         raw, tester = {}, service.tester
 
         def capture(repository, phase, paths):
-            result = (tester(repository, phase, paths) if tester else
-                      repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths))
-            raw[phase] = result
-            return result
+            if phase == 'full_python':
+                # Recorded as the one full_python phase on ['tests'], which apply checks unchanged.
+                raw[phase], stored = run_sharded(repository, lambda shard: _run(tester, repository, phase, shard),
+                                                 full_python_shards(repository.root), shard_seconds)
+                return stored
+            raw[phase] = _run(tester, repository, phase, paths)
+            return raw[phase]
         service.tester = capture
         try:
             service._tests(resume=True)
@@ -551,8 +646,13 @@ def prepare_for_apply(service, jobs, job, *, agents=None, budget=PREPARE_BUDGET_
                     for t in record['test_results'] if t['fingerprint'] == fingerprint]
         preparation['tests'] = [{k: t[k] for k in ('phase', 'returncode', 'timed_out', 'truncated', 'backend')}
                                 for t in evidence]
+        if 'full_python' in raw:
+            preparation['full_python_shards'] = [
+                {k: shard[k] for k in ('shard', 'paths', 'returncode', 'timed_out', 'truncated',
+                                       'elapsed_seconds', 'summary')}
+                for shard in raw['full_python'].sandbox['shards']]
         if record.get('tested_fingerprint') != fingerprint:
-            outcome = _attribute_failures(service, record, raw)
+            outcome = _attribute_failures(service, record, raw, shard_seconds)
             preparation.update(outcome)
             if outcome['status'] == 'environment_blocked':
                 return _environment_blocked(service, record, sealed, preparation)
@@ -630,13 +730,18 @@ def failing_tests(result):
     return found if found and not result.timed_out else None
 
 
-def _attribute_failures(service, record, raw):
+def _run(tester, repository, phase, paths):
+    return (tester(repository, phase, paths) if tester else
+            repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths))
+
+
+def _attribute_failures(service, record, raw, shard_seconds):
     """Compare the failing full phases with the same phases on the candidate's base commit."""
     failed = {phase: result for phase, result in raw.items()
               if phase != 'targeted' and (result.returncode or result.timed_out or result.truncated)}
     if any(result.timed_out for result in failed.values()):
         return dict(status='environment_blocked', reason='sandbox_time_limit', failing_tests=[])
-    baseline = _baseline_results(service, record, failed)
+    baseline = _baseline_results(service, record, failed, shard_seconds)
     failing, unknown = [], False
     for phase, result in failed.items():
         mine, base = failing_tests(result), baseline[phase]
@@ -655,8 +760,12 @@ def _attribute_failures(service, record, raw):
                 reason='failures_unidentified' if unknown else 'pre_existing_failures_only')
 
 
-def _baseline_results(service, record, failed):
-    """Run the failed phases on the base commit, in a temporary detached worktree, same sandbox."""
+def _baseline_results(service, record, failed, shard_seconds):
+    """Run the failed phases on the base commit, in a temporary detached worktree, same sandbox.
+
+    For full_python only the base commit's shards sharing a file with a failing candidate
+    shard run; a failure in a file the base commit lacks is new by definition.
+    """
     from .self_edit import CandidateRepository
     container, bare, _ = service._paths(record)
     tree = container / 'baseline'
@@ -665,10 +774,18 @@ def _baseline_results(service, record, failed):
     try:
         repository = CandidateRepository(tree, source_root=service.source, check=service._check)
         results = {}
-        for phase in failed:
+        for phase, result in failed.items():
+            if phase == 'full_python':
+                paths = {path for shard in result.sandbox['shards']
+                         if shard['returncode'] or shard['timed_out'] or shard['truncated'] for path in shard['paths']}
+                shards = [shard for shard in full_python_shards(tree) if paths & set(shard)]
+                results[phase] = (run_sharded(repository, lambda shard: _run(service.tester, repository,
+                                                                             'baseline_' + phase, shard),
+                                              shards, shard_seconds)[0]
+                                  if shards else CommandResult((), 0, ''))
+                continue
             paths = ['tests/ui.test.cjs'] if phase == 'full_ui' else ['tests']
-            results[phase] = (service.tester(repository, 'baseline_' + phase, paths) if service.tester else
-                              repository.run_ui_tests() if phase == 'full_ui' else repository.run_tests(paths))
+            results[phase] = _run(service.tester, repository, 'baseline_' + phase, paths)
         return results
     finally:
         service._git(container, *git, 'worktree', 'remove', '--force', str(tree))
