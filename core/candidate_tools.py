@@ -33,14 +33,14 @@ class EngineeringArguments(CreateArguments):
 
 class BrainEngineeringArguments(EngineeringArguments):
     provider: ProviderId = 'codex_cli'
-    execution_mode: Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW'] | None = None
+    execution_mode: Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW', 'CLAUDE_EXTERNAL_REVIEW'] | None = None
 
 
 class OperatorArguments(EngineeringArguments):
     # The operator runs a baseline on its planned tests, so it still needs them.
     inspect_paths: Annotated[list[PathArgument], Field(min_length=1, max_length=8)]
     targeted_tests: Annotated[list[PathArgument], Field(min_length=1, max_length=8)]
-    execution_mode: Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW'] = 'CODEX_BUILD_CLAUDE_REVIEW'
+    execution_mode: Literal['CODEX_ONLY', 'CLAUDE_ONLY', 'CODEX_BUILD_CLAUDE_REVIEW', 'CLAUDE_EXTERNAL_REVIEW'] = 'CODEX_BUILD_CLAUDE_REVIEW'
 
 
 class PrepareEngineeringArguments(StrictModel):
@@ -128,6 +128,9 @@ Prefer start_engineering_operator for coordinated implementation and review.
 Default CODEX_BUILD_CLAUDE_REVIEW: Codex implements, Claude reviews independently.
 Use CODEX_ONLY for a requested Codex implementation or CLAUDE_ONLY for a requested
 Claude implementation; both retain the existing independent OpenAI review gate.
+Use CLAUDE_EXTERNAL_REVIEW only when the owner explicitly asks for work built by
+Claude Code and reviewed by Grok: no provider reviews it, the job waits for
+external review by grok and owner approval. Never infer it.
 Use registered provider routing (Codex/Claude); report actual provider attribution.
 Inspect jobs and candidates across conversations without another permission request.
 Jobs implement/test/review in isolated development; completed means that candidate
