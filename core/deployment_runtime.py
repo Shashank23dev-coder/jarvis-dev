@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -136,6 +137,13 @@ finally:
 
     def image(self, sha):
         output = self.docker('image', 'inspect', 'jarvis-release:' + sha, optional=True)
+        return json.loads(output)[0]['Id'] if output else None
+
+    def image_id(self, image_id):
+        """Local ID of an exact image ID (never a tag that a later build could move), or None."""
+        if not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id or ''):
+            return None
+        output = self.docker('image', 'inspect', image_id, optional=True)
         return json.loads(output)[0]['Id'] if output else None
 
     def build(self, sha, context):

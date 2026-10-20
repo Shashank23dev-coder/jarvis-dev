@@ -10,10 +10,10 @@ from core.deployment_browser import BrowserCheck, throwaway_names
 
 
 class FakeDocker:
-    def __init__(self, result=None, runner_writes=True, clock=None, have_runner=True):
+    def __init__(self, result=None, runner_writes=True, clock=None, have_runner=True, ran_image=None):
         self.calls, self.result, self.runner_writes = [], result, runner_writes
         self.clock, self.have_runner, self.live = clock, have_runner, {}
-        self.env_files = {}
+        self.env_files, self.images, self.ran_image = {}, {}, ran_image
 
     def __call__(self, *args, timeout=30, optional=False):
         self.calls.append(args)
@@ -27,7 +27,9 @@ class FakeDocker:
             self.live[name] = args[args.index('--label') + 1].split('=', 1)[1]
             env = Path(args[args.index('--env-file') + 1])
             self.env_files[name] = env.read_text()
-            if '-d' not in args:
+            if '-d' in args:  # app container: image precedes the boot script
+                self.images[name] = self.ran_image or args[-2]
+            else:
                 if self.clock:
                     self.clock.now += 200
                 out = Path(next(a for a in args if a.endswith(',dst=/out')).split(',')[1][4:])
@@ -45,7 +47,8 @@ class FakeDocker:
             if run is None:
                 return None
             key = 'Labels'
-            return json.dumps([{'Config': {key: {'jarvis.bcheck': run}}, key: {'jarvis.bcheck': run}}])
+            return json.dumps([{'Config': {key: {'jarvis.bcheck': run}}, key: {'jarvis.bcheck': run},
+                                'Image': self.images.get(args[2])}])
         if args[0] == 'rm' or args[:2] == ('volume', 'rm'):
             self.live.pop(args[-1], None)
             return ''
@@ -70,6 +73,7 @@ def test_throwaway_containers_are_isolated_and_never_production(tmp_path):
     docker = FakeDocker(PASS)
     evidence = BrowserCheck(docker=docker).run('sha256:release', tmp_path / 'art')
     assert evidence['passed'] and evidence['teardown_clean'] and not docker.live
+    assert evidence['image'] == evidence['image_id'] == 'sha256:release'
     app, runner = runs(docker)
     names = [c[c.index('--name') + 1] for c in (app, runner)]
     assert all(n.startswith('jarvis-bcheck-') and n != 'jarvis-jarvis-1' for n in names)
@@ -111,6 +115,14 @@ def test_failures_are_ineligible_and_still_torn_down(tmp_path, case):
                                         'budget': 'browser_budget_exceeded'}[case]
     if case == 'check_failed':
         assert 'phone-390x664:page_not_scrolling' in evidence['failures']
+
+
+def test_app_container_running_a_different_image_fails_without_running_browser(tmp_path):
+    docker = FakeDocker(PASS, ran_image='sha256:other')
+    evidence = BrowserCheck(docker=docker).run('sha256:release', tmp_path / 'art')
+    assert not evidence['passed'] and evidence['failure_kind'] == 'browser_image_mismatch'
+    assert evidence['image'] == 'sha256:release' and evidence['image_id'] == 'sha256:other'
+    assert len(runs(docker)) == 1 and not docker.live and evidence['teardown_clean']
 
 
 def test_runner_image_pulled_outside_budget_and_artifacts_dir_must_be_new(tmp_path):

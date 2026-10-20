@@ -284,9 +284,12 @@ class ReleaseService:
                     results.append(self.browser(sha))
                 self.clean(sha)
                 data = self.load()
-                evidence = dict(commit=sha, at=now(), tests=results,
+                # Deploy uses exactly this image ID; it never rebuilds.
+                browser = next((r for r in results if r['phase'] == 'browser'), {})
+                image_id = browser.get('built_image_id') if browser.get('passed') else None
+                evidence = dict(commit=sha, at=now(), tests=results, image_id=image_id,
                                 review='Automated context policy checked; human source review required before approval',
-                                passed=all(r['passed'] for r in results))
+                                passed=all(r['passed'] for r in results) and bool(image_id))
                 data['evidence'][sha] = evidence
                 self.save(data)
                 return evidence
@@ -311,9 +314,25 @@ class ReleaseService:
                         failures=['browser check could not run; raw diagnostics withheld'])
         evidence = dict(elapsed_seconds=round(time.monotonic() - started, 2))
         evidence.update(result)
-        evidence.update(build_and_check_seconds=round(time.monotonic() - started, 2),
-                        passed=bool(result.get('passed')))
+        matches = result.get('image_id') == image
+        evidence.update(build_and_check_seconds=round(time.monotonic() - started, 2), built_image_id=image,
+                        image_id=result.get('image_id'), passed=bool(result.get('passed')) and matches)
+        if result.get('passed') and not matches:
+            evidence.update(failure_kind='browser_image_mismatch', failures=[*result.get('failures', []),
+                            'browser check ran a different image ID than validation built'])
         return evidence
+
+    def tested_image(self, evidence):
+        """Refuse unless the recorded tested image ID still exists locally with that exact ID."""
+        tested = (evidence or {}).get('image_id')
+        if not tested:
+            raise ToolDenied('No tested image ID is recorded for this commit; re-run validation')
+        found = self.runtime.image_id(tested)
+        if found is None:
+            raise ToolDenied('The tested release image no longer exists locally; re-run validation')
+        if found != tested:
+            raise ToolDenied('Local image ID differs from the tested image ID; refusing to deploy')
+        return tested
 
     def prepare(self):
         """Preparation is autonomous; existing exact-commit evidence is reusable."""
@@ -343,8 +362,14 @@ class ReleaseService:
         evidence = data['evidence'].get(sha)
         fresh = bool(evidence and evidence['passed'] and
                      0 <= (datetime.now(timezone.utc) - datetime.fromisoformat(evidence['at'])).total_seconds() < 86400)
+        try:
+            tested, image_problem = self.tested_image(evidence), None
+        except ToolDenied as exc:
+            tested, image_problem = None, str(exc)
         result = dict(commit=sha, message=self.git('show', '-s', '--format=%B', sha).decode().strip(),
-                    previous=current, changed_files=changed, evidence=evidence, eligible=fresh,
+                    previous=current, changed_files=changed, evidence=evidence, validated=fresh,
+                    eligible=bool(fresh and tested), tested_image_id=(evidence or {}).get('image_id'),
+                    tested_image_present=bool(tested), image_problem=image_problem,
                     image_tag='jarvis-release:' + sha, image=self.runtime.image(sha),
                     required_confirmation=approval(sha),
                     note='Requires fresh validation and human review. Unknown baseline means changed_files is null.')
@@ -371,21 +396,21 @@ class ReleaseService:
                 if old['commit'] == sha and old['status'] == 'deployed' and preview['previous']['image'] == old['image']:
                     self.runtime.verify(self.config.container, 8000, public=True)
                     return old
-            if not preview['eligible']:
+            if not preview['validated']:
                 raise ToolDenied('Fresh passing validation is required before deployment')
+            # Never rebuild: deploy exactly the image ID that validation tested.
+            image = self.tested_image(preview['evidence'])
             record = dict(id=uuid4().hex, commit=sha, approval=current_message, requested_at=now(),
-                          previous=preview['previous'], image=None, evidence=preview['evidence'],
+                          previous=preview['previous'], image=image, evidence=preview['evidence'],
                           image_tag=preview['image_tag'], message=preview['message'],
                           changed_files=preview['changed_files'], human_review='Approved in current message',
                           verification=[], rollback=None, events=[], switched=False)
             data['records'].append(record)
-            self.event(data, record, 'building')
+            self.event(data, record, 'prechecking')
             try:
-                with tempfile.TemporaryDirectory(prefix='jarvis-release-build-') as directory:
+                with tempfile.TemporaryDirectory(prefix='jarvis-release-snapshot-') as directory:
                     self.snapshot(sha, Path(directory))
                     record['database_hash'] = hashlib.sha256((Path(directory) / 'core/database.py').read_bytes()).hexdigest()
-                    record['image'] = self.runtime.build(sha, Path(directory))
-                self.event(data, record, 'prechecking')
                 self.clean(sha)
                 self.runtime.assert_current(record['previous'])
                 baseline = self.runtime.verify(self.config.container, 8000, public=True)

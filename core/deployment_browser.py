@@ -153,11 +153,17 @@ class BrowserCheck:
                 try:
                     self.docker('volume', 'create', '--label', 'jarvis.bcheck=' + run_id, names['volume'])
                     self.docker(*self.app_args(names, image, code, Path(directory) / 'app.env', run_id), timeout=60)
-                    remaining = self.budget - (self.clock() - started) - 10
-                    if remaining <= 0:
-                        raise TimeoutError
-                    self.docker(*self.runner_args(names, code, artifacts, Path(directory) / 'runner.env',
-                                                  run_id, remaining), timeout=remaining + 5, optional=True)
+                    # Record the image ID the app container actually runs; never check a different image.
+                    info = self.docker('container', 'inspect', names['app'])
+                    evidence['image_id'] = json.loads(info)[0].get('Image')
+                    if evidence['image_id'] != image:
+                        evidence['failures'].append('image_mismatch: app container image differs from requested image')
+                    else:
+                        remaining = self.budget - (self.clock() - started) - 10
+                        if remaining <= 0:
+                            raise TimeoutError
+                        self.docker(*self.runner_args(names, code, artifacts, Path(directory) / 'runner.env',
+                                                      run_id, remaining), timeout=remaining + 5, optional=True)
                     logs = self.docker('logs', '--tail', '400', names['app'], optional=True)
                     if logs is not None:
                         (artifacts / 'app-container.log').write_text(logs[-200_000:].replace(token, '[redacted]'))
@@ -184,7 +190,8 @@ class BrowserCheck:
             evidence['failures'].append('teardown incomplete')
         evidence['passed'] = bool(result and result.get('passed') and not evidence['failures'])
         if not evidence['passed']:
-            evidence['failure_kind'] = ('browser_budget_exceeded' if evidence['elapsed_seconds'] > self.budget else
+            evidence['failure_kind'] = ('browser_image_mismatch' if evidence.get('image_id', image) != image else
+                                        'browser_budget_exceeded' if evidence['elapsed_seconds'] > self.budget else
                                         'browser_check_failure' if result else 'browser_environment')
         evidence['screenshots'] = sorted(p.name for p in artifacts.glob('*.png'))
         evidence['console_logs'] = sorted(p.name for p in artifacts.glob('*-console.json'))

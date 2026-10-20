@@ -42,6 +42,11 @@ class Runtime:
     def image(self, sha):
         return 'sha256:new' if 'sha256:new' in self.images else None
 
+    local_ids = {}
+
+    def image_id(self, image_id):
+        return self.local_ids.get(image_id, image_id) if image_id in self.images else None
+
     def build(self, sha, context):
         assert (context / 'main.py').read_text() == 'print("committed")\n'
         assert not (context / '.git').exists() and not (context / '.env').exists()
@@ -80,11 +85,12 @@ class Runtime:
         self.calls.append('cleanup')
 
     browser_passes = True
+    browser_image = None
 
     def browser_check(self, image, artifacts):
         self.browser_runs = getattr(self, 'browser_runs', []) + [(image, artifacts)]
         return dict(phase='browser', shard='browser', passed=self.browser_passes, failures=[],
-                    artifact_dir=str(artifacts))
+                    artifact_dir=str(artifacts), image=image, image_id=self.browser_image or image)
 
 
 @pytest.fixture
@@ -109,9 +115,11 @@ def release(tmp_path):
         db.execute('CREATE TABLE conversations (id TEXT PRIMARY KEY, content TEXT)')
         db.execute('INSERT INTO conversations VALUES (?, ?)', ('conversation', 'persistent user data'))
     service = ReleaseService(ReleaseConfig(str(root), str(tmp_path / 'journal'), str(tmp_path / '.env')), runtime)
+    # Validation built and browser-checked this exact image; deploy reuses it by ID.
+    runtime.images.add('sha256:new')
     with service.lock():
         data = service.load()
-        data['evidence'][sha] = dict(commit=sha, at=now(), passed=True,
+        data['evidence'][sha] = dict(commit=sha, at=now(), passed=True, image_id='sha256:new',
                                       tests=[dict(phase='python', passed=True), dict(phase='ui', passed=True)],
                                       review='Automated context check; human review at approval')
         service.save(data)
@@ -291,7 +299,7 @@ def test_success_persistence_previous_image_audit_and_idempotency(release):
     assert service.inspect(result['id']) == result
     assert service.history() == [result]
     assert service.deploy(sha, approval(sha)) == result
-    assert runtime.calls.count('build') == runtime.calls.count('switch') == 1
+    assert runtime.calls.count('switch') == 1 and 'build' not in runtime.calls
     with sqlite3.connect(runtime.database) as db:
         assert db.execute('SELECT * FROM conversations').fetchall() == [('conversation', 'persistent user data')]
 
@@ -811,6 +819,8 @@ def test_browser_phase_checks_exact_release_image_and_blocks_on_failure(release,
     assert result['passed'] and result['tests'][-1]['phase'] == 'browser'
     (image, artifacts), = runtime.browser_runs
     assert image == 'sha256:new' and 'build' in runtime.calls
+    assert result['image_id'] == result['tests'][-1]['image_id'] == 'sha256:new'
+    assert service.load()['evidence'][sha]['image_id'] == 'sha256:new'
     assert artifacts.parent == service.config.journal / 'artifacts' and artifacts.name.startswith(sha)
     runtime.browser_passes = False
     failed = service.validate(sha)
@@ -833,3 +843,68 @@ def test_browser_phase_required_and_skipped_after_suite_failure(release, validat
     monkeypatch.setattr(Runtime, 'browser_check', broken, raising=False)
     crashed = service.validate(sha)
     assert not crashed['passed'] and 'SECRET' not in json.dumps(service.load())
+
+
+def test_deploy_uses_exact_tested_image_id_and_never_builds(release):
+    service, runtime, sha = release
+    def build(sha, context):
+        raise AssertionError('deploy must never build')
+    runtime.build = build
+    preview = service.preview(sha)
+    assert preview['eligible'] and preview['tested_image_id'] == 'sha256:new' and preview['tested_image_present']
+    result = service.deploy(sha, approval(sha))
+    assert result['status'] == 'deployed' and result['image'] == 'sha256:new'
+    assert runtime.current_value['image'] == 'sha256:new' and 'build' not in runtime.calls
+    assert 'building' not in [e['status'] for e in result['events']]
+
+
+@pytest.mark.parametrize('case,message', [('missing_record', 'No tested image ID is recorded'),
+                                          ('missing_image', 'no longer exists locally'),
+                                          ('different_id', 'differs from the tested image ID')])
+def test_deploy_refuses_without_exact_tested_image(release, case, message):
+    service, runtime, sha = release
+    if case == 'missing_record':
+        with service.lock():
+            data = service.load()
+            del data['evidence'][sha]['image_id']
+            service.save(data)
+    elif case == 'missing_image':
+        runtime.images.discard('sha256:new')
+    else:
+        runtime.local_ids = {'sha256:new': 'sha256:rebuilt'}
+    preview = service.preview(sha)
+    assert not preview['eligible'] and not preview['tested_image_present'] and message in preview['image_problem']
+    before = service.load()
+    with pytest.raises(ToolDenied, match=message):
+        service.deploy(sha, approval(sha))
+    assert service.load() == before and not runtime.calls
+    assert runtime.current_value == runtime.previous
+
+
+def test_browser_image_id_mismatch_fails_validation(release, validation_shards, monkeypatch):
+    from tools import CommandResult
+    service, runtime, sha = release
+    monkeypatch.setattr('tools.sandbox.run_tests', lambda *a, **k: CommandResult((), 0, '1 passed'))
+    runtime.browser_image = 'sha256:other'
+    result = service.validate(sha)
+    browser = result['tests'][-1]
+    assert not result['passed'] and result['image_id'] is None
+    assert not browser['passed'] and browser['failure_kind'] == 'browser_image_mismatch'
+    assert browser['built_image_id'] == 'sha256:new' and browser['image_id'] == 'sha256:other'
+    assert not service.preview(sha)['eligible']
+    with pytest.raises(ToolDenied, match='validation'):
+        service.deploy(sha, approval(sha))
+
+
+def test_runtime_image_id_looks_up_exact_ids_only(docker_runtime, monkeypatch):
+    calls = []
+    image = 'sha256:' + 'a' * 64
+    def docker(*args, **kwargs):
+        calls.append(args)
+        return json.dumps([{'Id': image}]) if args[-1] == image else None
+    monkeypatch.setattr(docker_runtime, 'docker', docker)
+    assert docker_runtime.image_id(image) == image
+    assert docker_runtime.image_id('sha256:' + 'b' * 64) is None
+    for bad in (None, '', 'jarvis-release:' + 'a' * 40, '--help', 'sha256:new'):
+        assert docker_runtime.image_id(bad) is None
+    assert calls == [('image', 'inspect', image), ('image', 'inspect', 'sha256:' + 'b' * 64)]
