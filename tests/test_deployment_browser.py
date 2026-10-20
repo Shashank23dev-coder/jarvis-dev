@@ -15,7 +15,7 @@ class FakeDocker:
         self.clock, self.have_runner, self.live = clock, have_runner, {}
         self.env_files = {}
 
-    def __call__(self, *args, timeout=30, optional=False):
+    def __call__(self, *args, timeout=30, optional=False, merge_stderr=False):
         self.calls.append(args)
         if args[:2] == ('image', 'inspect'):
             return '[{}]' if self.have_runner else None
@@ -39,7 +39,11 @@ class FakeDocker:
         if args[0] == "build":
             return ""
         if args[0] == "logs":
-            return 'request_completed TOKEN\n'
+            # Like the real app: stdout is nearly silent, logs (and here a leak of every secret) go to stderr.
+            secrets = [l.split('=', 1)[1] for l in self.env_files[args[-1]].splitlines()
+                       if l.split('=', 1)[0] in {'JARVIS_AUTH_TOKEN', 'BCHECK_PASSWORD', 'OPENAI_API_KEY'}]
+            stderr = ''.join(f'stderr: request_completed leaked={s}\n' for s in secrets)
+            return 'request_completed TOKEN\n' + (stderr if merge_stderr else '')
         if args[:2] in {('container', 'inspect'), ('volume', 'inspect')}:
             run = self.live.get(args[2])
             if run is None:
@@ -89,6 +93,33 @@ def test_throwaway_containers_are_isolated_and_never_production(tmp_path):
     assert 'JARVIS_OWNER_LOGIN_HASH' not in app_env  # hashed inside the release image at boot
     assert evidence['screenshots'] and evidence['console_logs'] == ['phone-390x664-console.json']
     assert 'TOKEN' in (tmp_path / 'art' / 'app-container.log').read_text()  # only literal fixture text
+
+
+def test_app_container_log_keeps_stderr_and_redacts_secrets(tmp_path):
+    docker = FakeDocker(PASS)
+    BrowserCheck(docker=docker).run('img', tmp_path / 'art')
+    log = (tmp_path / 'art' / 'app-container.log').read_text()
+    assert log.count('stderr: request_completed leaked=[redacted]') == 3
+    app = runs(docker)[0]
+    for line in docker.env_files[app[app.index('--name') + 1]].splitlines():
+        key, value = line.split('=', 1)
+        if key in {'JARVIS_AUTH_TOKEN', 'BCHECK_PASSWORD', 'OPENAI_API_KEY'}:
+            assert value not in log
+
+
+def test_docker_merges_stderr_into_stdout_only_when_asked(monkeypatch):
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs)
+        return deployment_browser.subprocess.CompletedProcess(argv, 0, b'out\nerr\n', None)
+
+    monkeypatch.setattr(deployment_browser.subprocess, 'run', fake_run)
+    assert deployment_browser.docker('logs', 'x', merge_stderr=True) == 'out\nerr\n'
+    deployment_browser.docker('ps')
+    assert seen[0]['stderr'] is deployment_browser.subprocess.STDOUT
+    assert seen[1]['stderr'] is deployment_browser.subprocess.PIPE
+    assert all(k['stdout'] is deployment_browser.subprocess.PIPE for k in seen)
 
 
 def test_each_run_uses_fresh_names_and_secrets(tmp_path):
