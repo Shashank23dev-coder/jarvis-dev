@@ -153,6 +153,11 @@ finally:
             raise ToolDenied('Unexpected image volumes')
         return image
 
+    def browser_check(self, image, artifacts):
+        # Throwaway app + Chromium containers only; no production secrets, names or ports.
+        from .deployment_browser import BrowserCheck
+        return BrowserCheck().run(image, artifacts)
+
     def run(self, name, image, volume, port, release_id):
         # Only the existing production values (plus the optional owner login hash) enter a private transient env file.
         # They never enter argv, build context, journal, API results or logs.
