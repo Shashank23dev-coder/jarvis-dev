@@ -79,6 +79,13 @@ class Runtime:
     def cleanup(self, record):
         self.calls.append('cleanup')
 
+    browser_passes = True
+
+    def browser_check(self, image, artifacts):
+        self.browser_runs = getattr(self, 'browser_runs', []) + [(image, artifacts)]
+        return dict(phase='browser', shard='browser', passed=self.browser_passes, failures=[],
+                    artifact_dir=str(artifacts))
+
 
 @pytest.fixture
 def release(tmp_path):
@@ -504,7 +511,7 @@ def test_validation_binds_complete_suites_to_git_snapshot_and_invalidates_on_err
     result = service.validate(sha)
     assert result['passed'] and calls == [(['tests/first.py'], False),
         (['tests/second.py'], False), (['tests/ui.test.cjs'], True)]
-    assert [t['shard'] for t in result['tests']] == ['python-1', 'python-2', 'ui']
+    assert [t['shard'] for t in result['tests']] == ['python-1', 'python-2', 'ui', 'browser']
     assert all(t['elapsed_seconds'] >= 0 for t in result['tests'])
     assert 'SECRET_TEST_OUTPUT' not in json.dumps(service.load())
     def fail(*args, **kwargs):
@@ -794,3 +801,35 @@ def test_fixture_changes_are_independent_of_production_key_protection(release, t
     else:
         service.snapshot(git(service.config.source, 'rev-parse', 'HEAD'), export)
         assert (export / fixture_path).read_bytes() == content
+
+
+def test_browser_phase_checks_exact_release_image_and_blocks_on_failure(release, validation_shards, monkeypatch):
+    from tools import CommandResult
+    service, runtime, sha = release
+    monkeypatch.setattr('tools.sandbox.run_tests', lambda *a, **k: CommandResult((), 0, '1 passed'))
+    result = service.validate(sha)
+    assert result['passed'] and result['tests'][-1]['phase'] == 'browser'
+    (image, artifacts), = runtime.browser_runs
+    assert image == 'sha256:new' and 'build' in runtime.calls
+    assert artifacts.parent == service.config.journal / 'artifacts' and artifacts.name.startswith(sha)
+    runtime.browser_passes = False
+    failed = service.validate(sha)
+    assert not failed['passed'] and service.load()['evidence'][sha] == failed
+    assert not service.preview(sha)['eligible']
+
+
+def test_browser_phase_required_and_skipped_after_suite_failure(release, validation_shards, monkeypatch):
+    from tools import CommandResult
+    service, runtime, sha = release
+    monkeypatch.setattr('tools.sandbox.run_tests', lambda *a, **k: CommandResult((), 1, 'FAILED'))
+    assert [t['shard'] for t in service.validate(sha)['tests']] == ['python-1', 'python-2', 'ui']
+    assert not getattr(runtime, 'browser_runs', None) and 'build' not in runtime.calls
+    monkeypatch.setattr('tools.sandbox.run_tests', lambda *a, **k: CommandResult((), 0, '1 passed'))
+    monkeypatch.delattr(Runtime, 'browser_check')
+    missing = service.validate(sha)
+    assert not missing['passed'] and missing['tests'][-1]['failure_kind'] == 'browser_environment'
+    def broken(self, image, artifacts):
+        raise RuntimeError('SECRET docker diagnostic')
+    monkeypatch.setattr(Runtime, 'browser_check', broken, raising=False)
+    crashed = service.validate(sha)
+    assert not crashed['passed'] and 'SECRET' not in json.dumps(service.load())

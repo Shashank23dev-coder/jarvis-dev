@@ -32,7 +32,7 @@ PYTHON_SHARDS = (
     ('tests/test_candidate_apply.py', 'tests/test_engineering.py',
      'tests/test_deployment_release.py', 'tests/test_candidate_tools.py',
      'tests/test_engineering_authority.py', 'tests/test_engineering_operator.py', 'tests/test_experience.py',
-     'tests/test_sandbox_docker.py', 'tests/test_sandbox_imports.py'),
+     'tests/test_sandbox_docker.py', 'tests/test_sandbox_imports.py', 'tests/test_deployment_browser.py'),
     ('tests/test_owner_readonly_flow.py', 'tests/test_engineering_jobs.py',
      'tests/test_project_repository.py', 'tests/test_authority_acceptance.py',
      'tests/test_tools.py', 'tests/test_recall.py',
@@ -280,6 +280,8 @@ class ReleaseService:
                                             'test_fixture_failure' if re.search(r'ERROR at (?:setup|teardown)', result.stdout) else
                                             'test_failure' if result.returncode == 1 else
                                             'test_environment' if result.returncode else None)))
+                if results and all(r['passed'] for r in results):
+                    results.append(self.browser(sha))
                 self.clean(sha)
                 data = self.load()
                 evidence = dict(commit=sha, at=now(), tests=results,
@@ -288,6 +290,30 @@ class ReleaseService:
                 data['evidence'][sha] = evidence
                 self.save(data)
                 return evidence
+
+    def browser(self, sha):
+        """Real-browser check of the exact release image; runs only after all suites pass."""
+        started = time.monotonic()
+        check = getattr(self.runtime, 'browser_check', None)
+        failed = dict(phase='browser', shard='browser', passed=False, failure_kind='browser_environment')
+        if check is None:
+            return dict(failed, elapsed_seconds=0.0, failures=['browser check unavailable'])
+        try:
+            with tempfile.TemporaryDirectory(prefix='jarvis-release-build-') as directory:
+                self.snapshot(sha, Path(directory))
+                image = self.runtime.build(sha, Path(directory))
+            artifacts = (self.config.journal / 'artifacts' /
+                         f"{sha}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-browser")
+            (self.config.journal / 'artifacts').mkdir(mode=0o700, exist_ok=True)
+            result = check(image, artifacts)
+        except Exception:
+            return dict(failed, elapsed_seconds=round(time.monotonic() - started, 2),
+                        failures=['browser check could not run; raw diagnostics withheld'])
+        evidence = dict(elapsed_seconds=round(time.monotonic() - started, 2))
+        evidence.update(result)
+        evidence.update(build_and_check_seconds=round(time.monotonic() - started, 2),
+                        passed=bool(result.get('passed')))
+        return evidence
 
     def prepare(self):
         """Preparation is autonomous; existing exact-commit evidence is reusable."""
