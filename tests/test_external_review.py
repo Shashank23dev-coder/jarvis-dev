@@ -174,3 +174,14 @@ def test_record_review_is_not_reachable_from_http_or_tools():
     assert root / 'core/candidate_tools.py' in sources
     assert [str(p.relative_to(root)) for p in sources
             if p.name != 'external_review.py' and importer.search(p.read_text())] == []
+
+
+def test_resealing_discards_an_earlier_verdict():
+    saved = []
+    record = dict(files_changed=["src/app.py"], tested_fingerprint="a" * 64,
+                  external_review=dict(verdict="passed", reviewer="grok", sha="b" * 64))
+    s = SimpleNamespace(record=record, _diff=lambda: "c" * 64,
+                        store=SimpleNamespace(save=lambda r, event: saved.append(event)))
+    operator.record_external_review(s)
+    assert "external_review" not in record and record["state"] == "needs_revision"
+    assert saved == ["review_requires_passing_tests"]
