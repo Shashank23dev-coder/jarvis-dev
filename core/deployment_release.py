@@ -24,11 +24,15 @@ TERMINAL = {'deployed', 'rolled_back', 'failed', 'rollback_failed'}
 
 # Three fixed batches, balanced by measured in-sandbox durations, keep each
 # Python run under the existing 600 s deadline. Inventory changes fail closed.
+# Rebalanced (shards were ~5.3/6/7.1 min): test_direct_dev.py and
+# test_engineering_direct.py (54 git/subprocess-heavy integration tests) moved
+# from shard 3 to shard 1 to bring every shard to roughly 6 min.
 PYTHON_SHARDS = (
     ('tests/test_assistant_experience.py', 'tests/test_self_edit.py',
      'tests/test_candidate_bridge.py', 'tests/test_brain_status.py',
      'tests/test_authority_model.py', 'tests/test_engineering_providers.py',
-     'tests/test_codex_cli_provider.py', 'tests/test_owner_login.py', 'tests/test_external_review.py'),
+     'tests/test_codex_cli_provider.py', 'tests/test_owner_login.py', 'tests/test_external_review.py',
+     'tests/test_direct_dev.py', 'tests/test_engineering_direct.py'),
     ('tests/test_candidate_apply.py', 'tests/test_engineering.py',
      'tests/test_deployment_release.py', 'tests/test_candidate_tools.py',
      'tests/test_engineering_authority.py', 'tests/test_engineering_operator.py', 'tests/test_experience.py',
@@ -42,7 +46,7 @@ PYTHON_SHARDS = (
      'tests/test_experience_evaluation.py', 'tests/test_deployment_status.py',
      'tests/test_self_state.py', 'tests/test_api.py',
      'tests/test_engineering_portfolio.py', 'tests/test_registry.py',
-     'tests/test_direct_dev.py', 'tests/test_engineering_direct.py', 'tests/test_planner_scope.py', 'tests/test_planner_edges.py',
+     'tests/test_planner_scope.py', 'tests/test_planner_edges.py',
      'tests/test_busy_retry.py'),
 )
 
