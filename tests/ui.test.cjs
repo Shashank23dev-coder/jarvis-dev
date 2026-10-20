@@ -34,7 +34,7 @@ class Node {
     setAttribute(key, value) { this.attributes[key] = value; }
     removeAttribute(key) { delete this.attributes[key]; }
     addEventListener(key, callback) { this.listeners[key] = callback; }
-    focus() { this.focused = true; }
+    focus(options) { this.focused = true; this.focusOptions = options; Node.activeElement = this; }
 }
 function setup(fetch, savedConversation = null, globals = {}) {
     const nodes = {};
@@ -43,6 +43,7 @@ function setup(fetch, savedConversation = null, globals = {}) {
         const node = new Node('button'); node.dataset.view = match[1]; return node;
     });
     const document = {
+        get activeElement() { return Node.activeElement; },
         getElementById: id => nodes[id],
         createElement: tag => new Node(tag),
         createTextNode: value => { const node = new Node('#text'); node.textContent = value; return node; },
@@ -375,6 +376,18 @@ test('Jarvis messages render headings, bold, italic, lists and code as Markdown'
     assert.equal(ui.nodes.messages.children[0].children[1].className, 'jarvis-avatar');
 });
 
+test('an unclosed code fence renders the rest of the message as code', () => {
+    const ui = setup(async () => ({ ok: false }));
+    const message = ui.run(`addMessage("jarvis", ${JSON.stringify(
+        'Run this:\n\n```js\nconst a = 1;\n```js\n\nconsole.log(a);')})`);
+    assert.equal(find(message, 'p')[0].textContent, 'Run this:');
+    const blocks = find(message, 'pre');
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].children[0].tagName, 'code');
+    assert.equal(blocks[0].textContent, 'const a = 1;\n```js\n\nconsole.log(a);');
+    assert.equal(message.textContent, 'Run this:const a = 1;\n```js\n\nconsole.log(a);');
+});
+
 test('HTML in Jarvis messages stays inert text and links stay plain', () => {
     assert.doesNotMatch(script, /innerHTML/);
     const ui = setup(async () => ({ ok: false }));
@@ -439,6 +452,11 @@ test('scrolled-up owner is not pulled down and can jump to latest', () => {
     assert.equal(log.scrollTop, top);
     assert.equal(ui.nodes.jumpLatest.hidden, false);
     ui.nodes.jumpLatest.listeners.click();
+    const newest = log.children.at(-1).children[0];
+    assert.equal(newest.textContent, 'A new answer arrives');
+    assert.equal(newest.attributes.tabindex, '-1');
+    assert.equal(ui.run('document.activeElement'), newest);
+    assert.deepEqual({ ...newest.focusOptions }, { preventScroll: true });
     assert.equal(log.scrolls.at(-1).top, log.scrollHeight);
     assert.equal(log.scrollTop, log.scrollHeight - log.clientHeight);
     log.listeners.scroll();

@@ -725,6 +725,7 @@ const jumpLatest = document.getElementById("jumpLatest");
 const FOLLOW_THRESHOLD = 120;
 let autoScrolling = true;
 let lastScrollTop = 0;
+let latestMessage = null;
 let activeView = "assistant";
 let conversationId = null;
 try { conversationId = localStorage.getItem("jarvis.conversationId"); } catch (_) {}
@@ -921,13 +922,15 @@ function renderMarkdown(container, source) {
     };
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        const fence = line.match(/^\s*(```|~~~)/);
+        const fence = line.match(/^\s*(`{3,}|~{3,})/);
         const heading = line.match(/^(#{1,6})\s+(.*)$/);
         const item = line.match(/^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$/);
         if (fence) {
             flush();
+            // Only a bare fence of the same kind closes the block; an unclosed fence keeps every remaining line as code.
+            const closing = new RegExp("^\\s*" + fence[1] + fence[1][0] + "*\\s*$");
             const code = [];
-            while (++i < lines.length && !lines[i].trim().startsWith(fence[1])) code.push(lines[i]);
+            while (++i < lines.length && !closing.test(lines[i])) code.push(lines[i]);
             const pre = element("pre");
             pre.append(element("code", "", code.join("\n")));
             container.append(pre);
@@ -993,6 +996,8 @@ function addMessage(role, text, follow = true) {
         avatar.setAttribute("aria-hidden", "true");
         row.append(avatar);
     }
+    message.setAttribute("tabindex", "-1");
+    latestMessage = message;
     if (follow) keepLatestVisible(() => messages.append(row));
     else messages.append(row);
     return message;
@@ -1049,7 +1054,11 @@ messages.addEventListener("scroll", () => {
     if (distanceFromLatest() <= 1) autoScrolling = false;
     jumpLatest.hidden = followingLatest();
 });
-jumpLatest.addEventListener("click", () => scrollToLatest());
+jumpLatest.addEventListener("click", () => {
+    scrollToLatest();
+    // The button hides itself, so hand keyboard focus to the newest message without fighting the scroll.
+    if (latestMessage) latestMessage.focus({ preventScroll: true });
+});
 promptBox.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
