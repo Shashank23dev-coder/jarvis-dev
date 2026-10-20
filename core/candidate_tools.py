@@ -128,9 +128,7 @@ Prefer start_engineering_operator for coordinated implementation and review.
 Default CODEX_BUILD_CLAUDE_REVIEW: Codex implements, Claude reviews independently.
 Use CODEX_ONLY for a requested Codex implementation or CLAUDE_ONLY for a requested
 Claude implementation; both retain the existing independent OpenAI review gate.
-Use CLAUDE_EXTERNAL_REVIEW only when the owner explicitly asks for work built by
-Claude Code and reviewed by Grok: no provider reviews it, the job waits for
-external review by grok and owner approval. Never infer it.
+CLAUDE_EXTERNAL_REVIEW is configured by the owner on the server; it is refused otherwise.
 Use registered provider routing (Codex/Claude); report actual provider attribution.
 Inspect jobs and candidates across conversations without another permission request.
 Jobs implement/test/review in isolated development; completed means that candidate

@@ -5,6 +5,7 @@ release preparation deliberately cannot produce controller-owned eligibility.
 """
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -39,9 +40,21 @@ def external_review(mode):
     return mode == 'CLAUDE_EXTERNAL_REVIEW'
 
 
+def external_review_allowed():
+    """Owner server setting only: no tool argument, prompt or HTTP field sets it."""
+    return os.environ.get('JARVIS_ALLOW_CLAUDE_EXTERNAL_REVIEW') in {'1', 'true'}
+
+
+def require_mode_allowed(mode):
+    if external_review(mode) and not external_review_allowed():
+        raise ToolDenied('CLAUDE_EXTERNAL_REVIEW is not enabled on this server')
+
+
 def record_external_review(s):
     """Seal tested bytes for an outside reviewer; never a provider call or a PASS."""
     r = s.record
+    # A new seal voids any verdict recorded for earlier bytes.
+    r.pop('external_review', None)
     fingerprint = s._diff()
     if not r['files_changed'] or r['tested_fingerprint'] != fingerprint:
         r.update(state='needs_revision', reviewer_result=None)
@@ -185,6 +198,7 @@ def coordinate(s):
     from .self_edit import CandidateRepository, Proposal, PROPOSE
     from .candidate_provider import ProviderFailure
     r, op = s.record, s.record['operator']
+    require_mode_allowed(op['mode'])
     builder, reviewer = routes(op['mode'])
     r['improvement'].update(implementation_provider=builder, review_provider=reviewer)
     if op['phase'] == 'inspect' and not r.get('manifest'):
@@ -308,6 +322,7 @@ def run_job(service, jobs, job, owner):
     from .engineering_providers import EngineeringRegistry
     if not hasattr(service, 'engineering_lock_fd'):
         raise ToolDenied('Operator requires the worker fence')
+    require_mode_allowed(job['operator']['mode'])
     project = Portfolio(jobs.database).inspect_project(job['project_id'])
     if not project:
         raise ToolDenied('Registered project unavailable')

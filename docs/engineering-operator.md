@@ -34,15 +34,37 @@ the model cannot supply a repository root or register a project.
 | `CODEX_BUILD_CLAUDE_REVIEW` | Codex | Claude Code |
 | `CLAUDE_EXTERNAL_REVIEW` | Claude Code | None automated: external review by grok |
 
-`CLAUDE_EXTERNAL_REVIEW` is selected only on an explicit owner request ("built by
-Claude Code, reviewed by Grok"). Claude Code builds exactly as in `CLAUDE_ONLY`.
-No provider (Codex, OpenAI or Claude) reviews the candidate; after passing tests
-the tested bytes are sealed with `review_result.verdict =
-external_review_required` and `reviewer = grok`. The job always ends in
-`waiting_for_approval` after the full release preparation, and candidate apply
-accepts that verdict only for this mode, still behind the owner's explicit
-approval. All other modes keep their provider review gate and
-`reviewer_must_differ_from_author`.
+`CLAUDE_EXTERNAL_REVIEW` is an owner server setting, not a model choice. It is
+usable only while the server process environment has
+`JARVIS_ALLOW_CLAUDE_EXTERNAL_REVIEW` set to exactly `1` or `true`; it is off by
+default. While it is off, creating a job in this mode (chat tool, broker or
+`EngineeringJobs.create`) is refused with `ToolDenied`. The worker checks it
+again before running or reviewing, and apply checks it again, so a job created
+while the setting was on cannot continue after it is turned off. No tool
+argument, prompt text or HTTP field turns it on.
+
+Claude Code builds exactly as in `CLAUDE_ONLY`. No provider (Codex, OpenAI or
+Claude) reviews the candidate; after passing tests the tested bytes are sealed
+with `review_result.verdict = external_review_required` and `reviewer = grok`.
+That sealed status is never a pass. The job ends in `waiting_for_approval` after
+the full release preparation (never `completed`) and waits for grok's review and
+owner approval.
+
+grok's verdict is recorded on the host only, with a CLI that no HTTP route, tool
+registry or chat tool can reach:
+
+    python -m core.external_review record-review <candidate_id> \
+        --sha <candidate fingerprint> --verdict passed|needs_revision --reviewer grok
+
+It refuses candidates outside this mode and any `--sha` that is not both the
+candidate's current fingerprint and its sealed reviewed fingerprint, then stores
+`external_review = {verdict, reviewer, sha, recorded_at}` on the candidate.
+Candidate apply for this mode requires that record with `verdict = passed` and
+`sha` equal to the reviewed fingerprint, plus the usual fingerprint and
+diff-hash checks. A missing review, `needs_revision` or a different sha is
+refused ("Review evidence is incomplete or changed"). Resealing the candidate
+discards an earlier record. All other modes keep their provider review gate
+(`reviewer_result.verdict = passed`) and `reviewer_must_differ_from_author`.
 
 The single-agent modes name the engineering implementation agent; they retain
 the existing independent OpenAI review gate. Routine implementation/debugging

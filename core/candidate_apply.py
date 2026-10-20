@@ -170,10 +170,16 @@ class CandidateApply:
             raise ToolDenied('Review expired or missing; request a fresh review')
         expected_diff = r['diff']
         expected = r.get('reviewed_fingerprint')
+        from .engineering_operator import EXTERNAL_REVIEWER, EXTERNAL_VERDICT, external_review, external_review_allowed
+        external = external_review((r.get('operator') or {}).get('mode'))
+        # The sealed external_review_required status is never a pass: only grok's
+        # recorded verdict for these exact reviewed bytes is.
+        outside = r.get('external_review') or {}
         if (not expected or r.get('tested_fingerprint') != expected
                 or r.get('fingerprint') != expected or not r.get('reviewer_result')
-                or r['reviewer_result']['verdict'] != ('external_review_required' if (r.get('operator') or {}).get(
-                    'mode') == 'CLAUDE_EXTERNAL_REVIEW' else 'passed')
+                or r['reviewer_result']['verdict'] != (EXTERNAL_VERDICT if external else 'passed')
+                or external and (not external_review_allowed() or outside.get('verdict') != 'passed'
+                                 or outside.get('reviewer') != EXTERNAL_REVIEWER or outside.get('sha') != expected)
                 or r.get('reviewed_diff_hash') != digest(expected_diff.encode())):
             raise ToolDenied('Review evidence is incomplete or changed')
         phases = [('targeted', r['targeted_tests']), ('full_python', ['tests'])]

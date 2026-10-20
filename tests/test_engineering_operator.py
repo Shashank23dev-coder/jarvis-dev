@@ -658,6 +658,12 @@ printf '%s' '{{"type":"result","result":"{{\\\"edits\\\":[{{\\\"path\\\":\\\"src
 
 
 @pytest.fixture
+def allow_external(monkeypatch):
+    """The owner server setting; off unless a test turns it on."""
+    monkeypatch.setenv('JARVIS_ALLOW_CLAUDE_EXTERNAL_REVIEW', '1')
+
+
+@pytest.fixture
 def fake_claude(harness, monkeypatch, tmp_path, executable_script):
     """claude_cli runs the real headless adapter against a fake `claude`."""
     from core.candidate_claude import ClaudeCLIProvider, claude_request
@@ -678,7 +684,7 @@ def fake_claude(harness, monkeypatch, tmp_path, executable_script):
     return calls
 
 
-def test_external_review_mode_builds_with_claude_and_never_calls_a_reviewer(harness, fake_claude):
+def test_external_review_mode_builds_with_claude_and_never_calls_a_reviewer(harness, fake_claude, allow_external):
     h = harness
     queued = h['enqueue']('CLAUDE_EXTERNAL_REVIEW')
     assert queued['provider'] == 'claude_cli'
@@ -698,9 +704,10 @@ def test_external_review_mode_builds_with_claude_and_never_calls_a_reviewer(harn
     assert candidate['reviewer_result']['reviewer'] == 'grok'
     from core.candidate_bridge import project
     assert project(candidate)['reviewer_result']['verdict'] == 'external_review_required'
+    assert 'external_review' not in candidate  # sealed, not reviewed: never a pass
 
 
-def test_external_review_routine_project_still_waits_for_owner(harness):
+def test_external_review_routine_project_still_waits_for_owner(harness, allow_external):
     from core.engineering_portfolio import Portfolio
     h = harness
     portfolio = Portfolio(h['db'])
@@ -716,7 +723,7 @@ def test_external_review_routine_project_still_waits_for_owner(harness):
     assert reviews == ['codex_cli']  # only CLAUDE_ONLY ran a provider review
 
 
-def test_external_verdict_is_refused_outside_its_mode(harness):
+def test_external_verdict_is_refused_outside_its_mode(harness, allow_external):
     from core.candidate_apply import CandidateApply
     from core.candidate_bridge import project
     h = harness

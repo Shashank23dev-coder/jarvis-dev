@@ -187,6 +187,9 @@ class EngineeringJobs:
             raise ToolDenied('Invalid job source')
         schema = OperatorArguments if 'execution_mode' in arguments else EngineeringArguments
         args = schema.model_validate(arguments).model_dump(exclude_none=True)
+        if 'execution_mode' in args:
+            from .engineering_operator import require_mode_allowed
+            require_mode_allowed(args['execution_mode'])
         from .engineering_decision import resolve_project
         from .engineering_portfolio import Portfolio
         project_id = resolve_project(goal, Portfolio(self.database).projects(), args.get('project_id'))
@@ -469,23 +472,27 @@ class EngineeringJobs:
                 raise ToolDenied('Stale engineering lease')
             from .engineering_operator import external_review, EXTERNAL_VERDICT
             external = bool(job.get('operator')) and external_review(job['operator']['mode'])
-            expected_verdict = EXTERNAL_VERDICT if external else 'passed'
-            passed = bool(candidate and candidate['state'] == 'passed' and not candidate.get('busy')
+            verdict = ((candidate or {}).get('reviewer_result') or {}).get('verdict')
+            sealed = bool(candidate and candidate['state'] == 'passed' and not candidate.get('busy')
                           and candidate.get('tested_fingerprint') == candidate.get('reviewed_fingerprint')
-                          and (candidate.get('reviewer_result') or {}).get('verdict') == expected_verdict
                           and (not job.get('operator') or candidate.get('operator', {}).get('ready')))
+            passed = sealed and not external and verdict == 'passed'
+            # The external seal is never a pass: it only awaits grok's recorded
+            # verdict and owner approval, so the job never becomes completed.
+            awaiting = sealed and external and verdict == EXTERNAL_VERDICT
+            ready = passed or awaiting
             from .engineering_authority import assess_action
             consequence = assess_action('candidate_apply', goal=candidate['goal'],
                 changed_paths=candidate['files_changed'],
-                read_only_target=job.get('project_id') in read_only) if passed else None
-            status = ('waiting_for_approval' if consequence.approval_required else 'completed') if passed else (
+                read_only_target=job.get('project_id') in read_only) if ready else None
+            status = ('waiting_for_approval' if awaiting or consequence.approval_required else 'completed') if ready else (
                 'failed' if job['attempts'] >= job.get('attempt_limit', MAX_ATTEMPTS) else 'blocked')
-            if passed and job.get('operator') and (job['project_id'] == 'jarvis-core' or external):
-                status = 'waiting_for_approval'  # external review always needs the owner
+            if passed and job.get('operator') and job['project_id'] == 'jarvis-core':
+                status = 'waiting_for_approval'
             job['authority'] = consequence.model_dump() if consequence else None
             job.update(status=status, current_stage=status, lease_owner=None, lease_until=0,
-                       error=None if passed else 'Candidate execution did not pass tests and review',
-                       block_reason=None if passed else 'Explicit retry required',
+                       error=None if ready else 'Candidate execution did not pass tests and review',
+                       block_reason=None if ready else 'Explicit retry required',
                        completed_at=timestamp() if status in {'failed', 'completed'} else None)
             if candidate:
                 job['manual_operations'] = candidate.get('manual_operations', [])
@@ -506,7 +513,7 @@ class EngineeringJobs:
                     test_evidence=candidate['test_results'], review_evidence=candidate['reviewer_result'],
                     candidate_result=candidate['state'])
             from .candidate_provider import failure_evidence
-            if not passed:
+            if not ready:
                 failure = failure or (candidate or {}).get('failure')
                 if failure is None:
                     failure = failure_evidence(job['provider'],
@@ -516,7 +523,7 @@ class EngineeringJobs:
                         (candidate or {}).get('stage', 'planning'), job['attempts'])
                 if failure not in job.setdefault('failures', []):
                     job['failures'].append(failure)
-            job['failure'] = failure if not passed else None
+            job['failure'] = failure if not ready else None
             self._save(db, job, 'execution_finished')
         return self.get(identifier)
 
