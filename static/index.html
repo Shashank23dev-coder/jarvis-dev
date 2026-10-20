@@ -445,8 +445,24 @@
     .jarvis-message { background: rgba(12,24,35,.82); border-color: rgba(79,209,232,.2); }
     .user-message { color: #EAFBFF; background: rgba(79,209,232,.14); border: 1px solid rgba(79,209,232,.38); }
     /* Conversation: a bounded log so the newest message can be scrolled into view. */
-    #assistantView { height: calc(100vh - 72px); height: calc(100dvh - 72px); min-height: 440px; }
+    /* While the assistant is shown the page is exactly one viewport tall; every flex ancestor of #messages
+       has min-height: 0 so the log, not the page, is the scroll container at every width. */
+    .layout:has(#assistantView:not([hidden])) { height: 100vh; height: 100dvh; overflow: hidden; }
+    .main { min-height: 0; }
+    #assistantView { flex: 1 1 0; min-height: 0; }
     #messages { min-height: 0; overscroll-behavior: contain; }
+    .composer-wrapper { flex: none; }
+    /* Once the conversation has messages the header collapses to one compact row: a small orb and its
+       aria-live state label stay visible, the date and greeting are hidden, and the log gets the space. */
+    .assistant-chat:has(#messages:not(:empty)) .core-header { flex-direction: row; gap: 10px; margin-bottom: 4px; text-align: left; }
+    .assistant-chat:has(#messages:not(:empty)) .core { width: auto; flex-direction: row; gap: 10px; }
+    .assistant-chat:has(#messages:not(:empty)) .core-rings { width: 28px; height: 28px; }
+    .assistant-chat:has(#messages:not(:empty)) .core-ring.middle { inset: 4px; border-width: 1px; }
+    .assistant-chat:has(#messages:not(:empty)) .core-orbit { inset: 1px; }
+    .assistant-chat:has(#messages:not(:empty)) .core-center,
+    .assistant-chat:has(#messages:not(:empty)) .core-rings::before,
+    .assistant-chat:has(#messages:not(:empty)) .core-rings::after { inset: 9px; }
+    .assistant-chat:has(#messages:not(:empty)) .core-greeting { display: none; }
     .jarvis-row { align-items: flex-start; gap: 10px; }
     .jarvis-avatar { order: -1; flex: none; width: 28px; height: 28px; margin-top: 6px; border: 1px solid var(--cyan); border-radius: 50%; box-shadow: 0 0 10px rgba(79,209,232,.25), inset 0 0 0 5px rgba(79,209,232,.12); }
     .jarvis-message { white-space: normal; }
@@ -481,7 +497,7 @@
       .topbar { min-height: 72px; height: auto; gap: 10px; padding: 12px 16px; flex-wrap: wrap; }
       .mobile-nav { display: block; }
       .workspace { padding: 22px 16px; }
-      .welcome { margin-top: 24px; }
+      .welcome { margin-top: 12px; }
       .view-header { align-items: flex-start; }
     }
     /* Assistant layout: chat column plus a right column that stacks underneath on narrow screens. */
@@ -492,9 +508,10 @@
     .plus-point h2 { margin: 0 0 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 500; letter-spacing: .18em; color: var(--green); }
     .plus-point p { margin: 0; color: var(--ink); font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
     @media(max-width: 900px) {
-      #assistantView { height: auto; }
-      .assistant-layout { flex-direction: column; }
-      .assistant-chat { height: calc(100vh - 116px); height: calc(100dvh - 116px); min-height: 440px; }
+      /* The chat column fills the whole bounded area; the plus-point card sits below it, reached by
+         scrolling the layout, so it never shrinks the chat. */
+      .assistant-layout { flex-direction: column; overflow-y: auto; }
+      .assistant-chat { flex: 0 0 100%; min-height: 0; }
       .plus-point { flex: none; align-self: stretch; }
     }
     @media(prefers-reduced-motion: reduce) {

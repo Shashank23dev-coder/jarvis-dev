@@ -557,3 +557,25 @@ test('reduced motion scrolls instantly', () => {
     ui.run('addMessage("user", "Hello")');
     assert.equal(log.scrolls.at(-1).behavior, 'auto');
 });
+
+test("assistant layout keeps #messages as the bounded scroll container with a compact header once chatting", () => {
+    const css = html.match(/<style>([\s\S]*?)<\/style>/)[1].replace(/\s+/g, " ");
+    // The page is one viewport tall while the assistant is shown, so the log (not the page) scrolls.
+    assert.match(css, /\.layout:has\(#assistantView:not\(\[hidden\]\)\) \{ height: 100vh; height: 100dvh; overflow: hidden; \}/);
+    // Every flex ancestor of #messages may shrink below its content.
+    assert.match(css, /\.main \{ min-height: 0; \}/);
+    assert.match(css, /#assistantView \{ flex: 1 1 0; min-height: 0; \}/);
+    assert.match(css, /\.assistant-layout \{ flex: 1; min-height: 0;/);
+    assert.match(css, /\.assistant-chat \{ flex: 1; min-width: 0; min-height: 0;/);
+    assert.match(css, /#messages \{ min-height: 0;/);
+    assert.match(css, /\.composer-wrapper \{ flex: none; \}/);
+    // The old fixed heights that let content grow past the viewport are gone.
+    assert.doesNotMatch(css, /#assistantView \{ height: auto; \}/);
+    assert.doesNotMatch(css, /calc\(100dvh - 116px\)/);
+    // Phones: the chat fills the bounded area and the plus-point card sits below it.
+    assert.match(css, /@media\(max-width: 900px\) \{[^@]*\.assistant-layout \{ flex-direction: column; overflow-y: auto; \}[^@]*\.assistant-chat \{ flex: 0 0 100%; min-height: 0; \}/);
+    // Compact header once there are messages: greeting hidden, the aria-live state label is never hidden.
+    assert.match(css, /\.assistant-chat:has\(#messages:not\(:empty\)\) \.core-greeting \{ display: none; \}/);
+    assert.doesNotMatch(css, /\.core-label \{[^}]*display: none/);
+    assert.match(html, /<div id="messages"[^>]*><\/div>/, "#messages must start truly empty for :empty");
+});
