@@ -40,10 +40,12 @@ NAME = re.compile(r'jarvis-bcheck-(?:app|run|state)-[0-9a-f]{12}')
 PROTECTED = {'jarvis-jarvis-1', 'jarvis_state', 'jarvis'}
 
 
-def docker(*args, timeout=30, optional=False):
+def docker(*args, timeout=30, optional=False, merge_stderr=False):
+    # merge_stderr interleaves stderr into stdout (docker logs replays the app's stderr there).
     with tempfile.TemporaryDirectory(prefix='jarvis-bcheck-home-') as home:
         try:
-            result = subprocess.run([*DOCKER, *args], stdin=subprocess.DEVNULL, capture_output=True,
+            result = subprocess.run([*DOCKER, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
                                     timeout=timeout, env={'PATH': '/usr/bin:/bin', 'HOME': home})
         except subprocess.TimeoutExpired:
             if optional:
@@ -53,7 +55,7 @@ def docker(*args, timeout=30, optional=False):
         if optional:
             return None
         raise RuntimeError('Docker browser-check operation failed')
-    return result.stdout.decode()
+    return result.stdout.decode(errors='replace')
 
 
 def throwaway_names(run_id):
@@ -145,8 +147,9 @@ class BrowserCheck:
                 username = 'owner-' + secrets.token_hex(4)
                 password = secrets.token_urlsafe(24)
                 token = secrets.token_urlsafe(48)
+                api_key = 'sk-bcheck-' + secrets.token_hex(8)
                 write_env(Path(directory) / 'app.env', dict(
-                    JARVIS_AUTH_TOKEN=token, OPENAI_API_KEY='sk-bcheck-' + secrets.token_hex(8),
+                    JARVIS_AUTH_TOKEN=token, OPENAI_API_KEY=api_key,
                     JARVIS_PUBLIC_ORIGIN=ORIGIN, BCHECK_USERNAME=username, BCHECK_PASSWORD=password))
                 write_env(Path(directory) / 'runner.env', dict(
                     JARVIS_AUTH_TOKEN=token, BCHECK_USERNAME=username, BCHECK_PASSWORD=password))
@@ -164,9 +167,12 @@ class BrowserCheck:
                             raise TimeoutError
                         self.docker(*self.runner_args(names, code, artifacts, Path(directory) / 'runner.env',
                                                       run_id, remaining), timeout=remaining + 5, optional=True)
-                    logs = self.docker('logs', '--tail', '400', names['app'], optional=True)
+                    # The app logs to stderr; capture both streams interleaved, minus the throwaway secrets.
+                    logs = self.docker('logs', '--tail', '400', names['app'], optional=True, merge_stderr=True)
                     if logs is not None:
-                        (artifacts / 'app-container.log').write_text(logs[-200_000:].replace(token, '[redacted]'))
+                        for secret in (token, password, api_key):
+                            logs = logs.replace(secret, '[redacted]')
+                        (artifacts / 'app-container.log').write_text(logs[-200_000:])
                 finally:
                     evidence['teardown_clean'] = self.teardown(names, run_id)
         except Exception as exc:
