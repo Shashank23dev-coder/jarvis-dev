@@ -24,25 +24,27 @@ TERMINAL = {'deployed', 'rolled_back', 'failed', 'rollback_failed'}
 
 # Three fixed batches, balanced by per-file pytest --durations (2026-10-21), keep each
 # Python run under the existing 600 s deadline. Inventory changes fail closed.
+# test_self_edit.py stays in shard 1 and test_candidate_apply.py in shard 2 (tests rely on it).
 PYTHON_SHARDS = (
+    ('tests/test_self_edit.py', 'tests/test_assistant_experience.py',
+     'tests/test_deployment_release.py', 'tests/test_candidate_tools.py',
+     'tests/test_project_repository.py', 'tests/test_authority_model.py',
+     'tests/test_engineering_providers.py', 'tests/test_planner_scope.py',
+     'tests/test_deployment.py', 'tests/test_engineering_action.py',
+     'tests/test_external_review.py', 'tests/test_experience.py', 'tests/test_agent.py',
+     'tests/test_sandbox_docker.py', 'tests/test_sandbox_imports.py'),
     ('tests/test_candidate_apply.py', 'tests/test_engineering_direct.py',
      'tests/test_owner_login.py', 'tests/test_engineering_authority.py',
-     'tests/test_direct_dev.py', 'tests/test_tools.py', 'tests/test_engineering_providers.py',
-     'tests/test_portfolio_integration.py', 'tests/test_planner_edges.py',
-     'tests/test_persistence.py', 'tests/test_external_review.py', 'tests/test_api.py',
-     'tests/test_codex_cli_provider.py', 'tests/test_sandbox_docker.py'),
-    ('tests/test_owner_readonly_flow.py', 'tests/test_self_edit.py',
-     'tests/test_deployment_release.py', 'tests/test_candidate_tools.py',
-     'tests/test_project_repository.py', 'tests/test_candidate_bridge.py', 'tests/test_recall.py',
-     'tests/test_openai_client.py', 'tests/test_deployment.py', 'tests/test_engineering_action.py',
-     'tests/test_self_state.py', 'tests/test_experience_evaluation.py', 'tests/test_registry.py',
+     'tests/test_direct_dev.py', 'tests/test_candidate_bridge.py', 'tests/test_recall.py',
+     'tests/test_portfolio_integration.py', 'tests/test_planner_edges.py', 'tests/test_brain.py',
+     'tests/test_deployment_status.py', 'tests/test_api.py', 'tests/test_codex_cli_provider.py',
      'tests/test_engineering_portfolio.py'),
-    ('tests/test_assistant_experience.py', 'tests/test_engineering_operator.py',
+    ('tests/test_owner_readonly_flow.py', 'tests/test_engineering_operator.py',
      'tests/test_engineering.py', 'tests/test_engineering_jobs.py', 'tests/test_busy_retry.py',
-     'tests/test_authority_model.py', 'tests/test_authority_acceptance.py',
-     'tests/test_planner_scope.py', 'tests/test_brain_status.py', 'tests/test_brain.py',
-     'tests/test_deployment_status.py', 'tests/test_experience.py', 'tests/test_agent.py',
-     'tests/test_deployment_browser.py', 'tests/test_sandbox_imports.py'),
+     'tests/test_tools.py', 'tests/test_authority_acceptance.py', 'tests/test_openai_client.py',
+     'tests/test_brain_status.py', 'tests/test_persistence.py', 'tests/test_self_state.py',
+     'tests/test_experience_evaluation.py', 'tests/test_registry.py',
+     'tests/test_deployment_browser.py'),
 )
 
 
